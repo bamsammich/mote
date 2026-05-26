@@ -1514,6 +1514,16 @@ dependencies = [
 [[package]]
 name = "mote-runtime"
 version = "0.0.0"
+dependencies = [
+ "mote-audit",
+ "mote-dispatch",
+ "mote-lua",
+ "mote-permissions",
+ "mote-registry",
+ "mote-storage",
+ "mote-types",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "mote-secrets"

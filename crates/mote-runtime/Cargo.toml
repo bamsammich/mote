@@ -13,3 +13,11 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-audit = { version = "0.0.0", path = "../mote-audit" }
+mote-dispatch = { version = "0.0.0", path = "../mote-dispatch" }
+mote-lua = { version = "0.0.0", path = "../mote-lua" }
+mote-permissions = { version = "0.0.0", path = "../mote-permissions" }
+mote-registry = { version = "0.0.0", path = "../mote-registry" }
+mote-storage = { version = "0.0.0", path = "../mote-storage" }
+mote-types = { version = "0.0.0", path = "../mote-types" }
+thiserror.workspace = true
