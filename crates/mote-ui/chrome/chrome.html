@@ -27,6 +27,12 @@
     <link rel="stylesheet" href="components/palette.css" />
     <link rel="stylesheet" href="components/sidebar.css" />
     <link rel="stylesheet" href="components/empty-slot.css" />
+    <!--
+      host.js: the privileged chrome↔Rust bootstrap. Wraps window.cefQuery into
+      window.mote.invoke (structured ops, never eval) and wires the omnibox to
+      the `navigate` op. Deferred so the DOM exists before it binds listeners.
+    -->
+    <script src="host.js" defer></script>
   </head>
 
   <!--
@@ -45,39 +51,10 @@
     omnibox mode are names only (ADR-0002); nothing here binds them.
   -->
   <body class="mote-root" data-theme="dusk">
-    <!-- ========================= TOP BAR ========================= -->
+    <!-- ========================= TOP BAR =========================
+      Maintainer decision (interactive-slice): the tabstrip moved to the
+      left-sidebar. The top-bar keeps the omnibox (+ inline actions). -->
     <div data-slot="top-bar">
-      <!-- tab-row: the tabstrip element nests here -->
-      <div data-slot="tab-row">
-        <div class="tabbar" role="tablist" aria-label="open tabs">
-          <div class="tab is-pinned" role="tab" aria-label="pinned">
-            <span class="favicon"></span>
-          </div>
-          <div class="tab is-active" role="tab" aria-selected="true">
-            <span class="favicon"></span>
-            <span class="title">motesh.dev — themes</span>
-            <button class="close" aria-label="close tab">×</button>
-          </div>
-          <div class="tab" role="tab" aria-selected="false">
-            <span class="load">···</span>
-            <span class="favicon"></span>
-            <span class="title">build #482 — running</span>
-            <button class="close" aria-label="close tab">×</button>
-          </div>
-          <div
-            class="tab is-hidden"
-            role="tab"
-            aria-selected="false"
-            aria-label="archive.lua (hidden)"
-          >
-            <span class="favicon"></span>
-            <span class="title">archive.lua</span>
-            <button class="close" aria-label="close tab">×</button>
-          </div>
-          <button class="new" aria-label="new tab">+</button>
-        </div>
-      </div>
-
       <!-- the urlbar element; urlbar-inline nests inside .right -->
       <form class="omnibar-row" role="search" aria-label="omnibox">
         <div class="omni mode-url">
@@ -86,10 +63,19 @@
             ><span class="br">]</span>
           </span>
           <div class="body">
-            <span class="secure" aria-label="secure connection">⎈</span>
-            <span class="host-dim">github.com/motesh/</span>
-            <span class="host">mote</span>
-            <span class="path">/blob/main/init.lua</span>
+            <span class="secure" aria-label="connection">⎈</span>
+            <!-- The editable omnibox. Submitting (Enter) invokes the `navigate`
+                 host op; host.js handles the wiring. The static host-dim/host/
+                 path coloring is a display concern deferred to Wave C. -->
+            <input
+              id="omnibox-input"
+              class="omni-input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              aria-label="address"
+              placeholder="enter a url"
+            />
             <!-- urlbar-inline: urlbar-extension elements nest here -->
             <div class="right" data-slot="urlbar-inline">
               <button class="btn btn-ghost btn-icon" aria-label="bookmark">
@@ -217,7 +203,27 @@
             <span class="sidepanel-meta">4 open · 1 hidden</span>
           </header>
           <div class="sidepanel-body">
-            <!-- TabsPanel (sidebar-panel:tabs) renders its vertical tab list here -->
+            <!--
+              tab-row: the tabstrip element nests here (maintainer decision —
+              tabs render vertically in the sidebar, not the top-bar). The
+              `theme-vertical` tabbar variant stacks the rows.
+            -->
+            <div data-slot="tab-row">
+              <div
+                id="tabstrip"
+                class="tabbar theme-vertical"
+                role="tablist"
+                aria-label="open tabs"
+              >
+                <!-- host.js rebuilds these rows from the runtime tab list. A
+                     single seed row keeps the panel non-empty before first
+                     paint. -->
+                <div class="tab is-active" role="tab" aria-selected="true">
+                  <span class="favicon"></span>
+                  <span class="title">new tab</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </aside>

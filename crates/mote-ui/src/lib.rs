@@ -52,6 +52,10 @@ pub const BASE_CSS: &str = include_str!("../chrome/base.css");
 /// The chrome document: the `[data-slot]` slot-grid scaffold (default layout).
 pub const CHROME_HTML: &str = include_str!("../chrome/chrome.html");
 
+/// The privileged chrome bootstrap JS: wraps `window.cefQuery` into the
+/// structured `window.mote.invoke` API and wires the omnibox `navigate` op.
+pub const HOST_JS: &str = include_str!("../chrome/host.js");
+
 /// Per-component stylesheets, paired `(name, css)`, in load order.
 pub const COMPONENT_CSS: &[(&str, &str)] = &[
     ("kbd", include_str!("../chrome/components/kbd.css")),
@@ -182,9 +186,13 @@ mod tests {
         // right-sidebar is declared-but-empty → empty-slot motif.
         assert!(layout.is_empty_slot(Slot::RightSidebar));
 
-        // top-bar carries tabstrip + urlbar.
-        assert!(layout.binds(Slot::TopBar, ElementKind::Tabstrip, "core"));
+        // top-bar carries the urlbar (maintainer decision: tabstrip moved to
+        // the left-sidebar; the top-bar keeps the omnibox).
         assert!(layout.binds(Slot::TopBar, ElementKind::Urlbar, "core"));
+        assert!(!layout.binds(Slot::TopBar, ElementKind::Tabstrip, "core"));
+
+        // the tabstrip now lives in the left-sidebar, alongside sidebar panels.
+        assert!(layout.binds(Slot::LeftSidebar, ElementKind::Tabstrip, "core"));
 
         // a wildcard slot binds arbitrary plugin elements of the kind.
         assert!(layout.binds(Slot::LeftSidebar, ElementKind::SidebarPanel, "git"));

@@ -27,21 +27,24 @@ impl Layout {
     }
 
     /// The `default-layout` Mote ships (`docs/plans/02-browser-shell.md` §5.2,
-    /// `spec/01`):
+    /// `spec/01`).
     ///
-    /// - `top-bar` = `{ tabstrip, urlbar }`
-    /// - `tab-row` = `{ tabstrip }` (the strip nests here)
+    /// **Maintainer decision (interactive-slice milestone):** the `tabstrip`
+    /// lives in the `left-sidebar`, not the `top-bar`. The top-bar keeps the
+    /// omnibox (and its inline extensions). This is theme-driven — a future
+    /// theme can move the tabstrip back into the `top-bar`/`tab-row`.
+    ///
+    /// - `top-bar` = `{ urlbar }`
     /// - `urlbar-inline` = `{ urlbar-extension:* }`
-    /// - `left-sidebar` = `{ sidebar-panel:* }`
+    /// - `left-sidebar` = `{ tabstrip, sidebar-panel:* }`
     /// - `bottom-bar` = `{ status-indicator:* }`
     /// - `right-sidebar` = `{}` (explicitly empty → empty-slot motif)
     #[must_use]
     pub fn default_layout() -> Self {
         let mut layout = Self::new();
-        layout.place(Slot::TopBar, refs(&["tabstrip", "urlbar"]));
-        layout.place(Slot::TabRow, refs(&["tabstrip"]));
+        layout.place(Slot::TopBar, refs(&["urlbar"]));
         layout.place(Slot::UrlbarInline, refs(&["urlbar-extension:*"]));
-        layout.place(Slot::LeftSidebar, refs(&["sidebar-panel:*"]));
+        layout.place(Slot::LeftSidebar, refs(&["tabstrip", "sidebar-panel:*"]));
         layout.place(Slot::BottomBar, refs(&["status-indicator:*"]));
         layout.place(Slot::RightSidebar, Vec::new());
         layout

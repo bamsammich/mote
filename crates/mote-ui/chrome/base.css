@@ -22,7 +22,12 @@ body {
 body {
   font: var(--text-body);
   color: var(--fg);
-  background: var(--bg);
+  /* TRANSPARENT root: the chrome is rendered by a transparent CEF OSR browser
+   * (ADR-0003 / plan §1.2) so the composited web page shows through the page
+   * cell. The root must NOT paint an opaque background, or it would cover the
+   * page. Each chrome REGION (top-bar, sidebars, bottom-bar) paints its own
+   * opaque surface below; only the page cell is a true transparent hole. */
+  background: transparent;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -33,7 +38,8 @@ body {
   display: grid;
   grid-template-rows: auto 1fr auto;
   height: 100%;
-  background: var(--bg);
+  /* Transparent (see body): the page cell shows the composited web view. */
+  background: transparent;
   color: var(--fg);
 }
 
@@ -41,6 +47,15 @@ body {
   display: grid;
   grid-template-columns: auto 1fr auto;
   min-height: 0;
+  background: transparent;
+}
+
+/* Chrome regions paint their own opaque surface so only the page cell is a
+ * transparent hole. The top-bar / bottom-bar carry the omnibox + status line;
+ * the sidebars have their own surface in sidebar.css / empty-slot.css. */
+[data-slot="top-bar"],
+[data-slot="bottom-bar"] {
+  background: var(--bg);
 }
 
 /* The page region: transparent so the compositor blits the web view through

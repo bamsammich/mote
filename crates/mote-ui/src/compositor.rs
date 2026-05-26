@@ -197,9 +197,17 @@ impl Compositor {
     /// Fails if a surface, adapter, or device cannot be acquired.
     pub fn new_for_window<W>(window: W, width: u32, height: u32) -> Result<Self, CompositorError>
     where
-        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+        W: HasWindowHandle + HasDisplayHandle + Clone + std::fmt::Debug + Send + Sync + 'static,
     {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // wgpu 29 requires the display handle on the *instance* (not just the
+        // surface) for a window-only `SurfaceTarget` — otherwise `create_surface`
+        // fails with "No `DisplayHandle` is available". The window carries both
+        // handles; clone it so one copy seeds the instance's display handle and
+        // the other backs the surface. `Clone` is cheap for the `Arc<Window>`
+        // the shell passes.
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(window.clone()),
+        ));
         // Safe in wgpu 29: the target is a `raw-window-handle` window, boxed
         // into a `SurfaceTarget::Window` — no `unsafe` block required.
         let surface = instance.create_surface(wgpu::SurfaceTarget::Window(Box::new(window)))?;
