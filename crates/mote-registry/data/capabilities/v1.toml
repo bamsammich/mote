@@ -1,0 +1,156 @@
+# Mote capability registry — schema v1.
+#
+# Machine-readable source of truth for every capability ROLE a v1 plugin may
+# fulfill, plus its contract. Embedded via `include_str!`. See DESIGN
+# §"Capability Roles", §"Critical capabilities", and §"Permission and Capability
+# Registries".
+#
+# Each `[[capability]]` declares:
+#   name           the capability term (also the `consumes`/`capabilities` token)
+#   composability  "exclusive" | "non-exclusive"
+#   dispatch       REQUIRED for non-exclusive; one of "stack" | "aggregate" |
+#                  "fan-out". Omitted/"none" for exclusive.
+#   critical       true for browser-critical-path capabilities (extended schema
+#                  deprecation windows). DESIGN: workspace:provider,
+#                  ui:urlbar_provider, ui:bookmarks_provider, ui:history_provider.
+#   description    short role summary.
+#   contract.required_api     API function names the fulfiller MUST expose in M.api
+#   contract.required_events  event-handler keys the fulfiller MUST declare in
+#                             M.events (or M.hooks for hook-shaped keys)
+#
+# Contracts are LOOSE (DESIGN §Enforcement step 3): a fulfiller MAY expose more
+# than the minimum; it MUST NOT omit required surface.
+#
+# CONTRACT-DETAIL CAVEAT: DESIGN enumerates exclusivity + dispatch shape + the
+# `critical` set precisely, but underspecifies the exact required API function
+# names / event keys for most capabilities. The `required_api` / `required_events`
+# below are this registry's v1 interpretation, derived from the worked example
+# and the prose, and are flagged for design review. They are intentionally
+# minimal so legitimate fulfillers are not over-constrained.
+
+schema = "v1"
+
+# --- exclusive, critical ----------------------------------------------------
+
+[[capability]]
+name = "workspace:provider"
+composability = "exclusive"
+critical = true
+description = "Owns workspace definition, switching, and per-workspace state."
+[capability.contract]
+required_api = ["list_workspaces", "switch_workspace"]
+required_events = ["workspaces:on_change"]
+
+[[capability]]
+name = "ui:urlbar_provider"
+composability = "exclusive"
+critical = true
+description = "Owns the urlbar: query handling and suggestion ranking. May emit urlbar:suggest for contributors."
+[capability.contract]
+required_api = ["query"]
+required_events = []
+
+[[capability]]
+name = "ui:bookmarks_provider"
+composability = "exclusive"
+critical = true
+description = "Owns bookmark storage and retrieval."
+[capability.contract]
+required_api = ["list_bookmarks", "add_bookmark", "remove_bookmark"]
+required_events = []
+
+[[capability]]
+name = "ui:history_provider"
+composability = "exclusive"
+critical = true
+description = "Owns browsing-history storage and retrieval."
+[capability.contract]
+required_api = ["query_history", "record_visit"]
+required_events = []
+
+# --- exclusive, non-critical ------------------------------------------------
+
+[[capability]]
+name = "ui:newtab_replacer"
+composability = "exclusive"
+critical = false
+description = "Replaces the new-tab page surface."
+[capability.contract]
+required_api = ["render_newtab"]
+required_events = []
+
+[[capability]]
+name = "ui:download_handler"
+composability = "exclusive"
+critical = false
+description = "Handles download lifecycle and UI."
+[capability.contract]
+required_api = ["handle_download"]
+required_events = []
+
+[[capability]]
+name = "password-manager:provider"
+composability = "exclusive"
+critical = false
+description = "The active password manager. Deliberately NOT critical (DESIGN §Critical capabilities)."
+[capability.contract]
+required_api = ["list_credentials", "fill_credential"]
+required_events = []
+
+# --- non-exclusive ----------------------------------------------------------
+
+[[capability]]
+name = "theme:provider"
+composability = "non-exclusive"
+dispatch = "stack"
+critical = false
+description = "Provides theme styling/layout. Runtime stacks stylesheets in priority order."
+[capability.contract]
+required_api = []
+required_events = []
+
+[[capability]]
+name = "adblock:rule_source"
+composability = "non-exclusive"
+dispatch = "aggregate"
+critical = false
+description = "Contributes ad-block rule sets. Runtime concatenates rule sets from all fulfillers."
+[capability.contract]
+required_api = ["rules"]
+required_events = []
+
+[[capability]]
+name = "mcp:server"
+composability = "non-exclusive"
+dispatch = "aggregate"
+critical = false
+description = "Exposes MCP tools. Tools are namespaced <plugin-name>.<tool> and aggregated at one endpoint."
+[capability.contract]
+required_api = ["tools"]
+required_events = []
+
+[[capability]]
+name = "secret:provider"
+composability = "non-exclusive"
+dispatch = "fan-out"
+critical = false
+description = "Backs the secret subsystem (typically a password manager, opt-in). Resolution is effectively singular in practice because the active fulfiller is gated by the exclusive password-manager:provider (risk B7)."
+[capability.contract]
+required_api = ["resolve_secret"]
+required_events = []
+
+# --- contract-only capability -----------------------------------------------
+# `password-manager-form-services` is a capability CONTRACT consumed by password
+# managers (DESIGN §Worked example). The fulfiller plugin is conventionally named
+# `password-manager-form-services-plugin` (risk G7); the capability is the
+# unsuffixed contract name. Non-exclusive with fan-out form events.
+
+[[capability]]
+name = "password-manager-form-services"
+composability = "non-exclusive"
+dispatch = "fan-out"
+critical = false
+description = "Form-detection and autofill-injection services consumed by password managers."
+[capability.contract]
+required_api = ["show_autofill_picker", "inject_isolated"]
+required_events = ["page:on_load"]

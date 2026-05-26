@@ -1,0 +1,72 @@
+# Mote hook/event-name registry — schema v1.
+#
+# Risk C1/G6: hook/event names are a SEPARATE namespace from permission names.
+# Some strings appear in both (e.g. `net:intercept_request` is both the
+# permission to participate AND the filter-chain hook key); others are
+# hook/event-only (`page:on_load`, `tabs:on_change`). Conformance (step 3) and
+# any future hook-key validation check `M.hooks` / `M.events` keys against THIS
+# registry, not against the permission registry.
+#
+# Embedded via `include_str!`. See DESIGN §"Plugin Dispatch and Composition"
+# (hook dispatch patterns) and the worked example.
+#
+# Each `[[event]]`:
+#   name      the event/hook key (the M.hooks / M.events table key)
+#   dispatch  "filter-chain" | "broadcast" | "collector" | "fan-out-per-origin"
+#   kind      "hook"   runtime-originated; declared in M.hooks
+#             "event"  inter-plugin bus; declared in M.events
+#   description  short note
+#
+# Capability-contract event keys (e.g. `password-manager-form-services:form-detected`)
+# are defined by their capability contract, not here; this registry covers the
+# runtime-defined hook/event vocabulary.
+
+schema = "v1"
+
+[[event]]
+name = "net:intercept_request"
+dispatch = "filter-chain"
+kind = "hook"
+description = "Request-interception filter chain. Handlers return block/modify/allow/defer."
+
+[[event]]
+name = "page:on_load"
+dispatch = "broadcast"
+kind = "hook"
+description = "Fired when a page finishes loading."
+
+[[event]]
+name = "page:inject_script"
+dispatch = "fan-out-per-origin"
+kind = "hook"
+description = "Per-origin script injection; each plugin runs in its own isolated world."
+
+[[event]]
+name = "page:inject_css"
+dispatch = "fan-out-per-origin"
+kind = "hook"
+description = "Per-origin CSS injection."
+
+[[event]]
+name = "tabs:on_change"
+dispatch = "broadcast"
+kind = "hook"
+description = "Fired when tab state changes (open/close/focus/move)."
+
+[[event]]
+name = "workspaces:on_change"
+dispatch = "broadcast"
+kind = "hook"
+description = "Fired when the active workspace or workspace set changes."
+
+[[event]]
+name = "urlbar:suggest"
+dispatch = "collector"
+kind = "event"
+description = "Collector surface emitted by the urlbar provider; contributors return suggestions the provider merges/ranks."
+
+[[event]]
+name = "events:on"
+dispatch = "broadcast"
+kind = "event"
+description = "Generic inter-plugin event-bus subscription."

@@ -1,0 +1,406 @@
+# Mote permission registry — schema v1.
+#
+# This file is the machine-readable source of truth for every permission a v1
+# plugin may declare. It is embedded into the binary at compile time via
+# `include_str!` (registries ship with the source). See DESIGN §"Permission
+# Primitives" and §"Permission and Capability Registries".
+#
+# Each `[[permission]]` entry declares one `domain:action` term and the SHAPE of
+# its optional resource segment:
+#
+#   resource = "none"     no resource segment permitted (term is `domain:action`)
+#   resource = "glob"     an optional glob resource (origin/host pattern, may be
+#                         negated with a leading `!`); absent ⇒ all-in-scope
+#   resource = "dynamic"  a REQUIRED, plugin-supplied free-form name segment whose
+#                         value the registry cannot enumerate (DESIGN risk C4).
+#                         Step-1 validates the action is known and the shape is
+#                         present; the concrete `<name>`/origin is validated later,
+#                         at grant/resolution time, against the user's config.
+#
+# `risk` is a short scrutiny note surfaced in the integrity panel / approval UI.
+#
+# DELIBERATE OMISSIONS for v1 (see docs/plans/risks-and-inconsistencies.md):
+#   * `introspect:*` is EXCLUDED (risk C2) — its enforcement lands in v0.2 and is
+#     added additively then. Declaring a no-op permission now would violate
+#     DESIGN §"Permission registry growth" (a permission requires implementation).
+
+schema = "v1"
+
+# --- net: -------------------------------------------------------------------
+
+[[permission]]
+domain = "net"
+action = "intercept_request"
+resource = "glob"
+description = "Participate in the request-interception filter chain (block/modify/allow/defer)."
+risk = "Sees every outbound request URL; deny patterns (e.g. !*.banking.com) exclude sensitive hosts."
+
+[[permission]]
+domain = "net"
+action = "read_response_body"
+resource = "glob"
+description = "Read the body of responses for matching requests."
+risk = "Exposes response content; scope tightly to the origins the plugin needs."
+
+[[permission]]
+domain = "net"
+action = "modify_response"
+resource = "glob"
+description = "Rewrite response bodies/headers for matching requests."
+risk = "Can alter page content in flight; high scrutiny for broad scopes."
+
+[[permission]]
+domain = "net"
+action = "fetch_unsigned"
+resource = "glob"
+description = "Issue network fetches that bypass the signed-request path."
+risk = "Bypasses signature checks; reserved for plugins that knowingly need it."
+
+# --- page: ------------------------------------------------------------------
+
+[[permission]]
+domain = "page"
+action = "inject_script"
+resource = "glob"
+description = "Run JavaScript in a per-plugin ISOLATED V8 world on matching pages."
+risk = "page:inject_script:* (any origin) is the HIGHEST-scrutiny page grant; prefer per-origin scopes."
+
+[[permission]]
+domain = "page"
+action = "inject_unsafe_script"
+resource = "glob"
+description = "Run JavaScript in the PAGE's own world (no isolation). Web-compat shims only."
+risk = "Red-flagged in the approval UI; the page can observe/hijack the script. Rarely justified."
+
+[[permission]]
+domain = "page"
+action = "inject_css"
+resource = "glob"
+description = "Inject stylesheets into matching pages."
+risk = "Visual-only; lowest scrutiny of the page actions."
+
+[[permission]]
+domain = "page"
+action = "read_dom"
+resource = "glob"
+description = "Read the DOM tree of matching pages."
+risk = "Reads page content; combined with mcp:server it exposes page content to external agents (see combinations)."
+
+# --- tabs: ------------------------------------------------------------------
+
+[[permission]]
+domain = "tabs"
+action = "list"
+resource = "none"
+description = "Enumerate open tabs."
+risk = "Reveals browsing surface (tab URLs/titles)."
+
+[[permission]]
+domain = "tabs"
+action = "focus"
+resource = "none"
+description = "Focus a specific tab."
+risk = "Can steal focus; low risk."
+
+[[permission]]
+domain = "tabs"
+action = "create"
+resource = "none"
+description = "Open new tabs."
+risk = "Can open arbitrary URLs; moderate risk."
+
+[[permission]]
+domain = "tabs"
+action = "close"
+resource = "none"
+description = "Close tabs."
+risk = "Destructive to user navigation state."
+
+[[permission]]
+domain = "tabs"
+action = "get_history"
+resource = "none"
+description = "Read a tab's back/forward navigation history."
+risk = "Reveals per-tab navigation trail."
+
+[[permission]]
+domain = "tabs"
+action = "reveal"
+resource = "none"
+description = "Reveal a hidden tab into a window's tab strip."
+risk = "Low risk; surfaces existing tabs."
+
+[[permission]]
+domain = "tabs"
+action = "modify_state"
+resource = "none"
+description = "Change a tab's state (move between workspaces, pin, hide)."
+risk = "Mutates user navigation/workspace layout."
+
+# --- workspaces: ------------------------------------------------------------
+
+[[permission]]
+domain = "workspaces"
+action = "list"
+resource = "none"
+description = "Enumerate workspaces."
+risk = "Reveals workspace structure."
+
+[[permission]]
+domain = "workspaces"
+action = "switch"
+resource = "none"
+description = "Switch the active workspace."
+risk = "Changes user context; moderate."
+
+# --- identity: --------------------------------------------------------------
+
+[[permission]]
+domain = "identity"
+action = "read_current"
+resource = "none"
+description = "Read the currently active identity."
+risk = "Reveals which identity profile is active."
+
+[[permission]]
+domain = "identity"
+action = "list"
+resource = "none"
+description = "Enumerate configured identities."
+risk = "Reveals all identity profiles."
+
+[[permission]]
+domain = "identity"
+action = "create"
+resource = "none"
+description = "Create a new identity."
+risk = "Mutates the identity set."
+
+# --- storage: ---------------------------------------------------------------
+
+[[permission]]
+domain = "storage"
+action = "persistent"
+resource = "none"
+description = "Durable key/value storage in the plugin's own namespace (always scoped)."
+risk = "Plugin-namespaced; cannot read other plugins' storage."
+
+[[permission]]
+domain = "storage"
+action = "memory"
+resource = "none"
+description = "Volatile in-memory storage in the plugin's own namespace."
+risk = "Volatile; cleared on reload."
+
+# --- session: ---------------------------------------------------------------
+
+[[permission]]
+domain = "session"
+action = "manage_hidden"
+resource = "none"
+description = "Manage hidden-tab lifecycle (hold, TTL aging) within a workspace."
+risk = "Affects session retention behavior."
+
+[[permission]]
+domain = "session"
+action = "exclude_forms"
+resource = "none"
+description = "Mark forms whose draft contents are excluded from session capture."
+risk = "Privacy-positive; lets a plugin keep sensitive form drafts out of session storage."
+
+# --- bookmarks: -------------------------------------------------------------
+
+[[permission]]
+domain = "bookmarks"
+action = "read"
+resource = "none"
+description = "Read bookmarks."
+risk = "Reveals saved bookmarks."
+
+[[permission]]
+domain = "bookmarks"
+action = "write"
+resource = "none"
+description = "Create or modify bookmarks."
+risk = "Mutates the bookmark store."
+
+# --- history: ---------------------------------------------------------------
+
+[[permission]]
+domain = "history"
+action = "read"
+resource = "none"
+description = "Read browsing history."
+risk = "Reveals full browsing history; sensitive."
+
+[[permission]]
+domain = "history"
+action = "write"
+resource = "none"
+description = "Add entries to browsing history."
+risk = "Mutates history."
+
+[[permission]]
+domain = "history"
+action = "delete"
+resource = "none"
+description = "Delete browsing-history entries."
+risk = "Destructive to history."
+
+# --- config: ----------------------------------------------------------------
+
+[[permission]]
+domain = "config"
+action = "read"
+resource = "none"
+description = "Read the user's Mote configuration."
+risk = "Reveals user config. Note: there is intentionally no config:write."
+
+[[permission]]
+domain = "config"
+action = "watch"
+resource = "none"
+description = "Be notified when the user's configuration changes."
+risk = "Observational; low risk."
+
+# --- ui: --------------------------------------------------------------------
+
+[[permission]]
+domain = "ui"
+action = "sidebar"
+resource = "none"
+description = "Register a sidebar-panel element."
+risk = "UI surface; placement decided by the active theme."
+
+[[permission]]
+domain = "ui"
+action = "panel"
+resource = "none"
+description = "Register a panel element."
+risk = "UI surface."
+
+[[permission]]
+domain = "ui"
+action = "action_button"
+resource = "none"
+description = "Register an action-button element."
+risk = "UI surface."
+
+[[permission]]
+domain = "ui"
+action = "urlbar_extension"
+resource = "none"
+description = "Register an inline urlbar-extension element."
+risk = "UI surface inside the urlbar."
+
+# --- keys: ------------------------------------------------------------------
+
+[[permission]]
+domain = "keys"
+action = "bind"
+resource = "none"
+description = "Bind keyboard shortcuts to plugin actions."
+risk = "Can shadow user keybindings; user config wins on conflict."
+
+[[permission]]
+domain = "keys"
+action = "intercept_input"
+resource = "none"
+description = "Intercept raw keyboard input (e.g. modal/vim-style modes)."
+risk = "Sees keystrokes; high scrutiny."
+
+# --- crypto: ----------------------------------------------------------------
+
+[[permission]]
+domain = "crypto"
+action = "seal_to_plugin"
+resource = "none"
+description = "Seal data so only this plugin's namespace can later unseal it."
+risk = "Crypto primitive; data is bound to the plugin namespace."
+
+# --- sys: -------------------------------------------------------------------
+# DESIGN writes `sys: ... clipboard:read, clipboard:write ...` which collides
+# with the domain:action[:resource] grammar (risk C3). Encoded here as single
+# action tokens `clipboard_read` / `clipboard_write`.
+
+[[permission]]
+domain = "sys"
+action = "native_message"
+resource = "none"
+description = "Exchange messages with a native host application."
+risk = "HARDEST-gated permission: requires per-invocation user confirmation or explicit allowlisting in user config."
+
+[[permission]]
+domain = "sys"
+action = "clipboard_read"
+resource = "none"
+description = "Read the system clipboard."
+risk = "Reads clipboard contents; high scrutiny."
+
+[[permission]]
+domain = "sys"
+action = "clipboard_write"
+resource = "none"
+description = "Write to the system clipboard."
+risk = "Can overwrite clipboard contents."
+
+[[permission]]
+domain = "sys"
+action = "notify"
+resource = "none"
+description = "Show an OS-level notification (plugin-initiated)."
+risk = "Low risk; distinct from page Web Notifications."
+
+# --- events: ----------------------------------------------------------------
+
+[[permission]]
+domain = "events"
+action = "emit"
+resource = "none"
+description = "Emit events onto the inter-plugin event bus."
+risk = "Notifications only; events never transfer permissions."
+
+[[permission]]
+domain = "events"
+action = "on"
+resource = "none"
+description = "Subscribe to events on the inter-plugin event bus (via declarative M.events)."
+risk = "Observational; events never transfer permissions."
+
+# --- http: ------------------------------------------------------------------
+
+[[permission]]
+domain = "http"
+action = "fetch"
+resource = "glob"
+description = "Make outbound HTTP(S)/WS fetches to matching origins."
+risk = "http:fetch:* reaches any origin including localhost; prefer narrow origin scopes."
+
+# --- mcp: -------------------------------------------------------------------
+# `mcp:client:<server-name>` (risk C4): the `<server-name>` is plugin-supplied
+# and not enumerable, so the action takes a DYNAMIC resource segment.
+
+[[permission]]
+domain = "mcp"
+action = "client"
+resource = "dynamic"
+description = "Call out to a named external MCP server. The <server-name> resource is plugin-supplied."
+risk = "Outbound MCP connection; the concrete server name is validated at resolution time."
+
+[[permission]]
+domain = "mcp"
+action = "server"
+resource = "glob"
+description = "Bind an MCP server endpoint. Use the bind_loopback / bind_public resource forms."
+risk = "Exposes browser-side MCP tools; bind_public is high scrutiny (reachable off-host)."
+
+# --- secret: ----------------------------------------------------------------
+# `secret:read:<name>` (risk C4): the `<name>` is plugin-supplied and resolved
+# from the user's secrets.lua backend at grant time, so it is DYNAMIC.
+
+[[permission]]
+domain = "secret"
+action = "read"
+resource = "dynamic"
+description = "Resolve one named secret from the user's configured backend. The <name> resource is plugin-supplied."
+risk = "Plugins never see raw keys; they request a named value resolved by the backend."

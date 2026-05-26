@@ -13,3 +13,9 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-lua = { version = "0.0.0", path = "../mote-lua" }
+mote-permissions = { version = "0.0.0", path = "../mote-permissions" }
+mote-types = { version = "0.0.0", path = "../mote-types" }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror.workspace = true
+toml = "1.1.2"

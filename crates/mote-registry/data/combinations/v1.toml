@@ -1,0 +1,20 @@
+# Mote dangerous-combination registry — schema v1.
+#
+# DISCIPLINES §4: some permission COMBINATIONS create capabilities neither
+# permission has alone. The install dialog surfaces these above the per-permission
+# list. Missing entries don't block install; they're added as discovered.
+#
+# Embedded via `include_str!`. Each `[[combination]]`:
+#   permissions  list of domain:action terms that, together, are dangerous
+#   severity     "warn" | "danger"
+#   warning      text shown in the approval UI
+#
+# Matching is by `domain:action` (resource-independent): a plugin triggers the
+# combination if it requests every listed term (at any resource scope).
+
+schema = "v1"
+
+[[combination]]
+permissions = ["page:read_dom", "mcp:server"]
+severity = "danger"
+warning = "This plugin can read page content from any tab AND expose it to external agents over MCP. Together these let an outside agent read everything you browse — neither permission alone implies that."
