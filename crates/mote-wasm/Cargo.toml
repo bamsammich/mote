@@ -13,3 +13,8 @@ publish = false
 workspace = true
 
 [dependencies]
+thiserror.workspace = true
+wasmtime = "45.0.0"
+
+[dev-dependencies]
+wat = "1.250.0"

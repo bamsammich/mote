@@ -13,3 +13,9 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-types = { version = "0.0.0", path = "../mote-types" }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
