@@ -109,11 +109,53 @@ impl FrameSlot {
     }
 }
 
-/// The fixed off-screen viewport size reported to CEF via `view_rect`.
-#[derive(Debug, Clone, Copy)]
+/// The off-screen viewport size reported to CEF via `view_rect`.
+///
+/// Held behind an `Arc` of two atomics so the owning [`crate::Page`] can update
+/// it on a window resize and the (possibly other-thread) render handler reads
+/// the live value each time CEF queries `view_rect`. The `Page` then calls
+/// `host.was_resized()` to make CEF re-query and re-paint at the new size.
+#[derive(Debug, Clone)]
 pub(crate) struct ViewSize {
-    pub(crate) width: i32,
-    pub(crate) height: i32,
+    inner: Arc<ViewSizeInner>,
+}
+
+#[derive(Debug)]
+struct ViewSizeInner {
+    width: std::sync::atomic::AtomicI32,
+    height: std::sync::atomic::AtomicI32,
+}
+
+impl ViewSize {
+    /// A new shared size starting at `width`×`height`.
+    pub(crate) fn new(width: i32, height: i32) -> Self {
+        Self {
+            inner: Arc::new(ViewSizeInner {
+                width: std::sync::atomic::AtomicI32::new(width),
+                height: std::sync::atomic::AtomicI32::new(height),
+            }),
+        }
+    }
+
+    /// The current width (read by `view_rect`).
+    pub(crate) fn width(&self) -> i32 {
+        self.inner.width.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The current height (read by `view_rect`).
+    pub(crate) fn height(&self) -> i32 {
+        self.inner.height.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Update the size (the `Page` calls this on resize, then `was_resized()`).
+    pub(crate) fn set(&self, width: i32, height: i32) {
+        self.inner
+            .width
+            .store(width, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .height
+            .store(height, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,8 +179,8 @@ wrap_render_handler! {
                 if let Some(r) = rect {
                     r.x = 0;
                     r.y = 0;
-                    r.width = self.state.size.width;
-                    r.height = self.state.size.height;
+                    r.width = self.state.size.width();
+                    r.height = self.state.size.height();
                 }
             });
         }
@@ -368,13 +410,13 @@ wrap_client! {
 pub(crate) fn build_client(
     size: ViewSize,
     interceptor: Arc<dyn ResourceInterceptor>,
-) -> (Client, FrameSlot, NavState) {
+) -> (Client, FrameSlot, NavState, ViewSize) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
 
     let render = RenderHandlerImpl::new(RenderState {
         slot: slot.clone(),
-        size,
+        size: size.clone(),
     });
     let load = LoadHandlerImpl::new(LoadState { nav: nav.clone() });
     let request = RequestHandlerImpl::new(InterceptState { interceptor });
@@ -385,7 +427,7 @@ pub(crate) fn build_client(
         request,
     });
 
-    (client, slot, nav)
+    (client, slot, nav, size)
 }
 
 // ---------------------------------------------------------------------------

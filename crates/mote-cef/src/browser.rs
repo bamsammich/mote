@@ -81,6 +81,9 @@ pub struct Page {
     browser: Browser,
     frame: FrameSlot,
     nav: NavState,
+    /// The shared OSR viewport size CEF reads via `view_rect`. Updated by
+    /// [`Page::notify_resized`], which then asks CEF to re-query and re-paint.
+    size: ViewSize,
     role: PageRole,
     /// Set to `true` once [`Page::close`] has been called so that the [`Drop`]
     /// impl does not issue a second `close_browser` to an already-closing host.
@@ -166,17 +169,18 @@ impl Page {
         interceptor: Arc<dyn ResourceInterceptor>,
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
-        let size = ViewSize {
-            width: options.width.cast_signed(),
-            height: options.height.cast_signed(),
-        };
-        let (client, frame, nav) = ffi::build_client(size, interceptor);
-        let browser = create_browser(url, options.frame_rate, client, profile)?;
+        let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
+        let (client, frame, nav, size) = ffi::build_client(size, interceptor);
+        // Chrome pages are transparent so the composited page shows through;
+        // content pages are opaque.
+        let transparent = options.role == PageRole::Chrome;
+        let browser = create_browser(url, options.frame_rate, client, profile, transparent)?;
 
         Ok(Self {
             browser,
             frame,
             nav,
+            size,
             role: options.role,
             closed: AtomicBool::new(false),
         })
@@ -320,6 +324,21 @@ impl Page {
         }
     }
 
+    /// Resize this off-screen browser's surface to `width`×`height` pixels.
+    ///
+    /// Updates the size CEF reads via the render handler's `view_rect`, then
+    /// calls `CefBrowserHost::WasResized` so CEF re-queries the rect and repaints
+    /// at the new size (the next [`Page::latest_frame`] is the resized frame).
+    /// The host layer (mote-shell) calls this when the window — and thus the
+    /// chrome (full-window) or content (viewport) region — changes size. No-op if
+    /// the browser is closing/closed.
+    pub fn notify_resized(&self, width: u32, height: u32) {
+        self.size.set(width.cast_signed(), height.cast_signed());
+        if let Some(host) = self.browser.host() {
+            host.was_resized();
+        }
+    }
+
     /// Request that CEF close this browser. Idempotent — safe to call more than
     /// once; subsequent calls are no-ops. After calling, pump the engine a few
     /// times so CEF can tear down the host before [`crate::Engine::shutdown`].
@@ -350,11 +369,18 @@ impl Drop for Page {
 /// Create an off-screen CEF browser for `url` with the given `client`, rooted in
 /// the global request context (`profile = None`) or a profile's context. Shared
 /// by [`Page`] and [`ChromePage`] so both go through one creation call.
+///
+/// `transparent` controls the OSR background alpha. The **chrome** browser must
+/// be transparent (ADR-0003 / plan §1.2): its `<main>` page region is
+/// `background: transparent`, so a 0-alpha browser background lets the
+/// composited web page show through. **Content** browsers stay opaque so a page
+/// with no `<body>` background still paints solid (no see-through page).
 fn create_browser(
     url: &str,
     frame_rate: i32,
     mut client: Client,
     profile: Option<&ProfileHandle>,
+    transparent: bool,
 ) -> Result<Browser> {
     let window_info = WindowInfo {
         windowless_rendering_enabled: 1,
@@ -362,6 +388,13 @@ fn create_browser(
     };
     let browser_settings = BrowserSettings {
         windowless_frame_rate: frame_rate,
+        // CEF background_color is ARGB. Alpha 0 ⇒ transparent OSR surface (the
+        // chrome lets the page show through); any opaque value ⇒ solid.
+        background_color: if transparent {
+            0x0000_0000
+        } else {
+            0xFFFF_FFFF
+        },
         ..Default::default()
     };
 
@@ -434,20 +467,26 @@ impl ChromePageRequest {
     /// [`crate::HostBridge::for_chrome`] calls this, so the router can never be
     /// attached to a content browser.
     pub(crate) fn open(self, router: Arc<BrowserSideRouter>) -> Result<ChromePage> {
-        let size = ViewSize {
-            width: self.width.cast_signed(),
-            height: self.height.cast_signed(),
-        };
+        let size = ViewSize::new(self.width.cast_signed(), self.height.cast_signed());
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav) = ffi::build_client(size, Arc::new(AllowAll));
+        let (inner, frame, nav, size) = ffi::build_client(size, Arc::new(AllowAll));
         let client = bridge::chrome_client(inner, router);
-        let browser = create_browser(&self.url, self.frame_rate, client, self.profile.as_ref())?;
+        // The chrome browser is always transparent (the page composites through
+        // its `<main>` region).
+        let browser = create_browser(
+            &self.url,
+            self.frame_rate,
+            client,
+            self.profile.as_ref(),
+            true,
+        )?;
         Ok(ChromePage(Page {
             browser,
             frame,
             nav,
+            size,
             role: PageRole::Chrome,
             closed: AtomicBool::new(false),
         }))
