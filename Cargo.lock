@@ -1467,6 +1467,12 @@ version = "0.0.0"
 [[package]]
 name = "mote-dispatch"
 version = "0.0.0"
+dependencies = [
+ "mote-audit",
+ "mote-lua",
+ "mote-types",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "mote-lua"

@@ -13,3 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-audit = { path = "../mote-audit" }
+mote-lua = { path = "../mote-lua" }
+mote-types = { path = "../mote-types" }
+thiserror.workspace = true
