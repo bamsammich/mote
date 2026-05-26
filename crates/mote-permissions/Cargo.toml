@@ -13,3 +13,5 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-types = { path = "../mote-types" }
+thiserror = { workspace = true }
