@@ -9,6 +9,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Throwaway evaluation prototypes; not part of the product build.
+exclude = ["spikes"]
 
 # Metadata inherited by member crates via `field.workspace = true`.
 [workspace.package]

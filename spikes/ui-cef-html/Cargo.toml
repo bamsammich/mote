@@ -1,0 +1,30 @@
+# Standalone throwaway spike — empty [workspace] keeps it out of the repo workspace.
+[workspace]
+
+[package]
+name = "ui-cef-html-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# CPU on_paint OSR path: deterministic BGRA readback, no ANGLE/shared-texture
+# dependency. This is the realistic Linux v0.1 fallback per the CEF research.
+[dependencies]
+cef = "148"
+wgpu = "29"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+
+[[bin]]
+name = "ui-cef-html-spike"
+path = "src/main.rs"
+
+# CEF re-execs the SAME-shaped helper for renderer/gpu/utility subprocesses.
+[[bin]]
+name = "ui-cef-html-spike_helper"
+path = "src/bin/helper.rs"
+
+[profile.release]
+opt-level = 3

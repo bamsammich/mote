@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en" data-theme="dusk">
+<head>
+<meta charset="utf-8" />
+<title>Mote chrome</title>
+<style>
+/* ============================================================
+   Mote design tokens as CSS custom properties (spec/03_tokens.md).
+   This is the SPEC's native vocabulary — no translation layer.
+   A theme switch is just rewriting these vars under [data-theme].
+   ============================================================ */
+:root,
+[data-theme="dusk"] {
+  /* ink scale */
+  --ink-900:#0E0C0A; --ink-800:#14110F; --ink-700:#1C1815;
+  --ink-600:#241F1B; --ink-500:#2E2823; --ink-400:#3A332D;
+  --ink-300:#5C544B; --ink-200:#8A8278; --ink-100:#B5AEA3;
+  /* accents */
+  --amber:#E0A458; --amber-soft:#F1C893; --amber-deep:#B47C36;
+  --ember:#C84A2C; --moss:#6B8E4E; --plum:#8E6FA0; --dusk-blue:#5B7CA3;
+  /* semantic */
+  --bg:var(--ink-800);
+  --surface-1:var(--ink-700);
+  --surface-2:var(--ink-600);
+  --surface-3:var(--ink-500);
+  --surface-sunk:var(--ink-900);
+  --border:var(--ink-500);
+  --border-strong:var(--ink-400);
+  --border-subtle:var(--ink-600);
+  --fg:#ECE5D8; --fg-1:#C9C0B0; --fg-2:var(--ink-200); --fg-3:var(--ink-300);
+  --accent:var(--amber); --accent-soft:var(--amber-soft);
+  --accent-deep:var(--amber-deep); --accent-on:var(--ink-900);
+  --success:var(--moss); --danger:var(--ember); --info:var(--dusk-blue);
+  --special:var(--plum); --focus:var(--amber);
+  /* spacing */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  /* radius */
+  --radius-1:2px; --radius-2:4px; --radius-3:6px;
+  /* layout */
+  --chrome-tabbar:40px; --chrome-omnibox:36px; --sidebar-w:280px;
+  /* type */
+  --font-sans:"Geist","Noto Sans",system-ui,sans-serif;
+  --font-mono:"JetBrainsMono Nerd Font","JetBrains Mono",monospace;
+}
+
+* { box-sizing:border-box; margin:0; padding:0; }
+html,body { width:100%; height:100%; }
+body {
+  background:transparent;          /* chrome composites OVER the page texture */
+  color:var(--fg);
+  font-family:var(--font-sans);
+  font-size:14px;
+  -webkit-font-smoothing:antialiased;
+  display:grid;
+  grid-template-rows:var(--chrome-tabbar) var(--chrome-omnibox) 1fr;
+  grid-template-columns:var(--sidebar-w) 1fr;
+  grid-template-areas:
+    "tabbar  tabbar"
+    "omnibox omnibox"
+    "sidebar viewport";
+}
+
+/* ---------------- tab strip (spec/components/tabs.md) ---------------- */
+.tabbar {
+  grid-area:tabbar;
+  height:var(--chrome-tabbar);
+  background:var(--surface-1);
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:stretch;
+}
+.tab {
+  display:flex; align-items:center; gap:var(--space-2);
+  padding:0 var(--space-3);
+  min-width:150px; max-width:200px;
+  font-family:var(--font-mono); font-size:11px;
+  color:var(--fg-2);
+  border-right:1px solid var(--border);
+  border-top:2px solid transparent;
+  position:relative;
+}
+.tab.is-active {
+  background:var(--bg); color:var(--fg);
+  border-top:2px solid var(--accent);
+}
+.tab .favicon { width:10px; height:10px; border-radius:50%;
+  background:var(--fg-3); flex:0 0 auto; }
+.tab.is-active .favicon { background:var(--accent); }
+.tab .title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tab .close { margin-left:auto; color:var(--fg-3); font-size:13px;
+  background:none; border:none; cursor:pointer; visibility:hidden; }
+.tab.is-active .close { visibility:visible; }
+.tabbar .new { width:32px; color:var(--fg-2); background:none; border:none;
+  border-right:1px solid var(--border); font-size:16px; cursor:pointer; }
+
+/* ---------------- omnibox (spec/components/omnibox.md) ---------------- */
+.omnibar {
+  grid-area:omnibox;
+  height:var(--chrome-omnibox);
+  background:var(--surface-1);
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:var(--space-2);
+  padding:0 var(--space-2);
+}
+.omni {
+  flex:1; height:28px; display:flex; align-items:center;
+  background:var(--surface-sunk);
+  border:1px solid var(--accent);                /* is-focused */
+  border-radius:var(--radius-1);
+  box-shadow:0 0 0 2px rgba(224,164,88,0.18);    /* focus ring */
+  font-family:var(--font-mono); font-size:13px;
+  overflow:hidden;
+}
+.omni .mode { padding:0 10px; color:var(--accent);
+  background:var(--surface-1); align-self:stretch; display:flex;
+  align-items:center; border-right:1px solid var(--border); }
+.omni .mode .br { color:var(--accent); }
+.omni .mode .name { color:var(--fg-1); }
+.omni .body { display:flex; align-items:center; gap:6px; padding:0 10px; flex:1; }
+.omni .secure { color:var(--success); }
+.omni .host-dim { color:var(--fg-3); }
+.omni .host { color:var(--fg); }
+.omni .path { color:var(--fg-2); }
+.omni .right { margin-left:auto; color:var(--fg-2); letter-spacing:4px; }
+.omni-btn { width:28px; height:28px; color:var(--fg-2);
+  background:var(--surface-1); border:1px solid var(--border-strong);
+  border-bottom-width:2px; border-radius:var(--radius-1); cursor:pointer; }
+
+/* ---------------- sidebar (spec/components/sidebar.md) ---------------- */
+.sidebar {
+  grid-area:sidebar;
+  background:var(--surface-1);
+  border-right:1px solid var(--border);
+  padding:var(--space-3);
+  display:flex; flex-direction:column; gap:var(--space-3);
+}
+.sidepanel-head {
+  font-family:var(--font-mono); font-size:11px; color:var(--fg-2);
+  padding-bottom:var(--space-2); border-bottom:1px solid var(--border);
+}
+.sidepanel-head .br { color:var(--accent); }
+.sidepanel-head .name { color:var(--fg); }
+
+/* card (spec/components/card.md) + badge + button */
+.card {
+  background:var(--surface-1);
+  border:1px solid var(--border);
+  border-radius:var(--radius-2);
+  padding:var(--space-3);
+  display:flex; flex-direction:column; gap:var(--space-2);
+}
+.card .head { display:flex; align-items:center; gap:var(--space-2); }
+.card .plugin-name { font-family:var(--font-mono); font-size:13px; color:var(--fg); }
+.card .version { font-family:var(--font-mono); font-size:11px; color:var(--fg-2); }
+
+.badge {
+  display:inline-flex; align-items:center; gap:6px;
+  height:20px; padding:0 8px; margin-left:auto;
+  font-family:var(--font-mono); font-size:10px;
+  text-transform:lowercase; letter-spacing:0.02em;
+  border:1px solid var(--border); border-radius:var(--radius-1);
+  background:var(--surface-1); color:var(--fg-1);
+}
+.badge.success { color:var(--success); border-color:rgba(107,142,78,0.3); }
+.badge .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+.perms { display:flex; flex-direction:column; gap:4px; margin:var(--space-1) 0; }
+.perm { font-family:var(--font-mono); font-size:11px; color:var(--fg-1);
+  display:flex; gap:6px; align-items:baseline; }
+.perm .glyph { color:var(--success); }
+
+.btn-row { display:flex; gap:var(--space-2); margin-top:var(--space-1); }
+.btn {
+  height:30px; padding:0 14px; font-size:12px; font-weight:500;
+  border:1px solid var(--border); border-bottom-width:2px;
+  border-radius:var(--radius-1); background:var(--surface-1);
+  color:var(--fg); cursor:pointer;
+}
+.btn-danger { background:transparent; color:var(--danger);
+  border-color:rgba(200,74,44,0.4); }
+.btn-secondary { background:var(--surface-1); color:var(--fg);
+  border-color:var(--border-strong); }
+
+/* viewport area is transparent — the page OSR texture shows through */
+.viewport { grid-area:viewport; }
+</style>
+</head>
+<body>
+  <div class="tabbar" data-slot="tab_bar">
+    <div class="tab is-active">
+      <span class="favicon"></span>
+      <span class="title">motesh.dev — themes</span>
+      <button class="close" aria-label="close tab">×</button>
+    </div>
+    <div class="tab">
+      <span class="favicon"></span>
+      <span class="title">build #482 — running</span>
+    </div>
+    <div class="tab">
+      <span class="favicon"></span>
+      <span class="title">1Password</span>
+    </div>
+    <button class="new" aria-label="new tab">+</button>
+  </div>
+
+  <div class="omnibar" data-slot="omnibox">
+    <div class="omni mode-url is-focused" role="search">
+      <span class="mode"><span class="br">[</span><span class="name">url</span><span class="br">]</span></span>
+      <div class="body">
+        <span class="secure">⎈</span>
+        <span class="host-dim">github.com/motesh/</span>
+        <span class="host">mote</span>
+        <span class="path">/blob/main/init.lua</span>
+        <span class="right">★ ▣</span>
+      </div>
+    </div>
+    <button class="omni-btn" aria-label="bookmark">★</button>
+    <button class="omni-btn" aria-label="reader">▣</button>
+  </div>
+
+  <aside class="sidebar" data-slot="sidebar" aria-label="sidebar">
+    <header class="sidepanel-head">
+      <span class="br">[</span><span class="name">Browser Integrity</span><span class="br">]</span>
+    </header>
+    <div class="card" id="integrity-card">
+      <div class="head">
+        <span class="plugin-name">password-manager-1password</span>
+        <span class="badge success"><span class="dot"></span>verified</span>
+      </div>
+      <span class="version">v1.0.0</span>
+      <div class="perms" id="perms">
+        <div class="perm"><span class="glyph">✓</span>http:fetch:https://*.1password.com/*</div>
+        <div class="perm"><span class="glyph">✓</span>dom:read:input[type=password]</div>
+        <div class="perm"><span class="glyph">✓</span>storage:local:vault-cache</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-danger">Revoke</button>
+        <button class="btn btn-secondary">Update</button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="viewport" data-slot="viewport"></div>
+</body>
+</html>
