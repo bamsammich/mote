@@ -86,3 +86,44 @@ pub fn bootstrap() -> ProcessRole {
         ProcessRole::Subprocess { exit_code: ret }
     }
 }
+
+/// Like [`bootstrap`], but installs the **host-bridge** renderer handler in CEF
+/// subprocesses, gated to `chrome_url` (ADR-0005 isolation layer 1).
+///
+/// Use this entry point instead of [`bootstrap`] whenever the app will create a
+/// [`crate::HostBridge`]. The renderer-side router that installs
+/// `window.cefQuery` runs in a CEF *subprocess*, so the gating
+/// `RenderProcessHandler` must be installed via the `App` passed to
+/// `execute_process` here — not only via [`crate::Engine::init`] in the browser
+/// process. Pass the **same** `chrome_url` to both this function and
+/// [`crate::EngineConfig::chrome_url`]; that single URL is the only document the
+/// privileged binding is ever installed for.
+///
+/// Returns the same [`ProcessRole`] contract as [`bootstrap`]: in a subprocess,
+/// `execute_process` has already run the gated renderer loop — exit immediately.
+#[must_use]
+pub fn bootstrap_with_bridge(chrome_url: &str) -> ProcessRole {
+    let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
+
+    let args = Args::new();
+    let is_browser = args
+        .as_cmd_line()
+        .is_none_or(|cmd| cmd.has_switch(Some(&cef::CefString::from("type"))) != 1);
+
+    // Install the gated host-bridge App so the renderer subprocess registers the
+    // URL-gated RenderProcessHandler. The gate makes installing the binding
+    // without the chrome-URL check impossible — there is no ungated app.
+    let mut app = crate::bridge::render_process_app(chrome_url);
+    let ret = execute_process(
+        Some(args.as_main_args()),
+        Some(&mut app),
+        std::ptr::null_mut(),
+    );
+
+    if is_browser {
+        debug_assert_eq!(ret, -1, "browser process: execute_process must return -1");
+        ProcessRole::Browser
+    } else {
+        ProcessRole::Subprocess { exit_code: ret }
+    }
+}

@@ -16,11 +16,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use cef::wrapper::message_router::BrowserSideRouter;
 use cef::{
-    Browser, BrowserSettings, CefString, ImplBrowser, ImplBrowserHost, ImplFrame, WindowInfo,
-    browser_host_create_browser_sync,
+    Browser, BrowserSettings, CefString, Client, ImplBrowser, ImplBrowserHost, ImplFrame,
+    WindowInfo, browser_host_create_browser_sync,
 };
 
+use crate::bridge;
 use crate::error::{CefError, Result};
 use crate::ffi::{self, FrameSlot, NavState, ViewSize};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
@@ -168,37 +170,8 @@ impl Page {
             width: options.width.cast_signed(),
             height: options.height.cast_signed(),
         };
-        let (mut client, frame, nav) = ffi::build_client(size, interceptor);
-
-        let window_info = WindowInfo {
-            windowless_rendering_enabled: 1,
-            ..Default::default()
-        };
-        let browser_settings = BrowserSettings {
-            windowless_frame_rate: options.frame_rate,
-            ..Default::default()
-        };
-
-        // A closure so the global and profile-bound paths share one creation call;
-        // the request context (if any) is borrowed only for the duration here.
-        let mut make = |request_context: Option<&mut cef::RequestContext>| {
-            browser_host_create_browser_sync(
-                Some(&window_info),
-                Some(&mut client),
-                Some(&CefString::from(url)),
-                Some(&browser_settings),
-                None,
-                request_context,
-            )
-        };
-
-        let browser = match profile {
-            Some(p) => p.with_context(|ctx| make(Some(ctx))),
-            None => make(None),
-        }
-        .ok_or_else(|| CefError::BrowserCreate {
-            url: url.to_string(),
-        })?;
+        let (client, frame, nav) = ffi::build_client(size, interceptor);
+        let browser = create_browser(url, options.frame_rate, client, profile)?;
 
         Ok(Self {
             browser,
@@ -371,6 +344,130 @@ impl Drop for Page {
     /// closed page is a no-op here.
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Create an off-screen CEF browser for `url` with the given `client`, rooted in
+/// the global request context (`profile = None`) or a profile's context. Shared
+/// by [`Page`] and [`ChromePage`] so both go through one creation call.
+fn create_browser(
+    url: &str,
+    frame_rate: i32,
+    mut client: Client,
+    profile: Option<&ProfileHandle>,
+) -> Result<Browser> {
+    let window_info = WindowInfo {
+        windowless_rendering_enabled: 1,
+        ..Default::default()
+    };
+    let browser_settings = BrowserSettings {
+        windowless_frame_rate: frame_rate,
+        ..Default::default()
+    };
+
+    // A closure so the global and profile-bound paths share one creation call;
+    // the request context (if any) is borrowed only for the duration here.
+    let mut make = |request_context: Option<&mut cef::RequestContext>| {
+        browser_host_create_browser_sync(
+            Some(&window_info),
+            Some(&mut client),
+            Some(&CefString::from(url)),
+            Some(&browser_settings),
+            None,
+            request_context,
+        )
+    };
+
+    match profile {
+        Some(p) => p.with_context(|ctx| make(Some(ctx))),
+        None => make(None),
+    }
+    .ok_or_else(|| CefError::BrowserCreate {
+        url: url.to_string(),
+    })
+}
+
+/// A request to open the **privileged chrome page** — the only thing
+/// [`crate::HostBridge::for_chrome`] accepts.
+///
+/// Its mere existence asserts the page is chrome: [`ChromePageRequest::new`] is
+/// the only constructor and it forces [`PageRole::Chrome`] internally. A content
+/// [`Page`] offers no method that yields one, so the leaky configuration
+/// (attaching the host-bridge router to a content browser) is **unrepresentable**.
+///
+/// Build one, then hand it to [`crate::HostBridge::for_chrome`] which supplies
+/// the browser-side router and produces a live [`ChromePage`].
+#[derive(Debug, Clone)]
+pub struct ChromePageRequest {
+    url: String,
+    width: u32,
+    height: u32,
+    frame_rate: i32,
+    profile: Option<ProfileHandle>,
+}
+
+impl ChromePageRequest {
+    /// Describe a chrome page at `url` with `options`' geometry. The role is
+    /// always [`PageRole::Chrome`] regardless of `options.role` — this request
+    /// type *is* the chrome marker. No profile (global request context); use
+    /// [`ChromePageRequest::with_profile`] to isolate it to an identity.
+    #[must_use]
+    pub fn new(url: &str, options: &PageOptions) -> Self {
+        Self {
+            url: url.to_string(),
+            width: options.width,
+            height: options.height,
+            frame_rate: options.frame_rate,
+            profile: None,
+        }
+    }
+
+    /// Isolate the chrome page to `profile`'s request context.
+    #[must_use]
+    pub fn with_profile(mut self, profile: &ProfileHandle) -> Self {
+        self.profile = Some(profile.clone());
+        self
+    }
+
+    /// Open the chrome browser, wrapping its content client in the chrome client
+    /// that carries `router` (layer 2). Crate-internal: only
+    /// [`crate::HostBridge::for_chrome`] calls this, so the router can never be
+    /// attached to a content browser.
+    pub(crate) fn open(self, router: Arc<BrowserSideRouter>) -> Result<ChromePage> {
+        let size = ViewSize {
+            width: self.width.cast_signed(),
+            height: self.height.cast_signed(),
+        };
+        // Build the standard content-client handlers (render/load/request), then
+        // wrap them in the chrome client that forwards process messages to the
+        // browser-side router.
+        let (inner, frame, nav) = ffi::build_client(size, Arc::new(AllowAll));
+        let client = bridge::chrome_client(inner, router);
+        let browser = create_browser(&self.url, self.frame_rate, client, self.profile.as_ref())?;
+        Ok(ChromePage(Page {
+            browser,
+            frame,
+            nav,
+            role: PageRole::Chrome,
+            closed: AtomicBool::new(false),
+        }))
+    }
+}
+
+/// A live privileged chrome page driven by a [`crate::HostBridge`].
+///
+/// Wraps a [`Page`] whose client carries the host-bridge router (layer 2); it
+/// surfaces the same read/navigate/input operations by [`Deref`](std::ops::Deref)
+/// to [`Page`]. There is no public constructor — a `ChromePage` is only produced
+/// by [`crate::HostBridge::for_chrome`], guaranteeing its client (and only its
+/// client) carries the router.
+#[derive(Debug)]
+pub struct ChromePage(Page);
+
+impl std::ops::Deref for ChromePage {
+    type Target = Page;
+    fn deref(&self) -> &Page {
+        &self.0
     }
 }
 

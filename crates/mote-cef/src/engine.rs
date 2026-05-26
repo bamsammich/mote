@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cef::{App, CefString, Settings, args::Args, do_message_loop_work, initialize, shutdown};
+use cef::{CefString, Settings, args::Args, do_message_loop_work, initialize, shutdown};
 
 use crate::error::{CefError, Result};
 
@@ -36,6 +36,18 @@ pub struct EngineConfig {
     /// Drive CEF's work via [`Engine::pump`] / [`Engine::run`] rather than CEF's
     /// own internal message loop. Required for the OSR compositor model.
     pub external_message_pump: bool,
+    /// The privileged **chrome document URL** the host bridge is scoped to
+    /// (ADR-0005). When `Some(url)`, `Engine::init` installs the custom CEF `App`
+    /// whose renderer-side `RenderProcessHandler` gates the `window.cefQuery` /
+    /// `window.mote` binding to exactly this URL (isolation layer 1). When `None`
+    /// (the default) no bridge `App` is installed and no page can ever receive
+    /// the binding.
+    ///
+    /// **The same URL must be passed to [`crate::bootstrap_with_bridge`]** so the
+    /// renderer *subprocess* installs the identical gate. Passing it in only one
+    /// place leaves the gate uninstalled in the other process; both `mote-cef`
+    /// entry points take it so the host wires one constant into both.
+    pub chrome_url: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -46,6 +58,7 @@ impl Default for EngineConfig {
                 .join(".mote-cef-cache"),
             no_sandbox: false,
             external_message_pump: true,
+            chrome_url: None,
         }
     }
 }
@@ -92,10 +105,19 @@ impl Engine {
         // zero-copy OSR on Linux needs `--use-angle=gl-egl` + `--ozone-platform`.
         // v0.1 deliberately uses the CPU `on_paint` fallback, which needs no GPU
         // command-line switches, so none are injected here.
+        //
+        // When a chrome URL is configured, install the host-bridge `App` so the
+        // browser-process renderer handler exists and the renderer-side URL gate
+        // (isolation layer 1) is wired. With no chrome URL, no `App` is passed and
+        // no process can ever receive the privileged binding.
+        let mut bridge_app = config
+            .chrome_url
+            .as_deref()
+            .map(crate::bridge::render_process_app);
         let ok = initialize(
             Some(args.as_main_args()),
             Some(&settings),
-            None::<&mut App>,
+            bridge_app.as_mut(),
             std::ptr::null_mut(),
         );
 

@@ -22,6 +22,12 @@
 //!   the CEF-free input vocabulary `Page`'s `send_*` methods inject.
 //! - [`ResourceInterceptor`] / [`RequestInfo`] / [`RequestDecision`] — the
 //!   network-interception seam ad-block / privacy plugins ride on.
+//! - [`HostBridge`] / [`OpRegistry`] / [`OpHandler`] / [`OpResponse`] /
+//!   [`ChromePage`] / [`ChromePageRequest`] — the privileged chrome↔Rust
+//!   transport (ADR-0005). `window.mote.invoke(op, params)` over the CEF message
+//!   router, dispatched to a closed set of structured ops, scoped to the chrome
+//!   browser in two independent layers (renderer URL gate + chrome-only router),
+//!   made **unrepresentable to misconfigure** by construction.
 //!
 //! # Off-screen rendering
 //!
@@ -37,6 +43,7 @@
 //! wrapped in `catch_unwind` (the release profile is `panic = "abort"`, so an
 //! unwind across the C ABI would be UB). See the `ffi` module.
 
+mod bridge;
 mod browser;
 mod engine;
 mod error;
@@ -47,13 +54,14 @@ mod paint;
 mod process;
 mod profile;
 
-pub use browser::{Page, PageOptions, PageRole};
+pub use bridge::{HostBridge, OpHandler, OpRegistry, OpResponse};
+pub use browser::{ChromePage, ChromePageRequest, Page, PageOptions, PageRole};
 pub use engine::{Engine, EngineConfig};
 pub use error::{CefError, Result};
 pub use input::{ButtonAction, KeyAction, KeyInput, Modifiers, MouseButton, MousePosition};
 pub use interceptor::{AllowAll, RequestDecision, RequestInfo, ResourceInterceptor};
 pub use paint::{PaintFrame, PixelFormat};
-pub use process::{ProcessRole, bootstrap};
+pub use process::{ProcessRole, bootstrap, bootstrap_with_bridge};
 pub use profile::{IdentityId, ProfileHandle, ProfileManager};
 
 #[cfg(test)]
