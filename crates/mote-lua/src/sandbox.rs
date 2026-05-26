@@ -40,6 +40,20 @@
 //!    - `collectgarbage` — denied control over the host GC; allowing
 //!      `collectgarbage("collect")` from a plugin is a needless availability
 //!      lever.
+//!    - `getfenv` / `setfenv` — `LuaJIT` (5.1-line) environment manipulation.
+//!      Not an escape with `debug`/`load` already gone, but needless surface
+//!      that lets a plugin rebind the environment of functions it can reach;
+//!      removed defensively (finding N2).
+//!    - `newproxy` — `LuaJIT` primitive that creates a userdata with a fresh
+//!      metatable. Harmless in isolation but an undocumented metatable-fabrication
+//!      lever with no legitimate plugin use; removed (finding N2).
+//!    - `gcinfo` — legacy `LuaJIT` GC-introspection global; a needless host-state
+//!      readout, removed alongside `collectgarbage` (finding N2).
+//!
+//!    A single non-base field is also removed: `string.dump`, which serializes a
+//!    function to `LuaJIT` bytecode. It is not an escape, but it is a
+//!    bytecode-leak primitive with no legitimate plugin use, so it is nil-ed out
+//!    of the `string` table after construction (finding N2).
 //!
 //! ## What is kept
 //!
@@ -57,7 +71,7 @@
 //! data or filesystem, and is the obvious debugging affordance for plugin
 //! authors. A future revision may route it through the host log surface.
 
-use mlua::{Lua, LuaOptions, StdLib};
+use mlua::{Lua, LuaOptions, StdLib, Value};
 
 use crate::error::LuaError;
 
@@ -73,6 +87,10 @@ const DENIED_BASE_GLOBALS: &[&str] = &[
     "dofile",
     "require",
     "collectgarbage",
+    "getfenv",
+    "setfenv",
+    "newproxy",
+    "gcinfo",
 ];
 
 /// The standard-library subset loaded into every sandboxed state.
@@ -113,6 +131,14 @@ pub fn new_sandbox() -> Result<Lua, LuaError> {
     let globals = lua.globals();
     for name in DENIED_BASE_GLOBALS {
         globals.set(*name, mlua::Nil).map_err(LuaError::Lua)?;
+    }
+
+    // `string.dump` is a field of the always-installed `string` table rather
+    // than a base global, so it is nil-ed out separately (finding N2). The
+    // `string` library is always present in our `sandbox_libs()`, so this read
+    // is expected to succeed.
+    if let Value::Table(string_tbl) = globals.get::<Value>("string").map_err(LuaError::Lua)? {
+        string_tbl.set("dump", mlua::Nil).map_err(LuaError::Lua)?;
     }
 
     Ok(lua)

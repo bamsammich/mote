@@ -61,6 +61,8 @@ This is not a policy document. It's a memory aid for future-you.
 - An end-to-end test simulates bursty keybind input and verifies vim-mode doesn't auto-disable under realistic load.
 - An end-to-end test confirms filter-chain handlers respect the 10ms budget and timeouts produce `defer`, not other values.
 
+**Deadline enforcement — what the budget actually bounds (verified against LuaJIT; see issue #2).** A handler's budget is enforced by a *global* instruction-count hook (so it also covers code running inside child coroutines — a per-thread hook does not) plus a per-call memory ceiling (so a single unbounded builtin such as `string.rep` fails with a memory error rather than allocating without limit). It does **not** hard-bound the wall-clock of a single C builtin that stays under the memory ceiling; that residual is best-effort. Values returned from a deadline-protected call are read with **raw accessors only**, because the deadline lifts before marshalling and a plugin metamethod (`__index`) would otherwise run unbounded. `capabilities.invoke` runs the fulfiller under the same protection (100ms budget) and only for functions in the capability's declared contract. **Not yet bounded:** `setup()` runs un-deadlined at load time (tracked) — bounding it must not break legitimately slow setups (e.g. a network fetch). An earlier claim that the per-instruction hook alone fully resolved this was incomplete.
+
 ---
 
 ## 4. Capability combination discipline

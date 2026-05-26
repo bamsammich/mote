@@ -9,7 +9,9 @@
 use std::time::{Duration, Instant};
 
 use mlua::Value;
-use mote_lua::{HookInvokeError, HookTable, call_hook_with_deadline, new_sandbox};
+use mote_lua::{
+    HookInvokeError, HookTable, call_function_with_deadline, call_hook_with_deadline, new_sandbox,
+};
 
 /// Loads a module body and returns the named declaration table (`hooks` /
 /// `events`).
@@ -271,4 +273,194 @@ fn hook_is_cleared_between_calls() {
     let out = call_hook_with_deadline(&lua, &module, HookTable::Hooks, "h", Value::Nil, d2)
         .expect("second");
     assert_eq!(out.as_i64(), Some(500_500));
+}
+
+/// **M3 proof.** A handler that spins inside `coroutine.create` / `resume` must
+/// be preempted at the deadline. A per-thread hook would not cover the child
+/// coroutine and the call would hang; the global hook does (verified
+/// empirically under `LuaJIT`).
+#[test]
+fn coroutine_resume_spin_is_interrupted_at_deadline() {
+    let (lua, module) = load_module(
+        r#"
+        local M = {}
+        M.hooks = { ["net:intercept_request"] = function(req)
+          local co = coroutine.create(function() while true do end end)
+          coroutine.resume(co)
+        end }
+        return M
+    "#,
+    );
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(10);
+    let err = call_hook_with_deadline(
+        &lua,
+        &module,
+        HookTable::Hooks,
+        "net:intercept_request",
+        Value::Nil,
+        deadline,
+    )
+    .expect_err("coroutine spin must not complete");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(err, HookInvokeError::Timeout),
+        "expected Timeout, got {err:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "coroutine interrupt took too long: {elapsed:?}"
+    );
+}
+
+/// **M3 proof (wrap variant).** The same must hold for `coroutine.wrap`, which
+/// resumes implicitly when the returned function is called.
+#[test]
+fn coroutine_wrap_spin_is_interrupted_at_deadline() {
+    let (lua, module) = load_module(
+        r#"
+        local M = {}
+        M.hooks = { ["net:intercept_request"] = function(req)
+          local w = coroutine.wrap(function() while true do end end)
+          w()
+        end }
+        return M
+    "#,
+    );
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(10);
+    let err = call_hook_with_deadline(
+        &lua,
+        &module,
+        HookTable::Hooks,
+        "net:intercept_request",
+        Value::Nil,
+        deadline,
+    )
+    .expect_err("coroutine.wrap spin must not complete");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(err, HookInvokeError::Timeout),
+        "expected Timeout, got {err:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "coroutine.wrap interrupt took too long: {elapsed:?}"
+    );
+}
+
+/// **M4 proof.** A single unbounded builtin (`string.rep("A", 5e8)` ≈ 500 MB)
+/// runs to completion before any instruction hook fires, so the wall-clock
+/// deadline cannot bound it. The memory ceiling must turn it into a bounded Lua
+/// error instead of allocating gigabytes. With a generous deadline, the only
+/// thing that can stop it is the allocation limit, so this asserts a
+/// `HookInvokeError::Lua` (the memory error) — not a Timeout.
+#[test]
+fn huge_allocation_is_bounded_by_memory_limit() {
+    let (lua, module) = load_module(
+        r#"
+        local M = {}
+        M.hooks = { ["net:intercept_request"] = function(req)
+          return string.rep("A", 500000000)
+        end }
+        return M
+    "#,
+    );
+
+    // Deadline far in the future: if the call returns at all, it is because the
+    // memory ceiling refused the allocation, not because of a timeout.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let err = call_hook_with_deadline(
+        &lua,
+        &module,
+        HookTable::Hooks,
+        "net:intercept_request",
+        Value::Nil,
+        deadline,
+    )
+    .expect_err("huge allocation must be refused, not serviced");
+
+    assert!(
+        matches!(err, HookInvokeError::Lua(_)),
+        "expected a bounded Lua (memory) error, got {err:?}"
+    );
+}
+
+/// **N1 proof.** A plugin that throws the literal old sentinel string must NOT
+/// be misclassified as a `Timeout`. The classification is driven by a private
+/// typed marker, not a sniffable error string.
+#[test]
+fn forged_timeout_sentinel_is_not_misclassified() {
+    let (lua, module) = load_module(
+        r#"
+        local M = {}
+        M.hooks = { ["net:intercept_request"] = function(req)
+          error("__mote_hook_deadline_exceeded__")
+        end }
+        return M
+    "#,
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(50);
+    let err = call_hook_with_deadline(
+        &lua,
+        &module,
+        HookTable::Hooks,
+        "net:intercept_request",
+        Value::Nil,
+        deadline,
+    )
+    .expect_err("forged sentinel still errors");
+
+    assert!(
+        matches!(err, HookInvokeError::Lua(_)),
+        "a forged sentinel must be a plain Lua error, not a Timeout; got {err:?}"
+    );
+}
+
+/// The general `call_function_with_deadline` primitive runs an arbitrary Lua
+/// function (not a declarative handler) and returns its value, sharing the same
+/// deadline + memory mechanism as the hook wrapper.
+#[test]
+fn general_primitive_calls_arbitrary_function() {
+    let lua = new_sandbox().expect("sandbox");
+    let f: mlua::Function = lua
+        .load("return function(a, b) return a + b end")
+        .eval()
+        .expect("compile fn");
+
+    let deadline = Instant::now() + Duration::from_millis(50);
+    let out = call_function_with_deadline(&lua, &f, (40_i64, 2_i64), deadline)
+        .expect("arbitrary call ok");
+    assert_eq!(out.as_i64(), Some(42));
+}
+
+/// The general primitive enforces the deadline on a runaway arbitrary function,
+/// including one spinning in a coroutine.
+#[test]
+fn general_primitive_enforces_deadline_through_coroutine() {
+    let lua = new_sandbox().expect("sandbox");
+    let f: mlua::Function = lua
+        .load(
+            r"return function()
+              local w = coroutine.wrap(function() while true do end end)
+              w()
+            end",
+        )
+        .eval()
+        .expect("compile fn");
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(10);
+    let err =
+        call_function_with_deadline(&lua, &f, (), deadline).expect_err("runaway must not complete");
+    assert!(
+        matches!(err, HookInvokeError::Timeout),
+        "expected Timeout, got {err:?}"
+    );
+    assert!(started.elapsed() < Duration::from_millis(500));
 }
