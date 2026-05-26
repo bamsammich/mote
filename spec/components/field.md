@@ -122,10 +122,6 @@ When the user changes the field, the reflect updates live, and a button (`apply`
 - Toggle uses `role="switch"` + `aria-checked`.
 - Validation errors get `aria-invalid="true"` and an `aria-describedby` pointing to the message.
 
-## Example
-
-See [`preview/components-fields.html`](../../preview/components-fields.html).
-
 ## Anti-patterns
 
 - ❌ Floating labels (label inside the input).

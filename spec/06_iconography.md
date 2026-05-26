@@ -37,13 +37,13 @@ Mote uses **[Lucide](https://lucide.dev)** for all chrome and content icons. The
 | Lock (secure) | `lock` | omnibox left edge (HTTPS) |
 | Globe (insecure) | `globe` | omnibox left edge (HTTP) |
 | Search | `search` | omnibox empty state |
-| AI assistant | `sparkles` | activity bar |
+| AI assistant (reserved; for a plugin-provided `assist` panel) | `sparkles` | activity bar |
 | Command palette | `command` | palette trigger |
 | Sidebar toggle | `panel-left` / `panel-left-close` | omnibox right side |
 | Settings / config | `sliders-horizontal` | settings, theme switcher |
 | Lua / config code | `braces` | lua panel |
 | Plugin | `puzzle` | plugin manager |
-| Hibernated tab | `moon` | hibernated state |
+| Hidden / discarded tab | `moon` | hidden-in-workspace / discarded state |
 | Tabs (activity bar) | `layers` | sidebar tabs panel |
 | Bookmarks (activity bar) | `bookmark` | sidebar bookmarks panel |
 | History | `history` | sidebar history panel |
@@ -70,7 +70,7 @@ These are used directly inline, in mono type. **Do not substitute them with Luci
 | `■ □ ◐ ◯ ●` | status indicators (in mono surfaces) |
 | `›` | breadcrumb separator, terminal prompt mark |
 | `·` | inline metadata separator (`v0.34 · stable · 4d ago`) |
-| `›_` | the assistant query / command palette prompt |
+| `›_` | the command palette prompt mark |
 | `↑ →` | inline arrows (status line link hover) |
 | `─ ╌` | ASCII separators (dev-tooling contexts only) |
 
@@ -78,8 +78,10 @@ The brand mark `[·]` is built from this same vocabulary: mono brackets in amber
 
 ## Logos & marks
 
-- `assets/wordmark.svg` — the full `[mote]` wordmark
-- `assets/mark.svg` — the `[·]` mark, suitable for favicon
+Two brand marks (to be produced and stored with the chrome's assets):
+
+- a full `[mote]` wordmark
+- a `[·]` mark, suitable for favicon
 
 Both use `currentColor` for the wordmark text. The brackets and dot are hard-coded `#E0A458` (the amber default) because the mark must stay recognizable across themes. Themes that recolor the brackets do it as a deliberate override.
 

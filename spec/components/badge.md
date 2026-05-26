@@ -72,10 +72,6 @@ Badges are **not interactive**. They never have click handlers. If you need a cl
 - A badge with only a dot and a single word reads fine for screen readers — no `aria-label` needed.
 - For numeric badges in context ("3 new"), prefer the surrounding label to carry meaning.
 
-## Example
-
-See [`preview/components-badges.html`](../../preview/components-badges.html) for status / label / count groupings.
-
 ## Anti-patterns
 
 - ❌ `border-radius: 9999px` (pills).

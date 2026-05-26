@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The combined URL bar, command runner, AI query input, and find-in-page input. **Multi-modal** — the mode is declared by a bracket-wrapped tag in the left of the field, reusing the `[mote]` brand lockup.
+The combined URL bar, command runner, and find-in-page input. **Multi-modal** — the mode is declared by a bracket-wrapped tag in the left of the field, reusing the `[mote]` brand lockup.
 
 ## Modes
 
@@ -10,14 +10,14 @@ The combined URL bar, command runner, AI query input, and find-in-page input. **
 |---|---|---|---|
 | `url` | (default) | `[url]` | navigate to a URL or search |
 | `cmd` | `:` | `[cmd]` | run a command (e.g. `:theme switch dusk`) |
-| `ask` | `?` | `[ask]` | send a query to the AI assistant |
 | `find` | `/` | `[find]` | find text in the current page |
+
+> **`[ask]` is reserved, not shipped.** Mote ships no built-in AI mode (core principle #8 — AI is plugin-delivered via `http:fetch` + `secret:read`). The `[ask]` mode name and its `?` prefix are *reserved* for a future AI plugin to fill; the styling below (the `mode-ask` accent treatment) is documented so a plugin filling the slot stays on-brand. The runtime ships only `url`, `cmd`, and `find`.
 
 The mode auto-switches when the user types the entering prefix as the first character. The user can also force a mode via keybinds:
 
 - `⌘K` — open in url mode (default)
 - `⌘⇧P` — open command palette (separate component)
-- `⌘L` — open in ask mode (alternative entry to AI)
 - `⌘F` — open in find mode
 
 ## Structure
@@ -112,14 +112,10 @@ The block cursor:
 
 ## Accessibility
 
-- Wrap in `<form role="search">` for url/find modes; `<form>` without role for cmd/ask.
-- Input gets `aria-label` matching the active mode (`"url bar"`, `"command runner"`, `"ai query"`, `"find in page"`).
+- Wrap in `<form role="search">` for url/find modes; `<form>` without role for cmd.
+- Input gets `aria-label` matching the active mode (`"url bar"`, `"command runner"`, `"find in page"`; a plugin filling `[ask]` supplies its own).
 - Mode tag has `aria-hidden="true"` — it's decorative; the input's `aria-label` carries the meaning.
 - Right-side icons are buttons with `aria-label`.
-
-## Example
-
-See [`preview/components-omnibox.html`](../../preview/components-omnibox.html) for all four modes rendered with annotations.
 
 ## Anti-patterns
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A 22px-tall persistent strip at the bottom of the browser. **The status line replaces** the floating hover-URL toast, the download chip, the connection icon, and the AI status indicator that mainstream browsers scatter across the chrome. Every signal lives here.
+A 22px-tall persistent strip at the bottom of the browser (the `bottom-bar` slot), composed of `status-indicator` elements. **The status line replaces** the floating hover-URL toast, the download chip, and the connection icon that mainstream browsers scatter across the chrome. Every signal lives here.
 
 ## Structure
 
@@ -10,7 +10,6 @@ A 22px-tall persistent strip at the bottom of the browser. **The status line rep
 <div class="sl">
   <div class="seg mode">NORMAL</div>
   <div class="seg"><span class="dot ok"></span>https · tls 1.3</div>
-  <div class="seg"><span class="dot ok"></span>assist idle</div>
   <div class="seg spacer"></div>
   <div class="seg" style="color:var(--fg-2)">7 tabs · 142mb</div>
   <div class="seg theme-btn">theme: dusk</div>
@@ -25,7 +24,6 @@ Left-aligned (the loudest signals):
 |---|---|---|
 | `mode` | `NORMAL` / `INSERT` / `COMMAND` chip (if vim binds active) | omnibox / keymap state |
 | `connection` | TLS info + ok/fail dot | page loader |
-| `assist` | "idle" / "thinking" / "3 files" with status dot | AI runtime |
 
 Spacer (`flex: 1`) fills the middle.
 
@@ -34,7 +32,7 @@ Right-aligned (ambient):
 | Segment | Content | Source |
 |---|---|---|
 | `resources` | tab count, RAM usage | runtime |
-| `theme` | active theme name (clickable to cycle) | theme.current() |
+| `theme` | active theme name (clickable to cycle) | active theme |
 
 ### Contextual segments
 
@@ -44,8 +42,8 @@ The status line **morphs** based on what's happening. The fixed segments above a
 |---|---|
 | Mouse hovers a link in the page | a `link-hover` segment expands across the spacer showing the full URL, replacing the resources/theme segments temporarily |
 | A page is loading | the connection segment becomes an inline progress bar; a `loading 64%` label appears next to it |
-| AI is thinking | the assist segment shows a pulsing plum dot and the current context count |
-| A download starts | a `download` segment slots in next to assist showing filename + progress |
+
+> **No built-in AI status segment.** Mote ships no AI runtime, so there is no `assist` segment in the chrome (core principle #8). A plugin providing AI features may register its own `status-indicator` element; the `dot.special` (plum, pulsing) treatment in the tokens below is documented so such a plugin stays on-brand. A `download` segment is likewise plugin-contributed where a download manager registers one.
 
 ## Tokens
 
@@ -82,50 +80,41 @@ The status line **morphs** based on what's happening. The fixed segments above a
 - Most segments are **read-only** — they reflect runtime state.
 - The `theme` segment is **clickable** — click to cycle to the next theme.
 - The `mode` chip is **clickable** — click to open a dropdown of available modes.
-- The `assist` segment is **clickable** — click to open the assistant panel in the sidebar.
 - Hovering the status line itself does nothing — segments are not buttons unless documented above.
 
 ## Customization (Lua)
 
-Plugins contribute segments by registering elements in the `status_line` slot:
+Plugins contribute segments by registering `status-indicator` elements (see `01_architecture.md`):
 
 ```lua
-mote.plugin.register("git-status-line", {
-  elements = {
-    {
-      id = "git_indicator",
-      slot = "status_line",
-      render = function()
-        return { text = "⎇ main · clean", color = mote.theme.tokens.fg_2 }
-      end,
-    },
-  }
-})
+function M.setup()
+  ui.register_element({
+    id = "git-status-line",
+    kind = "status-indicator",
+    render = function(host)
+      return { text = "⎇ main · clean", color = host.tokens.fg_2 }
+    end,
+  })
+end
 ```
 
-The theme decides segment order via the bind list:
+The active theme decides segment order by placing `status-indicator` elements into `bottom-bar`:
 
 ```lua
-theme:bind("status_line", {
-  mote.elements.vim_mode,
-  mote.elements.connection,
-  mote.elements.assist_status,
-  mote.elements.spacer,
-  mote.elements.resources,
-  mote.elements.theme_switcher,
-})
+-- in a theme's M.theme.layout
+["bottom-bar"] = {
+  "status-indicator:vim-mode",
+  "status-indicator:connection",
+  "status-indicator:*",          -- any other status indicators
+},
 ```
 
 ## Accessibility
 
-- The status line itself is `role="status"` with `aria-live="polite"` for state changes (mode switch, assist starts thinking, etc.).
+- The status line itself is `role="status"` with `aria-live="polite"` for state changes (mode switch, etc.).
 - Per-segment text uses `aria-label` when the visible text is a glyph (`⎇` → `aria-label="branch main, clean"`).
 - The mode chip has `aria-label="vim mode: NORMAL"`.
 - Reduced motion: the pulsing dot becomes static.
-
-## Example
-
-See [`preview/components-statusline.html`](../../preview/components-statusline.html) for idle, link-hover, and working states rendered with annotations.
 
 ## Anti-patterns
 

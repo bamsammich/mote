@@ -45,11 +45,11 @@ There is no `--dur-slow`. If something needs more than 200ms, it's the wrong ani
 - **Stagger animations on lists.** Items appear all at once.
 - **Slide transitions for content swap.** Use a cross-fade if anything; usually instant is correct.
 - **Hover scale.** No `transform: scale(1.05)` on hover. Background shift only.
-- **Glow pulse on AI elements.** This is a cliché Mote rejects. AI surfaces use the plum accent statically.
+- **Glow pulse on "AI" elements.** This is a cliché Mote rejects. Special/`plum` surfaces use the accent statically.
 
 ## The one acceptable animated indicator
 
-When the assistant is thinking, the plum dot in the status line / sidebar header pulses:
+A "working" state — e.g. a plugin-provided indicator that's busy — may pulse the `plum` dot in a status indicator or panel header (Mote ships no AI runtime, so any such indicator is plugin-contributed):
 
 ```css
 .dot.special {

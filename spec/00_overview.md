@@ -14,68 +14,83 @@ The product surface is **the browser window itself**. There is no separate marke
 
 ## Glossary
 
+The slot and element-kind names below are the runtime's canonical taxonomy (kebab-case). Where this spec's component files refer to a region informally (e.g. "the omnibox," "the status line"), that name maps onto a runtime slot/element as noted.
+
 | Term | Definition |
 |---|---|
-| **Slot** | A named region declared by a theme. Examples: `tab_bar`, `omnibox`, `sidebar`, `status_line`, `viewport`. Slots are structural; they always exist when their theme is loaded. |
-| **Element** | A renderable content unit a plugin contributes. Examples: a tab, an AI message, a bookmark row, a vim-mode indicator. Elements bind to slots. |
-| **Theme** | A Lua file that declares slots, binds default elements, and applies design tokens. Themes ship as `~/.config/mote/themes/<name>.lua`. |
-| **Plugin** | A Lua + JS package that contributes elements (and optionally commands, keybinds, palette entries). Lives in `~/.config/mote/plugins/<name>/`. |
+| **Slot** | A named layout region the runtime owns. The fixed v0.1 set is `top-bar`, `left-sidebar`, `right-sidebar`, `bottom-bar`, `urlbar-inline`, `tab-row`. Themes decide which elements go in which slots; plugins do not choose placement. |
+| **Element** | A renderable content unit of a known *kind* that a plugin contributes. The fixed v0.1 kinds are `urlbar`, `tabstrip`, `bookmarks-bar`, `sidebar-panel`, `action-button`, `status-indicator`, `urlbar-extension`, `widget`. Elements bind to slots by theme decision. |
+| **Theme** | A plugin fulfilling `theme:provider` (exclusive). It decides element-to-slot placement, ordering, resizability, and applies design tokens. |
+| **Plugin** | A Lua (optionally WASM) module that contributes elements (and optionally commands, keybinds, palette entries) via a declarative module table. Lives in `~/.config/mote/plugins/<name>/`. |
 | **Token** | A design value (color, size, font) exposed as a CSS variable AND as a Lua field on `theme.tokens`. The bridge between Lua config and CSS. |
-| **Omnibox** | The URL/command/query bar. Multi-modal: `[url]`, `[cmd]`, `[ask]`, `[find]`. |
-| **Palette** | The command palette (⌘⇧P). Centered floating overlay, 640px wide. |
-| **Sidebar** | A generic left-side slot hosting a swappable element panel (tabs, bookmarks, history, assistant, plugins, lua config). |
-| **Status line** | A 22px persistent strip at the bottom of the browser. Shows mode, connection, AI state, hovered URL, etc. |
+| **Omnibox** | The URL/command/find bar — the `urlbar` element, shown in `top-bar` and extended via `urlbar-inline`. Multi-modal: `[url]`, `[cmd]`, `[find]`. The `[ask]` mode name is *reserved* for a future plugin; the runtime ships no AI mode (see below). |
+| **Palette** | The command palette (⌘⇧P). A `widget`-kind overlay, centered, 640px wide. |
+| **Sidebar** | A `left-sidebar` or `right-sidebar` slot hosting swappable `sidebar-panel` elements (tabs, bookmarks, history, plugins, lua config). |
+| **Status line** | A 22px persistent strip in `bottom-bar`, composed of `status-indicator` elements. Shows mode, connection, hovered URL, etc. |
 | **Dusk / Vellum** | The default dark and light themes that ship with Mote. Both must remain first-class. |
 | **The mote** | Conceptually a particle of light/dust. Visually: an amber `#E0A458` accent. The mark for the brand is `[·]`. |
 
+> **AI is plugin-delivered, not a runtime feature.** Mote ships no built-in AI UI — no chatbot panel, no AI summaries, no AI urlbar suggestions (core principle #8). The `[ask]` omnibox mode and an `assist` sidebar panel are *reserved names* a future AI plugin may fill; a plugin reaches an LLM via `http:fetch` plus `secret:read`. Nothing in this spec implies the runtime ships AI behavior.
+
 ## The slot/element split, concretely
 
-A theme written in Lua declares slots and binds elements:
+A theme is a plugin fulfilling `theme:provider`. Its module table places elements into slots and applies styling tokens:
 
 ```lua
--- ~/.config/mote/themes/dusk.lua
-local mote = require("mote")
-local theme = mote.theme.new("dusk")
+-- ~/.config/mote/plugins/dusk/init.lua
+local M = {}
 
--- Declare a slot
-theme:slot("omnibox", {
-  height = 36,
-  bg     = theme.tokens.surface_sunk,
-  border = theme.tokens.border,
-  accent = theme.tokens.amber,
-})
+M.manifest = {
+  schema = "v1",
+  name = "dusk",
+  version = "1.0.0",
+  capabilities = { "theme:provider" },
+}
 
--- Bind an element into that slot
-theme:bind("omnibox", mote.elements.omnibox_default)
+M.theme = {
+  layout = {
+    ["top-bar"]      = { "urlbar", "tabstrip" },
+    ["left-sidebar"] = { "sidebar-panel:bookmarks", "sidebar-panel:*" },
+    ["bottom-bar"]   = { "status-indicator:*" },
+  },
+  styling = {
+    colors = { bg = "#14110F", fg = "#ECE5D8", accent = "#E0A458" },
+  },
+}
 
--- Override an element's style
-theme:style("tab.active", {
-  border_top = { 2, theme.tokens.accent }
-})
-
-return theme
+return M
 ```
 
-A plugin contributes elements:
+A plugin contributes elements via `ui.register_element`. The plugin declares the element's *kind*; the theme decides placement:
 
 ```lua
 -- ~/.config/mote/plugins/git-status/init.lua
-local mote = require("mote")
-mote.plugin.register("git-status", {
-  elements = {
-    { id = "git_indicator", slot = "status_line", render = function() ... end }
-  }
-})
+local M = {}
+
+M.manifest = {
+  schema = "v1",
+  name = "git-status",
+  version = "0.2.0",
+  permissions = { "ui:status_indicator" },
+}
+
+function M.setup()
+  ui.register_element({
+    id = "git-status",
+    kind = "status-indicator",
+    render = function(host) ... end,
+  })
+end
+
+return M
 ```
 
-A user, in their `init.lua`, picks the theme, installs plugins, and overrides anything:
+A user, in their config, picks the theme, lists plugins, binds keys, and overrides anything:
 
 ```lua
-local mote = require("mote")
-mote.theme.load("dusk")
-mote.plugin.use("git-status")
-mote.bind("cmd-shift-p", mote.palette.open)
-mote.sidebar.default("tabs")
+mote.plugins({ "dusk", "git-status" })
+mote.keys.bind("Mod+Shift+P", function() mote.palette.open() end)
+mote.theme_overrides({ styling = { colors = { accent = "#FF8800" } } })
 ```
 
 This three-layer system (theme / plugin / user) is the core architectural commitment. Every component spec in this repo respects it.
@@ -84,11 +99,11 @@ This three-layer system (theme / plugin / user) is the core architectural commit
 
 - **Cross-platform native widgets.** Mote uses HTML/CSS for chrome. Don't mock native macOS/Windows widgets.
 - **Multiple product surfaces.** The browser is the product. There is no companion mobile, no settings UI, no marketing site within this spec's scope. (Marketing is a future addition that should use this same token vocabulary.)
-- **A "kitchen sink" component library.** Mote ships a small, sharp set: button, field, tab, omnibox, palette, status line, badge, card, kbd, sidebar shell, message. Don't invent more without a real need.
+- **A "kitchen sink" component library.** Mote ships a small, sharp set: button, field, tab, omnibox, palette, status line, badge, card, kbd, sidebar shell. Don't invent more without a real need.
 
 ## Stack assumptions
 
-Mote's chrome renders via a web technology (the actual implementation language is up to you — Tauri+Web, Servo+Web, custom). The design system is delivered as **CSS variables + HTML structural conventions**, which any chrome runtime can consume. Lua-side, design tokens are surfaced as `theme.tokens.<name>` — the names mirror the CSS var names.
+Mote's chrome renders as HTML/CSS on an off-screen CEF surface composited by the shell. The design system is delivered as **CSS variables + HTML structural conventions** the chrome consumes directly. Lua-side, design tokens are surfaced as `theme.tokens.<name>` — the names mirror the CSS var names.
 
 ## Next
 

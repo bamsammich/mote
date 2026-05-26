@@ -14,7 +14,7 @@ first. It indexes the design tokens, typography, motion rules, and per-component
 
 Hard rules:
 - Use design tokens (`var(--accent)`, `var(--surface-1)`, etc) — never raw hex or px values
-  that aren't tokenized. Tokens live in `colors_and_type.css`.
+  that aren't tokenized. The token vocabulary is defined in `spec/03_tokens.md`.
 - Both `[data-theme="dusk"]` (default dark) and `[data-theme="vellum"]` (light) must work.
 - Borders carry the visual weight; shadows are for floating surfaces only.
 - The `[mote]` bracket lockup (mono amber brackets + sans contents) is the brand DNA — reuse it
@@ -40,13 +40,11 @@ That snippet is enough to wire CC into the spec. Everything else lives in this f
 | [`07_themes.md`](./07_themes.md) | The Lua theming contract | Implementing the theme runtime / writing themes |
 | [`components/`](./components/) | Per-component implementation contracts | Building specific UI |
 
-> **Note:** `01_architecture.md` describes the Mote runtime's slot/element/theme architecture. It's here because the design system *bakes the architecture in* — the bracket lockup, the empty-slot motif, the sidebar's swappable-panel pattern, the omnibox's mode tag are all visual expressions of that architecture. If your project docs already cover the runtime, treat `01_architecture.md` as background reading; the visual specs reference its vocabulary.
+> **Note:** `01_architecture.md` describes the Mote runtime's slot/element/theme architecture *as the design system depends on it*. It's here because the design system *bakes the architecture in* — the bracket lockup, the empty-slot motif, the sidebar's swappable-panel pattern, the omnibox's mode tag are all visual expressions of that architecture. The authoritative runtime/plugin/security model lives in the project's `DESIGN.md`; treat `01_architecture.md` as the visual-system view that points back to it.
 
-## Reference implementation
+## Source of truth
 
-The CSS in [`../ui_kits/browser/index.html`](../ui_kits/browser/index.html) is the canonical, working source of truth for every component in this spec. When a spec file says "see the kit," that's where to look. The JSX files alongside it show composition patterns.
-
-The tokens themselves live in [`../colors_and_type.css`](../colors_and_type.css) — that file is the only source the chrome should import.
+The textual spec in this folder is the source of truth. Design tokens are defined in [`03_tokens.md`](./03_tokens.md) and typography in [`04_typography.md`](./04_typography.md); the per-component contracts in [`components/`](./components/) define structure, tokens, states, and behavior for each component. (Earlier drafts referenced standalone `ui_kits/`, `colors_and_type.css`, `*.jsx`, and `preview/` assets that do not exist in this repo; the spec docs themselves are canonical.)
 
 ## What's NOT in this spec
 

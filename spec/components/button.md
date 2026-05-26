@@ -99,10 +99,6 @@ A clickable action affordance. Used wherever the user triggers a discrete comman
 - Disabled buttons must set `disabled` attribute, not just opacity.
 - Press state must not be the only press indicator if motion is reduced — pair with `:active { background: var(--surface-3) }`.
 
-## Example
-
-See [`preview/components-buttons.html`](../../preview/components-buttons.html) for the canonical reference and all states rendered.
-
 ## Anti-patterns
 
 - ❌ Pills (`border-radius: 9999px`).

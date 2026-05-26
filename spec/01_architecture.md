@@ -1,5 +1,7 @@
 # 01 · Architecture
 
+> This file describes the Mote runtime's slot/element/theme architecture as the *visual* design system depends on it. The canonical architecture, plugin model, and security model live in the project's `DESIGN.md`; where this file once described a different plugin API it has been aligned to DESIGN. Treat the design-token, `[data-slot]`, and CSS-variable mechanics below as authoritative for the chrome; treat the Lua surface as a pointer to DESIGN's plugin model, not a competing definition.
+
 ## Layers
 
 ```
@@ -8,155 +10,154 @@
 ├─────────────────────────────────────────────┤
 │  plugins                   (contribute elements, commands)
 ├─────────────────────────────────────────────┤
-│  theme                     (declares slots, binds defaults, styles)
+│  theme                     (places elements into slots, styles)
 ├─────────────────────────────────────────────┤
-│  mote runtime              (slot host, lua bridge, web chrome)
+│  mote runtime              (owns slots + element kinds, lua bridge, web chrome)
 └─────────────────────────────────────────────┘
 ```
 
 Load order is **bottom up, then top wins on conflict**:
 
 1. Runtime boots. Default theme `dusk` is loaded.
-2. User's `init.lua` runs. It can switch themes, install plugins, and apply overrides.
-3. Plugins register their elements. Each plugin can suggest default slot bindings; the active theme decides whether to honor them.
-4. The user's overrides (the last block of `init.lua`) win unconditionally.
+2. User config runs. It lists plugins, switches themes, binds keys, and applies overrides.
+3. Plugins register their elements (by kind). Plugins may offer placement *hints*; the active theme decides actual placement.
+4. The user's overrides (`mote.theme_overrides`, key binds) win unconditionally.
 
 ## Lua API (target surface)
 
-This is the API plugin authors, theme authors, and users program against. Implement what's listed; don't expand the surface without a reason.
+Plugins are **declarative module tables**, not imperative registrations. A plugin returns an `M` table with `M.manifest`, and optionally `M.theme`, `M.hooks`, `M.events`, `M.api`, and a `M.setup()` function. The runtime reads these tables to validate a plugin *without running it* (static contract conformance); `setup()` runs only after validation and permission approval. There is no `mote.plugin.register(...)` / `events.on(...)` imperative path — the declarative tables are the only registration surface. (Full plugin/security model: `DESIGN.md`.)
 
-### `mote.theme`
+This file lists only the surface the *visual* design system leans on. The authoritative, complete API reference is in `DESIGN.md`.
 
-```lua
-mote.theme.load(name)              -- switch to a theme by name (e.g. "dusk")
-mote.theme.reload()                -- re-evaluate the active theme file from disk
-mote.theme.new(name)               -- create a new theme (returns a Theme handle)
-mote.theme.current()               -- get the active theme handle
-```
+### Theme module table
 
-### `Theme` (handle returned by `theme.new`)
+A theme is a plugin fulfilling `theme:provider`. Styling and placement live in `M.theme`:
 
 ```lua
-theme:slot(name, attrs)            -- declare a slot
-theme:bind(slot_name, element)     -- bind an element into a slot
-theme:unbind(slot_name)            -- empty a slot (renders the empty-slot motif)
-theme:style(selector, props)       -- apply style overrides to an element selector
-theme.tokens                       -- table of design tokens (see spec/03_tokens.md)
-```
-
-`attrs` for `slot()` accepts: `width`, `height`, `bg`, `fg`, `border`, `accent`, `position` (`top|bottom|left|right|float|inline`), `resizable` (bool), `min`, `max`.
-
-### `mote.plugin`
-
-```lua
-mote.plugin.register(id, manifest) -- called by plugin's init.lua
-mote.plugin.use(id, config)        -- user enables a plugin in their init.lua
-mote.plugin.list()                 -- enumerate installed plugins
-```
-
-Manifest shape:
-
-```lua
-{
-  name = "git-status",
-  version = "0.2.0",
-  elements = { { id = "...", slot = "...", render = function() end } },
-  commands = { { id = "git.commit", run = function() end, keys = "cmd-shift-g" } },
-  palette  = { { name = "git: commit", cmd = "git.commit" } },
+M.theme = {
+  inherits = "default-layout",       -- optional; inherit slot placement
+  layout = {
+    ["top-bar"]      = { "urlbar", "tabstrip" },
+    ["left-sidebar"] = {
+      elements    = { "sidebar-panel:bookmarks", "sidebar-panel:*" },
+      resizable   = true,
+      default_size = 280, min_size = 200, max_size = 500,
+    },
+    ["right-sidebar"] = {},           -- explicitly empty (renders the empty-slot motif)
+  },
+  styling = {
+    colors  = { bg = "...", fg = "...", accent = "..." },
+    fonts   = { ui = "...", content = "...", mono = "..." },
+    spacing = { ... },
+  },
 }
 ```
 
-### `mote.bind`
+Placement targets slot names (kebab-case) and element references of the form `<kind>` or `<kind>:<id>`; the `:*` wildcard catches any element of that kind not placed elsewhere. The `default-layout` theme ships with Mote.
+
+### Element registration
+
+A plugin registers a UI element in `M.setup()`; it declares the element *kind*, not its placement (the active theme decides where it goes):
 
 ```lua
-mote.bind(keys, fn)                -- global keybinding ("cmd-k", "ctrl-shift-p", etc.)
-mote.bind(keys, ":command")        -- bind to a registered command id
-mote.unbind(keys)
+ui.register_element({
+  id = "bookmarks",
+  kind = "sidebar-panel",            -- one of the 8 fixed element kinds
+  title = "Bookmarks",
+  icon = "bookmark",
+  render = function(host)
+    -- host exposes the token vocabulary (theme tokens) and layout helpers
+  end,
+})
 ```
 
-### `mote.palette`
+### User config helpers
+
+Users program against `mote.*` helpers in `~/.config/mote/`:
 
 ```lua
-mote.palette.open()
-mote.palette.close()
+mote.plugins({ "dusk", "git-status" })        -- list of plugins to load
+mote.theme_overrides({ styling = { ... }, layout = { ... } })  -- deep-merged onto active theme
+mote.keys.bind("Mod+Shift+P", function() mote.palette.open() end)
+mote.dispatch.order("net:intercept_request", { "privacy-headers", "adblock" })
+```
+
+User overrides win on conflict (deep-merge); a theme switch preserves them.
+
+### Palette / omnibox / sidebar / tabs
+
+These are runtime surfaces the chrome exposes. The names below map onto the slot/element taxonomy:
+
+```lua
+mote.palette.open()                 -- the command-palette widget overlay
 mote.palette.add({ name, cmd, cat, keys })
-```
 
-### `mote.omnibox`
-
-```lua
-mote.omnibox.open(mode?)           -- mode = "url" | "cmd" | "ask" | "find"
+mote.omnibox.open(mode?)            -- mode = "url" | "cmd" | "find"  (the urlbar element)
 mote.omnibox.set(text)
 mote.omnibox.mode()
-```
 
-### `mote.sidebar`
-
-```lua
-mote.sidebar.open()
-mote.sidebar.close()
-mote.sidebar.toggle()
-mote.sidebar.default(panel_id)     -- set the panel that opens by default
-mote.sidebar.show(panel_id)
-mote.sidebar.side("left" | "right") -- where the sidebar docks
-```
-
-### `mote.tabs`
-
-```lua
-mote.tabs.new(url?)
-mote.tabs.close(id?)
+mote.tabs.current()                 -- tabstrip element / session
 mote.tabs.list()
-mote.tabs.switch(id)
-mote.tabs.hibernate(id)
-mote.tabs.pin(id)
+mote.tabs.create(url?)
+mote.tabs.close(id?)
+mote.tabs.focus(id)
+mote.tabs.move(id, { workspace = "..." })   -- includes pin-to-workspace
 ```
 
-### `mote.ai`
+Tab lifecycle uses DESIGN's vocabulary: a tab is *active*, *hidden in workspace* (renderer destroyed — DESIGN's "discard"), or *closed*. There is no `hibernate` verb in the runtime; where this spec's component files say "hibernated," read "hidden in workspace."
 
-```lua
-mote.ai.ask(prompt, opts)          -- one-shot
-mote.ai.conversation()             -- handle for an ongoing chat
-mote.ai.context.add(refs)          -- attach pages/files/selections as context
-```
+> **No `mote.ai`.** Mote ships no AI host API. AI is plugin-delivered: a plugin calls an LLM via `http:fetch` and reads credentials via `secret:read` (DESIGN principle #8, "LLM access lives in plugins"). The `[ask]` omnibox mode and an `assist` sidebar panel are reserved element names a future AI plugin may fill.
 
 ### Events
 
-Plugins subscribe via `mote.on(event, fn)`:
+Plugins declare handlers in the `M.events` (broadcast/inter-plugin) and `M.hooks` (filter-chain) module tables — never via an imperative `mote.on(...)` inside `setup()`. Event names use DESIGN's `domain:action` vocabulary:
 
-- `tab.opened`, `tab.closed`, `tab.activated`, `tab.hibernated`
-- `page.loading`, `page.loaded`, `page.error`
-- `theme.changed`, `theme.reloaded`
-- `palette.opened`, `palette.closed`
-- `omnibox.mode_changed`
-- `ai.message`, `ai.complete`
+```lua
+M.hooks = {
+  ["net:intercept_request"] = { priority = 70, handler = function(req) ... end },
+  ["page:on_load"]          = function(p) ... end,
+}
 
-## Standard slots
+M.events = {
+  ["tabs:on_change"]        = function(t) ... end,
+  ["workspaces:on_change"]  = function(w) ... end,
+}
+```
 
-Themes are free to declare custom slots, but **these are reserved names** the runtime expects:
+Canonical event/hook names include `net:intercept_request`, `page:on_load`, `tabs:on_change`, `workspaces:on_change`. (Spec-era names like `tab.opened` / `page.loaded` are superseded by these.)
 
-| Slot | Position | Default content | Notes |
-|---|---|---|---|
-| `tab_bar` | top | tabs list | May be empty if theme uses sidebar tabs only |
-| `omnibox` | top | omnibox element | Required |
-| `sidebar` | left or right | swappable panel (default: tabs) | Toggleable |
-| `viewport` | center, fill | the active page | Required, fills remaining space |
-| `status_line` | bottom | status indicators | Required, 22px |
-| `palette` | float, centered | command palette | Hidden until invoked |
+## Slots and element kinds (fixed in v0.1)
+
+The runtime owns a fixed set of layout **slots** and a fixed set of element **kinds**. Themes place elements into slots; plugins provide elements of a kind without choosing placement.
+
+**Slots:**
+
+| Slot | Position | Typical content |
+|---|---|---|
+| `top-bar` | top | `urlbar`, `tabstrip`, `action-button`s |
+| `left-sidebar` | left | `sidebar-panel`s, `widget`s |
+| `right-sidebar` | right | `sidebar-panel`s, `widget`s |
+| `bottom-bar` | bottom | `status-indicator`s (the status line) |
+| `urlbar-inline` | within the urlbar | `urlbar-extension`s |
+| `tab-row` | within the tab strip | `tabstrip`, per-tab pieces |
+
+**Element kinds:** `urlbar` (one, always present), `tabstrip` (one, always present), `bookmarks-bar`, `sidebar-panel`, `action-button`, `status-indicator`, `urlbar-extension`, `widget` (catch-all for non-standard plugin UI). The page content itself (the CEF web view) is not a plugin element — it is the runtime's render surface, filling the area not claimed by slots.
+
+The command palette is a `widget`-kind overlay, shown floating/centered and hidden until invoked.
 
 ## CSS / HTML conventions
 
-The chrome runtime renders these slots as standard HTML with `data-slot="<name>"` attributes. Themes can target slots via CSS variables on `[data-slot="..."]`.
+The chrome renders these slots as HTML with `data-slot="<name>"` attributes (kebab-case, matching the slot names above). Themes target slots via CSS variables on `[data-slot="..."]`.
 
 ```html
 <div class="mote-root" data-theme="dusk">
-  <div data-slot="tab_bar">...</div>
-  <div data-slot="omnibox">...</div>
-  <div class="mote-viewport">
-    <aside data-slot="sidebar">...</aside>
-    <main data-slot="viewport">...</main>
+  <div data-slot="top-bar">...</div>
+  <div class="mote-body">
+    <aside data-slot="left-sidebar">...</aside>
+    <main class="mote-page"><!-- CEF web view --></main>
+    <aside data-slot="right-sidebar">...</aside>
   </div>
-  <div data-slot="status_line">...</div>
+  <div data-slot="bottom-bar">...</div>
 </div>
 ```
 

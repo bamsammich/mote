@@ -23,7 +23,7 @@ The default themes are named for times of day in low light: `dusk`, `vellum`, `e
 ### Examples
 
 ✅ `omnibox empty. type a url, a query, or :help`
-✅ `7 tabs, 2 hibernated. ⌘W to close, ⌘⇧T to undo.`
+✅ `7 tabs, 2 hidden. ⌘W to close, ⌘⇧T to undo.`
 ✅ `theme loaded from ~/.config/mote/themes/dusk.lua (217 lines)`
 
 ❌ "Welcome back! Ready to browse? 🚀"
@@ -75,8 +75,8 @@ This gives the entire UI a tactile, mechanical feel — fitting for a tool aimed
 
 The `[mote]` lockup — mono brackets in amber, contents in sans — is **brand DNA** that should reappear in chrome wherever there's a "slot indicator":
 
-- The omnibox mode tag: `[url]` / `[cmd]` / `[ask]` / `[find]`
-- The sidebar panel header: `[tabs]` / `[assistant]` / `[plugins]`
+- The omnibox mode tag: `[url]` / `[cmd]` / `[find]` (`[ask]` reserved for a plugin)
+- The sidebar panel header: `[tabs]` / `[plugins]` / `[lua]` (`[assistant]` reserved for a plugin)
 - Any contextual region label in dev tooling
 
 **The pattern is:** mono open bracket (amber) → sans content (foreground color) → mono close bracket (amber).

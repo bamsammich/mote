@@ -98,8 +98,8 @@ The match highlights the matched substring in `var(--accent)` (the `<b>` in the 
 The palette's flat list comes from:
 
 1. Core commands (theme, tab, view, omnibox, sidebar)
-2. Plugin-contributed commands (via `mote.plugin.palette` in their manifest)
-3. User-bound aliases (via `mote.palette.add` in `init.lua`)
+2. Plugin-contributed commands (declared in the plugin's module table)
+3. User-bound aliases (via `mote.palette.add` in user config)
 
 Each row is `{ cat: string, name: string, keys?: string[] }`. The `cat` is the prefix users type to filter by category (e.g. typing "theme" narrows to all theme commands).
 
@@ -110,10 +110,6 @@ Each row is `{ cat: string, name: string, keys?: string[] }`. The `cat` is the p
 - Selected row gets `aria-selected="true"`; list has `role="listbox"`, rows `role="option"`.
 - Esc closes regardless of focus location inside the palette.
 - Reduced motion: fade-in becomes instant.
-
-## Example
-
-See [`preview/components-palette.html`](../../preview/components-palette.html).
 
 ## Anti-patterns
 

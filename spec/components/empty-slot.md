@@ -6,13 +6,13 @@ The visual fallback when a theme **declares** a slot but no element is **bound**
 
 ## Structure
 
-The runtime renders an empty slot automatically when `theme:slot(name)` is called without a subsequent `theme:bind(name, ...)`, or when `theme:unbind(name)` is called explicitly.
+The runtime renders an empty slot automatically when a theme's `layout` leaves a slot with no elements placed in it (an empty list `{}` or no `:*` element falling through to it).
 
 ```html
-<div data-slot="sidebar" class="slot-empty">
+<div data-slot="right-sidebar" class="slot-empty">
   <div class="empty-card">
     <span class="glyph">[ ]</span>
-    <span class="name">sidebar</span>
+    <span class="name">right-sidebar</span>
     <span class="hint">no element bound</span>
   </div>
 </div>
@@ -51,7 +51,7 @@ The runtime renders an empty slot automatically when `theme:slot(name)` is calle
 
 ## The dot pattern
 
-The `--dots` token is defined in `colors_and_type.css`:
+The `--dots` token (see `spec/03_tokens.md`) is defined in the chrome's runtime stylesheet:
 
 ```css
 --dots: radial-gradient(rgba(236, 229, 216, 0.06) 1px, transparent 1px) 0 0 / 4px 4px;
@@ -88,13 +88,17 @@ Restricting it gives it semantic weight: when a user sees dots, they know there'
 
 ## Programmatic API
 
-In production code, the empty-slot renderer is the runtime's responsibility, not a component to instantiate manually. The runtime walks the theme's declared slots, finds any without bindings, and inserts an empty-slot element with the slot's name.
+In production code, the empty-slot renderer is the runtime's responsibility, not a component to instantiate manually. The runtime walks the active theme's layout, finds any slot with no elements placed in it, and inserts an empty-slot element with the slot's name.
 
 ```lua
--- nothing to do; the runtime handles this. but observe:
-theme:slot("custom_dock", { position = "right", width = 320 })
--- no theme:bind("custom_dock", ...) follows
--- → result: a 320px right dock filled with the dot grid and "[ ] custom_dock"
+-- nothing to do; the runtime handles this. but observe a theme that
+-- leaves the right sidebar empty:
+M.theme = {
+  layout = {
+    ["right-sidebar"] = {},   -- no elements placed here
+  },
+}
+-- → result: the right-sidebar slot filled with the dot grid and "[ ] right-sidebar"
 ```
 
 ## Accessibility

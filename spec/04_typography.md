@@ -16,7 +16,7 @@ CSS variables:
 --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
 ```
 
-Fonts are loaded via `@import` at the top of `colors_and_type.css`. If Mote ships a commissioned typeface, drop `woff2` files into `fonts/` and replace the `@import` line with `@font-face` blocks; the semantic vars don't need to change.
+Fonts are loaded via `@import` at the top of the chrome's runtime stylesheet. If Mote ships a commissioned typeface, drop `woff2` files into the chrome's `fonts/` directory and replace the `@import` line with `@font-face` blocks; the semantic vars don't need to change.
 
 ## Ramps (use these — not raw size/weight)
 

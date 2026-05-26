@@ -45,7 +45,7 @@ A grouped, lightly-bordered container for related content. Mote's cards are deli
 | Variant | Difference |
 |---|---|
 | default | hairline border, surface-1 |
-| **assist** | border becomes `border-left: 2px solid var(--special)`, slot indicator at top: `[· assistant]` |
+| **assist** | for a plugin-provided AI surface (reserved styling — Mote ships no AI UI): `border-left: 2px solid var(--special)`, slot indicator at top: `[· assistant]` |
 | **danger** | border becomes `border-color: var(--danger)`; otherwise unchanged |
 | **inert** (data summary) | no padding tweaks; just a title + key/value rows in mono |
 

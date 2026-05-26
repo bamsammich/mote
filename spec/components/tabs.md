@@ -21,10 +21,12 @@ Display the open tabs. Mote's tab strip is **themable** — the default ships as
     <button class="close">×</button>
   </div>
   <div class="tab"><span class="audio">♪</span> ... </div>
-  <div class="tab is-hibernated">...</div>
+  <div class="tab is-hidden">...</div>
   <button class="new" aria-label="new tab">+</button>
 </div>
 ```
+
+The `is-hidden` state is the visual treatment for a tab that's been *discarded* (renderer destroyed but still shown in the strip) — see DESIGN's tab lifecycle. Earlier drafts called this "hibernated."
 
 ## Per-tab states
 
@@ -33,7 +35,7 @@ Display the open tabs. Mote's tab strip is **themable** — the default ships as
 | default | mono 11px, fg-2 text, hairline right border, close button hidden |
 | **hover** | `background: var(--surface-2)`, close button reveals |
 | **is-active** | `background: var(--bg)`, `border-top: 2px solid var(--accent)`, fg text, close visible |
-| **is-hibernated** | `opacity: 0.55`, favicon becomes hollow ring |
+| **is-hidden** | `opacity: 0.55`, favicon becomes hollow ring (discarded renderer) |
 | **is-pinned** | width collapses to 28px, title and close hidden |
 | **loading** | mono `···` ticker before the favicon, in accent color |
 | **audio** | unicode `♪` glyph before the favicon, in accent color |
@@ -70,7 +72,7 @@ Display the open tabs. Mote's tab strip is **themable** — the default ships as
 | ⌘T | new tab |
 | ⌘1 … ⌘9 | switch to tab N |
 | drag | reorder; off-strip = open in new window |
-| ⌘⇧H | hibernate active tab |
+| ⌘⇧H | hide active tab (move to hidden-in-workspace) |
 
 ## Theme variants
 
@@ -110,18 +112,14 @@ These are example user/theme overrides. Themes implement them by re-styling the 
 
 ### `vertical` — tabs in the sidebar
 
-When the user runs `mote.sidebar.default("tabs")` and a theme implements vertical tabs, the top tab strip slot is unbound (`theme:unbind("tab_bar")`) and the tabs render in the sidebar's `[tabs]` panel. See [`sidebar.md`](./sidebar.md).
+When the user runs `mote.sidebar.default("tabs")` and a theme implements vertical tabs, the theme leaves the `tabstrip` out of `top-bar` and the tabs render in the sidebar's `[tabs]` panel. See [`sidebar.md`](./sidebar.md).
 
 ## Accessibility
 
 - Each tab is `role="tab"`, the strip is `role="tablist"`.
 - The active tab carries `aria-selected="true"`.
 - Close buttons have `aria-label="close tab"`.
-- Hibernated tabs add `aria-label="<title> (hibernated)"`.
-
-## Example
-
-See [`preview/components-tabs.html`](../../preview/components-tabs.html) for the default strip plus underline and keycap theme variants.
+- Hidden (discarded) tabs add `aria-label="<title> (hidden)"`.
 
 ## Anti-patterns
 

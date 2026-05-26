@@ -7,7 +7,7 @@ Every value in Mote's visual system is a token. Tokens are exposed two ways:
 
 The names mirror each other: CSS `--surface-1` ↔ Lua `theme.tokens.surface_1`.
 
-The canonical source is [`colors_and_type.css`](../colors_and_type.css). This file is human reference; treat the CSS file as ground truth.
+This file is the canonical token reference. The chrome's runtime stylesheet declares these CSS variables and the Lua bridge surfaces them on `theme.tokens`; the names and values here are ground truth.
 
 ---
 
@@ -159,25 +159,24 @@ Shadow values are theme-tuned — dusk shadows are darker, vellum lighter.
 
 ## Lua-side access
 
+A plugin's `render` function receives a `host` that exposes the active theme's resolved tokens (mirrors each CSS var without the leading `--`):
+
 ```lua
-local theme = mote.theme.current()
-
--- token by name (mirrors CSS var without the leading "--")
-theme.tokens.accent           -- "#E0A458"
-theme.tokens.surface_1        -- string color
-theme.tokens.space_4          -- 16 (number, px)
-theme.tokens.radius_2         -- 4
-
--- override a token for this theme
-theme:set_token("accent", "#FF8800")
+render = function(host)
+  host.tokens.accent      -- "#E0A458"
+  host.tokens.surface_1   -- string color
+  host.tokens.space_4     -- 16 (number, px)
+  host.tokens.radius_2    -- 4
+end
 ```
+
+A theme sets token values declaratively in its `M.theme.styling` block (see `07_themes.md`); a user overrides them via `mote.theme_overrides({ styling = { colors = { accent = "#FF8800" } } })`.
 
 ## Adding a token
 
-If you genuinely need a new token, add it in **three places at once**:
+If you genuinely need a new token, add it in **two places at once**:
 
-1. `colors_and_type.css` — declare the CSS variable
-2. `spec/03_tokens.md` — add a row to the right table here
-3. The Lua bridge — expose it on `theme.tokens` (the runtime maps CSS-var-name → Lua-snake-case automatically; verify it picks up your new var)
+1. `spec/03_tokens.md` — add a row to the right table here (the canonical reference)
+2. The chrome's runtime stylesheet — declare the CSS variable; the Lua bridge maps CSS-var-name → Lua-snake-case automatically, so verify `theme.tokens` picks up your new var
 
 If a value isn't reused by more than one component, **don't tokenize it** — it's a local detail.

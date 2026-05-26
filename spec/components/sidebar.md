@@ -9,7 +9,7 @@ A theme picks the default panel; the user can override. Any element bound to the
 ## Structure
 
 ```html
-<aside class="sidebar" data-slot="sidebar">
+<aside class="sidebar" data-slot="left-sidebar">
   <nav class="activitybar">
     <button class="activity-btn is-active" aria-label="tabs">
       <svg><!-- Lucide: layers --></svg>
@@ -20,6 +20,7 @@ A theme picks the default panel; the user can override. Any element bound to the
     <button class="activity-btn" aria-label="history">
       <svg><!-- Lucide: history --></svg>
     </button>
+    <!-- "assistant" is shown only when an AI plugin registers an `assist` panel; reserved, not shipped -->
     <button class="activity-btn" aria-label="assistant">
       <svg><!-- Lucide: sparkles --></svg>
     </button>
@@ -39,7 +40,7 @@ A theme picks the default panel; the user can override. Any element bound to the
       <span class="sidepanel-slot">
         <span class="br">[</span><span class="name">tabs</span><span class="br">]</span>
       </span>
-      <span class="sidepanel-meta">4 open · 1 hibernated</span>
+      <span class="sidepanel-meta">4 open · 1 hidden</span>
     </header>
     <div class="sidepanel-body">
       <!-- panel content (TabsPanel / BookmarksPanel / etc.) -->
@@ -99,28 +100,27 @@ A theme picks the default panel; the user can override. Any element bound to the
 
 ## Panels (canonical)
 
-Mote ships these built-in. Plugin-contributed panels register the same way.
+Mote ships these built-in panels. Each is a `sidebar-panel`-kind element. Plugin-contributed panels register the same way.
 
 | Panel | Activity bar icon | Default content |
 |---|---|---|
 | `tabs` | `layers` | vertical tab list |
 | `bookmarks` | `bookmark` | grouped tree |
 | `history` | `history` | reverse-chrono rows |
-| `assist` | `sparkles` | AI chat thread + composer |
 | `plugins` | `puzzle` | installed plugins list with on/off |
-| `lua` | `braces` | live init.lua editor |
+| `lua` | `braces` | live config editor |
 
-Per-panel structure and styling is documented inline in the reference implementation ([`ui_kits/browser/Sidebar.jsx`](../../ui_kits/browser/Sidebar.jsx)). A panel is just an element bound to the `sidebar` slot:
+> **`assist` is a reserved panel name, not a shipped feature.** Mote ships no built-in AI chat panel (core principle #8). A future AI plugin may register a `sidebar-panel` element named `assist` (the `sparkles` activity-bar icon and the `[· assistant]` header lockup are documented so such a plugin stays on-brand), reaching its LLM via `http:fetch` + `secret:read`. The runtime ships the activity bar without an AI panel bound.
+
+A panel is a `sidebar-panel` element a plugin registers via `ui.register_element` (see `01_architecture.md`); the active theme places these into a sidebar slot and a user chooses the default panel:
 
 ```lua
-theme:bind("sidebar", {
-  mote.elements.sidebar_tabs,
-  mote.elements.sidebar_bookmarks,
-  mote.elements.sidebar_history,
-  mote.elements.sidebar_assist,
-  mote.elements.sidebar_plugins,
-  mote.elements.sidebar_lua,
-})
+-- in a theme's M.theme.layout
+["left-sidebar"] = { "sidebar-panel:tabs", "sidebar-panel:*" },
+```
+
+```lua
+-- in user config
 mote.sidebar.default("tabs")
 ```
 
@@ -136,21 +136,17 @@ mote.sidebar.default("tabs")
 
 ## Customization
 
-- **Side:** `mote.sidebar.side("left" | "right")`. Default is left.
+- **Side:** a theme places the sidebar in `left-sidebar` or `right-sidebar`; the user can override via `mote.theme_overrides`. Default is left.
 - **Activity bar visibility:** `mote.sidebar.activitybar(false)` hides the icon strip; switching panels then happens via keybinds only (pure dotfile-purist mode).
-- **Default panel:** `mote.sidebar.default("assist")`.
+- **Default panel:** `mote.sidebar.default("bookmarks")`.
 
-When the sidebar's `tabs` panel is the chosen default, themes typically also `theme:unbind("tab_bar")` to drop the redundant top tab strip. The runtime accepts both: a theme can keep both, drop the top strip, or drop the sidebar tabs panel.
+When the `tabs` panel is the chosen default, a theme typically leaves the `top-bar` `tabstrip` out of its layout (or maps `tab-row` empty) to drop the redundant top tab strip. The runtime accepts both: a theme can keep both, drop the top strip, or drop the sidebar tabs panel.
 
 ## Accessibility
 
 - The sidebar is `<aside aria-label="sidebar">`.
 - The activity bar is `<nav aria-label="sidebar panels">` with each button having an `aria-label` and `aria-pressed` matching its active state.
 - The active panel name is announced via `aria-live="polite"` in the panel header.
-
-## Example
-
-See the running implementation in [`ui_kits/browser/index.html`](../../ui_kits/browser/index.html) — clicking any activity-bar icon switches the bound panel.
 
 ## Anti-patterns
 

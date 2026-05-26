@@ -1,132 +1,85 @@
 # 07 · Themes (the Lua contract)
 
-Themes are the central programmable surface in Mote. A theme is a Lua file that declares slots, binds default elements, and applies token-level styling.
+Themes are the central programmable surface in Mote. **A theme is a plugin that fulfills the `theme:provider` capability** (exclusive — one theme active at a time). It declares element-to-slot placement (`layout`) and token-level styling (`styling`) as a **declarative module table**, `M.theme`. (See `01_architecture.md` and the project `DESIGN.md` for the full model.)
 
 ## File location
 
 ```
-~/.config/mote/themes/<name>.lua
+~/.config/mote/plugins/<name>/init.lua
 ```
 
-A theme is loaded by name:
-
-```lua
-mote.theme.load("dusk")
-```
+A theme is loaded like any plugin (e.g. `mote.plugins({ "dusk" })`); the runtime activates the one fulfilling `theme:provider`.
 
 ## Minimum theme
 
-```lua
-local mote = require("mote")
-local theme = mote.theme.new("my_theme")
-
-theme:slot("omnibox", { height = 36 })
-theme:slot("tab_bar", { height = 40 })
-theme:slot("status_line", { height = 22, position = "bottom" })
-theme:slot("sidebar", { width = 280, position = "left", resizable = true })
-theme:slot("viewport", {})
-
-return theme
-```
-
-A theme that declares no slots is invalid; the runtime rejects it. A theme must always declare at least `omnibox`, `viewport`, and `status_line`.
-
-## Declaring slots
+A styling-only theme inherits placement from `default-layout` and provides only `styling`:
 
 ```lua
-theme:slot(name, attrs)
+local M = {}
+
+M.manifest = {
+  schema = "v1",
+  name = "my-theme",
+  version = "1.0.0",
+  capabilities = { "theme:provider" },
+}
+
+M.theme = {
+  inherits = "default-layout",
+  styling = {
+    colors = { bg = "#191724", fg = "#e0def4", accent = "#E0A458" },
+  },
+}
+
+return M
 ```
 
-Attrs accepted:
+The `default-layout` theme ships with the browser, so most themes only recolor. A theme need not place any slot itself; placement falls back to the inherited layout.
 
-| Attr | Type | Default | Notes |
-|---|---|---|---|
-| `width` | number / "auto" / "fill" | "auto" | px or one of the gutter snap tokens |
-| `height` | number / "auto" / "fill" | "auto" | |
-| `position` | "top" / "bottom" / "left" / "right" / "float" / "inline" | depends on slot name | |
-| `bg` | color | `theme.tokens.bg` | use tokens |
-| `fg` | color | `theme.tokens.fg` | |
-| `border` | color | `theme.tokens.border` | |
-| `accent` | color | `theme.tokens.accent` | |
-| `radius` | radius token | `theme.tokens.radius_1` | |
-| `resizable` | bool | false | |
-| `min`, `max` | number | nil | for resizable slots |
+## Placement (the `layout` block)
 
-## Binding elements
-
-A slot is empty until an element is bound to it. Plugins contribute elements; themes pick which goes where.
+A more ambitious theme places elements into slots itself. Slots and element kinds are the fixed runtime set (kebab-case) from `01_architecture.md`:
 
 ```lua
-theme:bind("omnibox", mote.elements.omnibox_default)
-theme:bind("sidebar", mote.elements.sidebar_tabs)
-theme:bind("status_line", { mote.elements.vim_mode, mote.elements.connection, mote.elements.assist_status })
+M.theme = {
+  layout = {
+    ["top-bar"]      = { "tabstrip", "urlbar", "action-button:*" },
+    ["left-sidebar"] = {
+      elements     = { "sidebar-panel:bookmarks", "widget:*", "sidebar-panel:*" },
+      resizable    = true,
+      default_size = 280, min_size = 200, max_size = 500,
+    },
+    ["right-sidebar"] = {},   -- explicitly empty; renders the dot-grid motif
+  },
+  styling = { colors = { ... } },
+}
 ```
 
-Bind accepts a single element or an ordered list. Multiple elements in one slot render in declaration order.
+Element references are `<kind>` or `<kind>:<id>`. The `:*` wildcard catches any element of that kind not placed elsewhere — this is how a theme handles plugins it wasn't written to know about. A slot listed as `{}` is explicitly empty. The runtime decides which slots are required for a functional chrome; the urlbar and tabstrip elements always exist.
 
-Themes that want to leave a slot empty intentionally:
+## Resize and persistence
+
+Slots opt into user resizing via the long form shown above (`resizable`, `default_size`, `min_size`, `max_size`). The user can drag the slot edge within bounds; resized state persists per workspace. A theme switch resets to the new theme's defaults.
+
+## Styling (the `styling` block)
+
+The most common customization is recoloring. **Always work through the token vocabulary.**
 
 ```lua
-theme:unbind("tab_bar")  -- explicitly empty; renders the dot-grid motif
+M.theme = {
+  styling = {
+    colors  = { bg = "#1A1A1A", fg = "#FFFFFF", accent = "#FF8800" },
+    fonts   = { ui = "Geist, sans-serif", mono = "JetBrains Mono, monospace" },
+    spacing = { tab_height = 28, sidebar_padding = 8 },
+  },
+}
 ```
 
-## Token overrides
+The runtime resolves the active theme's `styling` into the CSS variables under `[data-theme="<name>"]` and onto `theme.tokens` for Lua.
 
-The most common theme customization is recoloring. **Always work through tokens.**
+## Mode-specific themes (light/dark)
 
-```lua
--- Recolor the brand accent for this theme
-theme:set_token("accent", "#FF8800")
-
--- Or, swap many at once
-theme:set_tokens({
-  accent     = "#FF8800",
-  surface_1  = "#1A1A1A",
-  fg         = "#FFFFFF",
-})
-```
-
-Setting a token rewrites the corresponding CSS variable under `[data-theme="<name>"]`.
-
-## Element style overrides
-
-For element-specific styling that doesn't fit a token, use `theme:style`:
-
-```lua
-theme:style("tab.active", {
-  border_top = { 2, theme.tokens.accent },
-})
-
-theme:style("button.primary", {
-  background = theme.tokens.moss,
-  border     = { 1, theme.tokens.moss },
-})
-
-theme:style("kbd", {
-  background = theme.tokens.surface_sunk,
-})
-```
-
-`theme:style(selector, props)` accepts:
-
-- **Selector:** an element class name or pseudo (`tab.active`, `button.primary`, `omnibox:focused`).
-- **Props:** a flat table of CSS property names (snake_case). Compound values like `border` accept `{ width, color }` or `{ width, style, color }`.
-
-## Mode-specific overrides (light/dark)
-
-Themes that want to provide both dusk-ish and vellum-ish modes can branch:
-
-```lua
-local theme = mote.theme.new("rosé-pine")
-
-if mote.system.color_scheme() == "light" then
-  theme:set_tokens({ bg = "#FAF4ED", ... })
-else
-  theme:set_tokens({ bg = "#191724", ... })
-end
-```
-
-Or simpler — define two themes and let the user pick.
+Mote does not branch a single theme on system color scheme. Ship two themes — a dark one and a light one — and let the user pick (the `dusk`/`vellum` pair is the canonical example). A user override can swap the active theme on a system color-scheme change in their own config.
 
 ## Standard themes
 
@@ -139,7 +92,7 @@ Mote ships these by default. Implementing the runtime, you must include them.
 | `embers` | dark | redder accent, hotter |
 | `gloam` | dark | bluer cool variant |
 
-The exact token values for each live in `themes/<name>.lua` in the runtime — they're not duplicated here. The values for `dusk` and `vellum` are what's encoded in `colors_and_type.css`.
+The exact token values for each live in the bundled theme plugins shipped with the runtime — they're not duplicated here. The `dusk` and `vellum` values are the defaults tabulated in `spec/03_tokens.md`.
 
 ## What themes CAN'T do
 
@@ -152,22 +105,24 @@ Mote's design system establishes constraints themes must respect. The runtime en
 
 These limits exist so a community theme can't easily produce something that doesn't feel like Mote. The token vocabulary is intentionally **constrained**.
 
-## User overrides (in `init.lua`)
+## User overrides (in user config)
 
-The user's `init.lua` runs after the theme. It can do anything a theme can do, plus install plugins and bind keys:
+The user's config runs after the theme and overrides it surgically via `mote.theme_overrides`, deep-merged onto the active theme. User overrides always win on conflict, and they survive a theme switch (re-applied on top of the new theme's defaults).
 
 ```lua
-local mote = require("mote")
-mote.theme.load("dusk")
+mote.plugins({ "dusk" })
 
--- override the active theme's accent
-mote.theme.current():set_token("accent", "#FF8800")
-
--- bind an element override at the user level
-mote.theme.current():bind("sidebar", mote.elements.sidebar_assistant)
+mote.theme_overrides({
+  styling = {
+    colors = { accent = "#FF8800" },
+  },
+  layout = {
+    ["right-sidebar"] = { "sidebar-panel:bookmarks" },
+  },
+})
 ```
 
-User overrides always win.
+This is the same deep-merge pattern Neovim users expect from `vim.opt`-style overrides.
 
 ## Next
 

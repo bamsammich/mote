@@ -8,14 +8,14 @@ Implementation contracts for every component in Mote's UI. Each file follows the
 - **States** — default, hover, focus, press, disabled, plus component-specific states
 - **Behavior** — keyboard, mouse, programmatic
 - **Accessibility** — ARIA, focus management, reduced motion
-- **Example** — a complete working snippet
+- **Example** — a complete working snippet (where present)
 
 ## Index
 
 | File | Component | Notes |
 |---|---|---|
 | [`button.md`](./button.md) | `<button>` | Keycap construction. primary / secondary / ghost / danger / icon |
-| [`omnibox.md`](./omnibox.md) | Omnibox | Multi-modal: `[url]` / `[cmd]` / `[ask]` / `[find]` |
+| [`omnibox.md`](./omnibox.md) | Omnibox | Multi-modal: `[url]` / `[cmd]` / `[find]` (`[ask]` reserved for a future AI plugin) |
 | [`tabs.md`](./tabs.md) | Tab strip | Horizontal default; theme variants: underline, keycap, vertical |
 | [`status-line.md`](./status-line.md) | Status line | Bottom strip; segments switch contextually |
 | [`palette.md`](./palette.md) | Command palette | Centered overlay, 640px |
@@ -26,6 +26,6 @@ Implementation contracts for every component in Mote's UI. Each file follows the
 | [`kbd.md`](./kbd.md) | `<kbd>` | Mechanical key glyph |
 | [`empty-slot.md`](./empty-slot.md) | Empty slot | Dot-grid motif for unbound slots |
 
-## Reference implementation
+## Source of truth
 
-The canonical CSS for every component lives in `ui_kits/browser/index.html`. The JSX components in `ui_kits/browser/*.jsx` show composition. **When in doubt, lift from there** — those files are kept in sync with this spec.
+Each component's contract in this folder — its structure, tokens, states, and behavior — is the source of truth. Token values come from [`../03_tokens.md`](../03_tokens.md). (Earlier drafts pointed at `ui_kits/browser/*` HTML/JSX assets that do not exist in this repo; ignore those references.)
