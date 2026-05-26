@@ -6,3 +6,5 @@ extend-exclude = ["target/", "*.lock"]
 [default.extend-words]
 # "mote" is the project name, not a typo of "mode"/"note".
 mote = "mote"
+# "wew" is a real crate (an alternative CEF wrapper), not a typo of "we".
+wew = "wew"
