@@ -1,0 +1,10 @@
+# taplo (TOML) formatting. Conservative settings: no key/array reordering, so
+# Cargo.toml diffs stay intentional and reviewable.
+[formatting]
+align_entries = false
+array_auto_expand = true
+array_auto_collapse = true
+compact_arrays = true
+indent_string = "  "
+reorder_keys = false
+reorder_arrays = false

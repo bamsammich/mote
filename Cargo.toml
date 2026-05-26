@@ -1,0 +1,56 @@
+# Virtual workspace root for Mote.
+#
+# Member crates live under `crates/`. The `[workspace.lints]` table below is the
+# single source of truth for lint policy: every crate opts in with
+# `[lints] workspace = true`, so quality rules are defined once and enforced
+# everywhere. CI/pre-commit run clippy with `-D warnings`, turning every `warn`
+# here into a hard failure while keeping local `cargo build` output readable.
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# Metadata inherited by member crates via `field.workspace = true`.
+[workspace.package]
+edition = "2024"
+rust-version = "1.95.0"
+license = "Apache-2.0"
+repository = "https://github.com/bamsammich/mote"
+homepage = "https://github.com/bamsammich/mote"
+authors = ["Travis Huddleston <travis@huddlehaus.com>"]
+
+# Shared dependency versions live here and are referenced from member crates with
+# `dep.workspace = true`. Populated as real crates are introduced.
+[workspace.dependencies]
+
+# --- Lint policy -------------------------------------------------------------
+# rustc lints. Group lints use priority = -1 so specific overrides below win.
+[workspace.lints.rust]
+unsafe_code = "deny"                                 # opt back in per-crate (e.g. CEF FFI) with justification
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+# Clippy lints. Enable the strong groups, then relax the few that fight workspaces.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Internal crates don't carry crates.io metadata (keywords/categories).
+cargo_common_metadata = "allow"
+# Unavoidable with transitive dependencies; not actionable per-crate.
+multiple_crate_versions = "allow"
+# Noisy in a single-product workspace where the repetition aids readability.
+module_name_repetitions = "allow"
+
+# Release profile tuned per the design doc's performance/footprint targets.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

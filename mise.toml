@@ -1,0 +1,28 @@
+# mise-managed toolchain for Mote.
+#
+# All project tooling is provisioned here so every contributor and CI runner
+# uses identical versions. Invoke any managed tool with `mise exec -- <cmd>`
+# (e.g. `mise exec -- cargo clippy`). Exact resolved versions are recorded in
+# mise.lock and committed for reproducibility.
+#
+# See CLAUDE.md for the full tool-usage contract.
+
+[tools]
+# Rust toolchain. rustup's default profile bundles `clippy` and `rustfmt`,
+# which back `cargo clippy` and `cargo fmt`. Pinned for reproducible builds.
+rust = "1.95.0"
+
+# Git hook runner — drives the pre-commit / pre-push checks (see lefthook.yml).
+lefthook = "latest"
+
+# TOML formatter + linter. Keeps Cargo.toml and other TOML canonically ordered.
+taplo = "latest"
+
+# Source-spelling checker for code, comments, and docs.
+typos = "latest"
+
+[settings]
+# Record exact resolved versions in mise.lock for byte-for-byte reproducibility.
+lockfile = true
+# Surface the active tool versions; quiet the idle hints.
+status.show_tools = false

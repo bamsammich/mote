@@ -1,0 +1,29 @@
+# Git hooks, run by lefthook. Every tool is invoked through `mise exec --` so the
+# hooks use the exact pinned versions from mise.toml regardless of the caller's
+# PATH. Install/refresh with `mise exec -- lefthook install`.
+
+pre-commit:
+  parallel: true
+  commands:
+    # Formatting must be applied, not just suggested — fail if anything is off.
+    rustfmt:
+      glob: "*.rs"
+      run: mise exec -- cargo fmt --all --check
+    # Lints as errors: the workspace lint policy is `warn`; `-D warnings`
+    # promotes every warning (clippy + rustc) to a hard failure here.
+    clippy:
+      glob: "*.rs"
+      run: mise exec -- cargo clippy --all-targets --all-features --workspace -- -D warnings
+    # Canonical TOML formatting for Cargo.toml and friends.
+    taplo:
+      glob: "*.toml"
+      run: mise exec -- taplo fmt --check {staged_files}
+    # Spelling across code, comments, and docs.
+    typos:
+      run: mise exec -- typos
+
+pre-push:
+  commands:
+    # The full test suite is the gate before code leaves the machine.
+    test:
+      run: mise exec -- cargo test --workspace --all-features

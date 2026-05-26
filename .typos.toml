@@ -1,0 +1,8 @@
+# typos configuration. Add project-specific false positives to [default.extend-words]
+# (e.g. identifiers that look like misspellings) as they surface.
+[files]
+extend-exclude = ["target/", "*.lock"]
+
+[default.extend-words]
+# "mote" is the project name, not a typo of "mode"/"note".
+mote = "mote"
