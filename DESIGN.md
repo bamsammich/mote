@@ -1013,7 +1013,7 @@ graph TB
 
 ### Identity
 
-Separate cookie jars, storage, history, and cache directories per identity. A tab in identity A cannot see anything from identity B; they are effectively different browser instances sharing a UI.
+Separate cookie jars, storage, history, and cache directories per identity. A tab in identity A is isolated from identity B across those surfaces — effectively independent browser profiles sharing a UI. This isolation is not total: certain Chromium-level state (GPU/shader caches, some network-layer state) is not fully partitioned per profile. See `docs/identity-isolation.md` for the enumerated isolation boundary and known leakage surfaces.
 
 ```
 identities/
@@ -1860,7 +1860,7 @@ The posture: **build for yourself, ship in public, accept help if it comes, neve
 - **Collector**: dispatch pattern, used inside an exclusive capability, where subscribers contribute results and the capability holder merges them.
 - **Fan-out per origin**: dispatch pattern for `page:inject_script` and `page:inject_css`, where each plugin runs independently in its own isolated world rather than chaining.
 - **Isolated world**: a separate V8 JavaScript context per plugin, used for `page:inject_script`. Prevents pages from observing or hijacking plugin scripts.
-- **Identity**: a fully isolated user-state container (cookies, storage, history, cache). Implemented as a Chromium profile. Hidden behind a single "default" identity until the user explicitly creates more.
+- **Identity**: a user-state container isolated across cookies, localStorage/IndexedDB, browsing history, and the HTTP disk cache directory per identity. Implemented as a Chromium profile. Hidden behind a single "default" identity until the user explicitly creates more. Isolation is bounded — not all Chromium state is fully partitioned per profile; see `docs/identity-isolation.md` for the exact surface.
 - **Workspace**: a user-facing context — pinned tabs, theme, default identity, default new-tab page. The orthogonal axis to identity. Dotfile-checkable.
 - **Session**: ephemeral runtime state — currently open tabs, scroll positions, undo history. Lives in `~/.local/state/`; not dotfile-managed by default.
 - **Active tab**: a tab visible in some window's tab strip; has its renderer alive (or discardable after idle).
