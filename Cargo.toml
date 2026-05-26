@@ -24,6 +24,12 @@ authors = ["Travis Huddleston <travis@huddlehaus.com>"]
 # Shared dependency versions live here and are referenced from member crates with
 # `dep.workspace = true`. Populated as real crates are introduced.
 [workspace.dependencies]
+# Chromium Embedded Framework bindings (tauri-apps/cef-rs). The MAJOR tracks the
+# Chromium major; the `+x.y.z` build metadata pins the exact CEF build. ONLY
+# `mote-cef` may depend on this — see DISCIPLINES.md §1 (CEF upgrade discipline).
+# Validated by the UI spike at 148.2.0 (Chromium 148); see
+# docs/research/ui-spike-cef-html.md.
+cef = "148.2.0"
 # Fast content-addressed plugin checksums (`blake3:<hex>`); see DESIGN §Integrity verification.
 blake3 = "1.8"
 # Ergonomic, idiomatic error enums for the shared vocabulary.

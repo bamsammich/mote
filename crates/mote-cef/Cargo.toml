@@ -13,3 +13,16 @@ publish = false
 workspace = true
 
 [dependencies]
+# The ONLY place in the workspace `cef` may appear. See DISCIPLINES.md §1.
+cef.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# `osr_smoke` example writes the first painted frame to a PNG as run-evidence.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# The `osr_smoke` example drives the full CEF process/subprocess split itself; it
+# is the integration "test" CEF can't be hosted by a plain `#[test]`.
+[[example]]
+name = "osr_smoke"
+path = "examples/osr_smoke.rs"
