@@ -13,3 +13,11 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-storage = { version = "0.0.0", path = "../mote-storage" }
+mote-types = { version = "0.0.0", path = "../mote-types" }
+thiserror.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

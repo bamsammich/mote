@@ -1532,6 +1532,14 @@ version = "0.0.0"
 [[package]]
 name = "mote-session"
 version = "0.0.0"
+dependencies = [
+ "mote-storage",
+ "mote-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "mote-shell"
