@@ -29,6 +29,11 @@ pub enum CefError {
     #[error("CEF lifecycle misuse: {0}")]
     Lifecycle(&'static str),
 
+    /// Creating or configuring a per-identity profile (`RequestContext`) failed,
+    /// or an [`crate::IdentityId`] was malformed.
+    #[error("CEF profile error: {0}")]
+    Profile(&'static str),
+
     /// `execute_process` indicated this invocation is a CEF subprocess. This is
     /// not a true error — it is the signal the caller must exit immediately;
     /// see [`crate::ProcessRole`].

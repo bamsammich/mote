@@ -23,8 +23,31 @@ use cef::{
 
 use crate::error::{CefError, Result};
 use crate::ffi::{self, FrameSlot, NavState, ViewSize};
+use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
+use crate::profile::ProfileHandle;
+
+/// The trust role a [`Page`] plays.
+///
+/// Mote composites a privileged HTML/CSS *chrome* document around untrusted web
+/// *content* (ADR-0003). The two run in **distinct CEF browsers in distinct
+/// renderer processes** (ADR-0005): the chrome page will host the host-bridge
+/// bindings (`window.mote`), and content pages must never reach them.
+///
+/// This enum establishes the distinction so Wave B can scope the host-bridge to
+/// `Chrome` pages only. **No bindings are installed in this wave** — the role is
+/// plumbed through `Page` creation and nothing more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PageRole {
+    /// Untrusted web content (the default). A normal browser with no privileged
+    /// bindings; this is what every web page Mote loads is.
+    #[default]
+    Content,
+    /// The privileged chrome document. Wave B will scope the host-bridge binding
+    /// to pages created with this role; here it only marks the page.
+    Chrome,
+}
 
 /// Options for creating an off-screen [`Page`].
 #[derive(Debug, Clone)]
@@ -35,6 +58,9 @@ pub struct PageOptions {
     pub height: u32,
     /// Off-screen paint rate (frames/second) requested from CEF.
     pub frame_rate: i32,
+    /// Trust role of the page (chrome vs untrusted content). Defaults to
+    /// [`PageRole::Content`].
+    pub role: PageRole,
 }
 
 impl Default for PageOptions {
@@ -43,6 +69,7 @@ impl Default for PageOptions {
             width: 1280,
             height: 800,
             frame_rate: 60,
+            role: PageRole::default(),
         }
     }
 }
@@ -52,6 +79,7 @@ pub struct Page {
     browser: Browser,
     frame: FrameSlot,
     nav: NavState,
+    role: PageRole,
     /// Set to `true` once [`Page::close`] has been called so that the [`Drop`]
     /// impl does not issue a second `close_browser` to an already-closing host.
     closed: AtomicBool,
@@ -60,6 +88,7 @@ pub struct Page {
 impl std::fmt::Debug for Page {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Page")
+            .field("role", &self.role)
             .field("paint_count", &self.frame.paint_count())
             .finish_non_exhaustive()
     }
@@ -67,16 +96,21 @@ impl std::fmt::Debug for Page {
 
 impl Page {
     /// Create an off-screen browser navigated to `url`, with no request
-    /// interception (every request allowed). Requires a live [`crate::Engine`].
+    /// interception (every request allowed) and the default
+    /// [`PageRole::Content`]. Requires a live [`crate::Engine`].
+    ///
+    /// The page is created in CEF's *global* request context (no per-identity
+    /// isolation). For identity-isolated pages use [`Page::with_profile`].
     ///
     /// # Errors
     /// [`CefError::BrowserCreate`] if CEF could not create the browser host.
     pub fn new(url: &str, options: &PageOptions) -> Result<Self> {
-        Self::with_interceptor(url, options, Arc::new(AllowAll))
+        Self::create(url, options, Arc::new(AllowAll), None)
     }
 
     /// Create an off-screen browser whose resource loads are gated by
-    /// `interceptor` (the ad-block / privacy seam, DESIGN §Engine — CEF).
+    /// `interceptor` (the ad-block / privacy seam, DESIGN §Engine — CEF), in the
+    /// global request context.
     ///
     /// # Errors
     /// [`CefError::BrowserCreate`] if CEF could not create the browser host.
@@ -84,6 +118,51 @@ impl Page {
         url: &str,
         options: &PageOptions,
         interceptor: Arc<dyn ResourceInterceptor>,
+    ) -> Result<Self> {
+        Self::create(url, options, interceptor, None)
+    }
+
+    /// Create an off-screen browser under `profile` — i.e. as part of a specific
+    /// Mote identity. The page's cookies, storage, history, and cache are
+    /// isolated to that profile's `RequestContext`
+    /// (see `docs/identity-isolation.md`). Requests are allowed by default;
+    /// combine with [`Page::with_profile_and_interceptor`] to gate them.
+    ///
+    /// # Profile readiness
+    /// A *freshly created* [`ProfileHandle`] (its first use) is initialised
+    /// asynchronously on the CEF UI thread. Under the Chrome runtime, a
+    /// synchronous OSR browser create against an uninitialised profile context
+    /// fails. Pump the [`crate::Engine`] a few times after creating a new profile
+    /// before creating the first page under it (and check the returned `Result`).
+    /// Subsequent pages under an already-warmed profile create immediately.
+    ///
+    /// # Errors
+    /// [`CefError::BrowserCreate`] if CEF could not create the browser host.
+    pub fn with_profile(url: &str, options: &PageOptions, profile: &ProfileHandle) -> Result<Self> {
+        Self::create(url, options, Arc::new(AllowAll), Some(profile))
+    }
+
+    /// Like [`Page::with_profile`] but also gates resource loads through
+    /// `interceptor`.
+    ///
+    /// # Errors
+    /// [`CefError::BrowserCreate`] if CEF could not create the browser host.
+    pub fn with_profile_and_interceptor(
+        url: &str,
+        options: &PageOptions,
+        profile: &ProfileHandle,
+        interceptor: Arc<dyn ResourceInterceptor>,
+    ) -> Result<Self> {
+        Self::create(url, options, interceptor, Some(profile))
+    }
+
+    /// The single creation path. `profile = None` uses CEF's global request
+    /// context; `Some(profile)` isolates the page to that identity's context.
+    fn create(
+        url: &str,
+        options: &PageOptions,
+        interceptor: Arc<dyn ResourceInterceptor>,
+        profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize {
             width: options.width.cast_signed(),
@@ -100,14 +179,23 @@ impl Page {
             ..Default::default()
         };
 
-        let browser = browser_host_create_browser_sync(
-            Some(&window_info),
-            Some(&mut client),
-            Some(&CefString::from(url)),
-            Some(&browser_settings),
-            None,
-            None,
-        )
+        // A closure so the global and profile-bound paths share one creation call;
+        // the request context (if any) is borrowed only for the duration here.
+        let mut make = |request_context: Option<&mut cef::RequestContext>| {
+            browser_host_create_browser_sync(
+                Some(&window_info),
+                Some(&mut client),
+                Some(&CefString::from(url)),
+                Some(&browser_settings),
+                None,
+                request_context,
+            )
+        };
+
+        let browser = match profile {
+            Some(p) => p.with_context(|ctx| make(Some(ctx))),
+            None => make(None),
+        }
         .ok_or_else(|| CefError::BrowserCreate {
             url: url.to_string(),
         })?;
@@ -116,8 +204,15 @@ impl Page {
             browser,
             frame,
             nav,
+            role: options.role,
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// This page's trust role ([`PageRole::Chrome`] vs [`PageRole::Content`]).
+    #[must_use]
+    pub const fn role(&self) -> PageRole {
+        self.role
     }
 
     /// The most recently painted off-screen frame, if CEF has delivered one.
@@ -175,6 +270,81 @@ impl Page {
     /// Reload the current page.
     pub fn reload(&self) {
         self.browser.reload();
+    }
+
+    // -----------------------------------------------------------------------
+    // Input injection (the OSR browser host has no OS window, so the host layer
+    // must feed it events). Coordinates are page-local; the window→page mapping
+    // is mote-shell's job (Wave B). All are no-ops if the browser has no host
+    // (i.e. it is closing/closed).
+    // -----------------------------------------------------------------------
+
+    /// Inject a mouse-move at page-local `pos`. `mouse_leave` marks the cursor
+    /// leaving the page surface (CEF stops hover/tracking).
+    pub fn send_mouse_move(&self, pos: MousePosition, modifiers: Modifiers, mouse_leave: bool) {
+        if let Some(host) = self.browser.host() {
+            let event = input::mouse_event(pos, modifiers);
+            host.send_mouse_move_event(Some(&event), i32::from(mouse_leave));
+        }
+    }
+
+    /// Inject a mouse button press or release at page-local `pos`.
+    ///
+    /// `click_count` is the consecutive-click count (1 = single, 2 = double, …);
+    /// the host layer tracks click sequencing.
+    pub fn send_mouse_button(
+        &self,
+        pos: MousePosition,
+        button: MouseButton,
+        action: ButtonAction,
+        click_count: i32,
+        modifiers: Modifiers,
+    ) {
+        if let Some(host) = self.browser.host() {
+            let event = input::mouse_event(pos, modifiers);
+            host.send_mouse_click_event(
+                Some(&event),
+                button.to_cef(),
+                input::click_is_up(action),
+                click_count,
+            );
+        }
+    }
+
+    /// Inject a mouse-wheel scroll at page-local `pos`. `delta_x`/`delta_y` are
+    /// scroll deltas (CEF interprets the units; positive `delta_y` scrolls up).
+    pub fn send_mouse_wheel(
+        &self,
+        pos: MousePosition,
+        delta_x: i32,
+        delta_y: i32,
+        modifiers: Modifiers,
+    ) {
+        if let Some(host) = self.browser.host() {
+            let event = input::mouse_event(pos, modifiers);
+            host.send_mouse_wheel_event(Some(&event), delta_x, delta_y);
+        }
+    }
+
+    /// Inject a keyboard event (key down / up / char). A full keystroke is
+    /// typically a `Down`, then a `Char` (carrying the typed character), then an
+    /// `Up`; the host layer is responsible for that sequencing.
+    pub fn send_key(&self, key: KeyInput) {
+        if let Some(host) = self.browser.host() {
+            let event = input::key_event(key);
+            host.send_key_event(Some(&event));
+        }
+    }
+
+    /// Tell this off-screen browser whether it currently has input focus.
+    ///
+    /// Maps to CEF `SetFocus`. The host layer mirrors logical focus into CEF so
+    /// exactly one browser (chrome *or* a content page) believes it is focused at
+    /// a time (Phase-2 plan §1.3). `gained = true` → focus gained.
+    pub fn send_focus(&self, gained: bool) {
+        if let Some(host) = self.browser.host() {
+            host.set_focus(i32::from(gained));
+        }
     }
 
     /// Request that CEF close this browser. Idempotent — safe to call more than

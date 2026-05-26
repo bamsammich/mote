@@ -11,8 +11,15 @@
 //!   makes one binary serve as both the browser process and CEF subprocesses.
 //! - [`Engine`] / [`EngineConfig`] — RAII lifecycle for the CEF runtime
 //!   (initialise, pump the message loop, shut down).
-//! - [`Page`] / [`PageOptions`] — an off-screen browser (a Mote tab): create,
-//!   navigate, history, and read painted [`PaintFrame`]s.
+//! - [`Page`] / [`PageOptions`] / [`PageRole`] — an off-screen browser (a Mote
+//!   tab): create (optionally under a [`ProfileHandle`] and with a privileged
+//!   chrome vs untrusted content role), navigate, history, inject input, and read
+//!   painted [`PaintFrame`]s.
+//! - [`ProfileHandle`] / [`ProfileManager`] / [`IdentityId`] — per-identity
+//!   browsing profiles. A Mote identity is one Chromium `RequestContext` with an
+//!   isolated on-disk storage path (see `docs/identity-isolation.md`).
+//! - [`MousePosition`] / [`MouseButton`] / [`KeyInput`] / [`Modifiers`] et al. —
+//!   the CEF-free input vocabulary `Page`'s `send_*` methods inject.
 //! - [`ResourceInterceptor`] / [`RequestInfo`] / [`RequestDecision`] — the
 //!   network-interception seam ad-block / privacy plugins ride on.
 //!
@@ -34,16 +41,20 @@ mod browser;
 mod engine;
 mod error;
 mod ffi;
+mod input;
 mod interceptor;
 mod paint;
 mod process;
+mod profile;
 
-pub use browser::{Page, PageOptions};
+pub use browser::{Page, PageOptions, PageRole};
 pub use engine::{Engine, EngineConfig};
 pub use error::{CefError, Result};
+pub use input::{ButtonAction, KeyAction, KeyInput, Modifiers, MouseButton, MousePosition};
 pub use interceptor::{AllowAll, RequestDecision, RequestInfo, ResourceInterceptor};
 pub use paint::{PaintFrame, PixelFormat};
 pub use process::{ProcessRole, bootstrap};
+pub use profile::{IdentityId, ProfileHandle, ProfileManager};
 
 #[cfg(test)]
 mod guard_test {

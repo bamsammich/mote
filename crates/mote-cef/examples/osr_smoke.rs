@@ -73,6 +73,7 @@ fn main() -> ExitCode {
             width: WIDTH,
             height: HEIGHT,
             frame_rate: 60,
+            ..PageOptions::default()
         },
     ) {
         Ok(p) => p,
