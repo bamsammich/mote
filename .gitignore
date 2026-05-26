@@ -22,3 +22,6 @@ target
 
 # CEF distribution cache (downloaded by mote-cef / spikes)
 .mote-cef-cache/
+
+# Playwright MCP screenshot/snapshot artifacts
+.playwright-mcp/
