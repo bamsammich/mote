@@ -13,3 +13,9 @@ publish = false
 workspace = true
 
 [dependencies]
+# The thin wgpu compositor (ADR-0003 / plan §1.1): blits the chrome + page OSR
+# textures into the window. `raw-window-handle` is the window-handle seam from
+# mote-shell; wgpu 29's `create_surface` is safe for it (no `unsafe`).
+wgpu.workspace = true
+raw-window-handle.workspace = true
+thiserror.workspace = true

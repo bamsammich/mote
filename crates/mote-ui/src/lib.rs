@@ -12,10 +12,13 @@
 //!   tokens and the per-theme resolver, the CSS-var ↔ Lua bridge of `spec/03`.
 //! - [`UiHost`] / [`Node`] — the host API a plugin's `render(host)` targets and
 //!   the seam `mote-shell` drives, defined with **no** GPU/window/CEF deps.
-//!
-//! The wgpu compositor and the winit window are Wave B and do not live here
-//! yet; this Wave-A surface is rendering-backend-independent by design
-//! (`docs/plans/02-browser-shell.md` §2).
+//! - [`Compositor`] — the thin wgpu compositor (ADR-0003, plan §1.1): blits the
+//!   focused page's OSR texture into the viewport rect, then the chrome texture
+//!   over the full window (chrome-surrounds-content). Decoupled from CEF — it
+//!   takes raw frame buffers ([`Compositor::update_chrome`] /
+//!   [`Compositor::update_page`]), so this crate has **no** `mote-cef`
+//!   dependency. The slot/element/theme model above stays
+//!   rendering-backend-independent.
 //!
 //! ## Chrome assets
 //!
@@ -24,12 +27,14 @@
 //! the shell can bundle them into the binary and serve them to the chrome CEF
 //! browser. Both themes are covered token-only in [`TOKENS_CSS`].
 
+mod compositor;
 mod element;
 mod host;
 mod layout;
 mod slot;
 mod token;
 
+pub use compositor::{Compositor, CompositorError, PixelFormat, ViewportRect};
 pub use element::{Element, ElementKind, ElementRef, RefSelector};
 pub use host::{Node, UiHost};
 pub use layout::Layout;
