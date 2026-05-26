@@ -1,0 +1,107 @@
+/*
+ * base.css — global reset, the slot grid, the [mote] lockup, and the two
+ * system-wide animations (cursor blink, plum pulse). Token-only.
+ *
+ * Per spec/01 the chrome is a slot grid: top-bar across the top, a body row of
+ * (left-sidebar | page | right-sidebar), then bottom-bar. The page <main> is
+ * transparent where the composited web view shows through.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font: var(--text-body);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---- The slot grid ---- */
+
+.mote-root {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.mote-body {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  min-height: 0;
+}
+
+/* The page region: transparent so the compositor blits the web view through
+ * it (spike proved `background: transparent` on the page slot works). */
+.mote-page {
+  background: transparent;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* A slot is just a region. Structure inside it is owned by the bound element. */
+[data-slot] {
+  min-width: 0;
+}
+
+/* ---- The [mote] lockup — brand DNA ----
+ * Mono brackets in --accent, sans (or mono, per context) contents in --fg.
+ * Reused for slot/mode indicators: [url] [cmd] [find], [tabs], [ ] empty. */
+.lockup {
+  font: var(--text-mono);
+  letter-spacing: var(--tracking-mono);
+  white-space: nowrap;
+}
+
+.lockup .br {
+  color: var(--accent);
+}
+
+.lockup .name {
+  color: var(--fg);
+}
+
+/* ---- The two periodic animations in the entire chrome ---- */
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* The plum "working" pulse — the only ambient animation (spec/05). */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ---- Reduced motion: global, not per-component (spec/05) ---- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    transition-duration: 0ms !important;
+  }
+}

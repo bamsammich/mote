@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Content-Security-Policy: the chrome document loads only its own bundled
+      assets. No remote scripts; Lucide ships as inline SVG (no CDN), honoring
+      DESIGN's no-implicit-network posture. `img-src data:` covers inline
+      favicon placeholders. Tighten further when served over `mote://`.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; script-src 'self';"
+    />
+    <title>mote</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="components/kbd.css" />
+    <link rel="stylesheet" href="components/button.css" />
+    <link rel="stylesheet" href="components/field.css" />
+    <link rel="stylesheet" href="components/card.css" />
+    <link rel="stylesheet" href="components/badge.css" />
+    <link rel="stylesheet" href="components/omnibox.css" />
+    <link rel="stylesheet" href="components/tabs.css" />
+    <link rel="stylesheet" href="components/status-line.css" />
+    <link rel="stylesheet" href="components/palette.css" />
+    <link rel="stylesheet" href="components/sidebar.css" />
+    <link rel="stylesheet" href="components/empty-slot.css" />
+  </head>
+
+  <!--
+    The slot grid. `data-theme="dusk"` is the boot default; a theme switch is an
+    instant CSS-var swap on this attribute. Each region is a `[data-slot]` div
+    the runtime owns; structure inside a slot is owned by the bound element.
+
+    Default layout (spec/01 + plan §5.2):
+      top-bar       = { tabstrip, urlbar }   (tab-row + urlbar-inline nest here)
+      left-sidebar  = { sidebar-panel:* }    (tabs panel default)
+      right-sidebar = {}                     (empty-slot motif)
+      bottom-bar    = { status-indicator:* } (the status line)
+    The page <main> is transparent — the compositor blits the web view through.
+
+    NO AI surfaces: the reserved assist sidebar panel and the reserved ask
+    omnibox mode are names only (ADR-0002); nothing here binds them.
+  -->
+  <body class="mote-root" data-theme="dusk">
+    <!-- ========================= TOP BAR ========================= -->
+    <div data-slot="top-bar">
+      <!-- tab-row: the tabstrip element nests here -->
+      <div data-slot="tab-row">
+        <div class="tabbar" role="tablist" aria-label="open tabs">
+          <div class="tab is-pinned" role="tab" aria-label="pinned">
+            <span class="favicon"></span>
+          </div>
+          <div class="tab is-active" role="tab" aria-selected="true">
+            <span class="favicon"></span>
+            <span class="title">motesh.dev — themes</span>
+            <button class="close" aria-label="close tab">×</button>
+          </div>
+          <div class="tab" role="tab" aria-selected="false">
+            <span class="load">···</span>
+            <span class="favicon"></span>
+            <span class="title">build #482 — running</span>
+            <button class="close" aria-label="close tab">×</button>
+          </div>
+          <div
+            class="tab is-hidden"
+            role="tab"
+            aria-selected="false"
+            aria-label="archive.lua (hidden)"
+          >
+            <span class="favicon"></span>
+            <span class="title">archive.lua</span>
+            <button class="close" aria-label="close tab">×</button>
+          </div>
+          <button class="new" aria-label="new tab">+</button>
+        </div>
+      </div>
+
+      <!-- the urlbar element; urlbar-inline nests inside .right -->
+      <form class="omnibar-row" role="search" aria-label="omnibox">
+        <div class="omni mode-url">
+          <span class="mode lockup" aria-hidden="true">
+            <span class="br">[</span><span class="name">url</span
+            ><span class="br">]</span>
+          </span>
+          <div class="body">
+            <span class="secure" aria-label="secure connection">⎈</span>
+            <span class="host-dim">github.com/motesh/</span>
+            <span class="host">mote</span>
+            <span class="path">/blob/main/init.lua</span>
+            <!-- urlbar-inline: urlbar-extension elements nest here -->
+            <div class="right" data-slot="urlbar-inline">
+              <button class="btn btn-ghost btn-icon" aria-label="bookmark">
+                ★
+              </button>
+              <button class="btn btn-ghost btn-icon" aria-label="toggle sidebar">
+                ▣
+              </button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <!-- ========================= BODY ROW ========================= -->
+    <div class="mote-body">
+      <!-- left-sidebar: tabs panel bound by default -->
+      <aside data-slot="left-sidebar" class="sidebar" aria-label="sidebar">
+        <nav class="activitybar" aria-label="sidebar panels">
+          <button class="activity-btn is-active" aria-label="tabs" aria-pressed="true">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+              <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
+              <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
+            </svg>
+          </button>
+          <button class="activity-btn" aria-label="bookmarks" aria-pressed="false">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
+            </svg>
+          </button>
+          <button class="activity-btn" aria-label="history" aria-pressed="false">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+          </button>
+          <button class="activity-btn" aria-label="plugins" aria-pressed="false">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 19.39a1 1 0 0 1-1.414 0l-1.683-1.683a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L12.39 4.39a1 1 0 0 1 1.414 0z" />
+            </svg>
+          </button>
+          <button class="activity-btn" aria-label="config" aria-pressed="false">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5a2 2 0 0 0 2 2h1" />
+              <path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1" />
+            </svg>
+          </button>
+          <div class="activitybar-spacer"></div>
+          <button class="activity-btn" aria-label="close sidebar" aria-pressed="false">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect width="18" height="18" x="3" y="3" rx="2" />
+              <path d="M9 3v18" />
+              <path d="m16 15-3-3 3-3" />
+            </svg>
+          </button>
+        </nav>
+        <div class="sidepanel">
+          <header class="sidepanel-head">
+            <span class="sidepanel-slot lockup" aria-live="polite">
+              <span class="br">[</span><span class="name">tabs</span
+              ><span class="br">]</span>
+            </span>
+            <span class="sidepanel-meta">4 open · 1 hidden</span>
+          </header>
+          <div class="sidepanel-body">
+            <!-- TabsPanel (sidebar-panel:tabs) renders its vertical tab list here -->
+          </div>
+        </div>
+      </aside>
+
+      <!-- the page region: transparent; compositor blits the web view through -->
+      <main class="mote-page" data-slot="viewport" aria-label="page"></main>
+
+      <!-- right-sidebar: declared but unbound -> empty-slot motif -->
+      <aside
+        data-slot="right-sidebar"
+        class="slot-empty"
+        aria-label="empty slot: right-sidebar"
+      >
+        <div class="empty-card">
+          <span class="glyph lockup" aria-hidden="true">[ ]</span>
+          <span class="name">right-sidebar</span>
+          <span class="hint">no element bound</span>
+        </div>
+      </aside>
+    </div>
+
+    <!-- ========================= BOTTOM BAR ========================= -->
+    <div data-slot="bottom-bar">
+      <div class="sl" role="status" aria-live="polite">
+        <div class="seg mode" aria-label="vim mode: NORMAL">NORMAL</div>
+        <div class="seg"><span class="dot ok"></span>https · tls 1.3</div>
+        <div class="seg spacer"></div>
+        <div class="seg" style="color: var(--fg-2)">7 tabs · 142mb</div>
+        <div class="seg theme-btn">theme: dusk</div>
+      </div>
+    </div>
+
+    <!--
+      Command palette overlay (widget kind). Hidden until invoked (⌘⇧P).
+      Rendered here for reference/structure; the runtime toggles its presence.
+    -->
+    <template id="palette-template">
+      <div
+        class="palette-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-label="command palette"
+      >
+        <div class="palette">
+          <div class="palette-input">
+            <span class="prompt">›_</span>
+            <input value="theme" placeholder="search commands" aria-label="command palette" />
+            <span class="count">12</span>
+          </div>
+          <div class="palette-list" role="listbox">
+            <div class="palette-row is-sel" role="option" aria-selected="true">
+              <span class="cat">theme</span>
+              <span class="name"><b>theme</b> switch — dusk</span>
+              <span class="keys"><kbd class="kbd-sm">⏎</kbd></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+  </body>
+</html>

@@ -1,0 +1,118 @@
+/*
+ * omnibox.css — URL / command / find bar. Per spec/components/omnibox.md.
+ * Multi-modal: the [url]/[cmd]/[find] bracket lockup tags the mode. Sunk well,
+ * vim block cursor in --accent (mode-tinted for find / reserved ask).
+ * Token-only. No backdrop blur, no animated mode switch, no thin caret.
+ */
+
+.omni {
+  display: flex;
+  align-items: stretch;
+  height: 32px;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  font: var(--text-mono);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+.omni.is-focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(224, 164, 88, 0.18);
+}
+
+/* `[ask]` is reserved for a future AI plugin — styling documented, not shipped. */
+.omni.is-focused.mode-ask {
+  border-color: var(--special);
+}
+
+.omni.is-focused.mode-find {
+  border-color: var(--info);
+}
+
+/* ---- Mode tag — the [mote] bracket lockup ---- */
+.omni .mode {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--accent);
+  border-right: 1px solid var(--border);
+  background: var(--surface-1);
+  user-select: none;
+}
+
+.omni .mode .br {
+  color: var(--accent);
+}
+
+.omni .mode .name {
+  color: var(--fg);
+}
+
+/* ---- Body — URL display or input ---- */
+.omni .body {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+.omni .secure {
+  color: var(--success);
+}
+
+.omni .host-dim {
+  color: var(--fg-2);
+}
+
+.omni .host {
+  color: var(--fg);
+}
+
+.omni .path {
+  color: var(--fg-2);
+}
+
+.omni .right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-2);
+}
+
+.omni .omni-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: var(--text-mono);
+  color: var(--fg);
+  caret-color: transparent; /* the block cursor is drawn explicitly */
+}
+
+.omni .omni-input::placeholder {
+  color: var(--fg-3);
+}
+
+/* ---- Vim block cursor in --accent ---- */
+.omni .cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--accent);
+  margin-left: 1px;
+  animation: blink 1.2s steps(2, end) infinite;
+}
+
+.omni.mode-ask .cursor {
+  background: var(--special);
+}
+
+.omni.mode-find .cursor {
+  background: var(--info);
+}

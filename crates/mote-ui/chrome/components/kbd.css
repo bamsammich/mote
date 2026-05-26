@@ -1,0 +1,32 @@
+/*
+ * kbd.css — key glyphs. The keycap construction the whole UI inherits from.
+ * Per spec/components/kbd.md. Token-only.
+ */
+
+kbd {
+  font: var(--text-kbd);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px; /* keycap */
+  border-radius: var(--radius-1);
+  background: var(--surface-1);
+  color: var(--fg-1);
+}
+
+/* Multiple keys go in separate <kbd> inside a .combo wrapper. */
+.combo {
+  display: inline-flex;
+  gap: 2px;
+  vertical-align: baseline;
+}
+
+/* Tighter variant for palette rows and button hints. */
+.kbd-sm {
+  font-size: 9px;
+  padding: 1px 3px;
+  min-width: 14px;
+}

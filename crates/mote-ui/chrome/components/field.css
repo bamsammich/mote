@@ -1,0 +1,113 @@
+/*
+ * field.css — text inputs, selects, textareas, toggles, and the reflect
+ * affordance. Per spec/components/field.md. Token-only. No checkboxes, no
+ * floating labels.
+ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field label {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.field input,
+.field select,
+.field textarea {
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: var(--radius-1);
+  padding: 7px 10px;
+  font: var(--text-mono);
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.field input[disabled],
+.field select[disabled],
+.field textarea[disabled] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.field input[aria-invalid="true"],
+.field select[aria-invalid="true"],
+.field textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.field .error {
+  font: var(--text-mono-sm);
+  color: var(--danger);
+}
+
+/* ---- Toggle (no checkbox) ---- */
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.switch {
+  width: 28px;
+  height: 16px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-dot); /* status-indicator exception to no-pill */
+  position: relative;
+  cursor: pointer;
+  flex: none;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--fg-2);
+  transition: left var(--dur-base) var(--ease-out);
+}
+
+.switch.on {
+  background: var(--accent);
+  border-color: var(--accent-deep);
+}
+
+.switch.on::after {
+  left: 13px;
+  background: var(--accent-on);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.toggle .label {
+  font: var(--text-body);
+  color: var(--fg);
+}
+
+/* The lua-equivalent of the change, taught alongside the field. */
+.reflect {
+  margin-left: auto;
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+}

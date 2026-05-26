@@ -1,0 +1,39 @@
+/*
+ * empty-slot.css — fallback for a declared-but-unbound slot. Per
+ * spec/components/empty-slot.md. The signature dot-grid texture lives ONLY
+ * here. The [ ] glyph reuses the bracket lockup. Token-only.
+ */
+
+.slot-empty {
+  background-image: var(--dots);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-card {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.empty-card .glyph {
+  font: var(--text-mono);
+  font-size: 22px;
+  color: var(--accent);
+  letter-spacing: -0.04em;
+}
+
+.empty-card .name {
+  font: var(--text-mono-sm);
+  color: var(--fg-1);
+}
+
+.empty-card .hint {
+  font: var(--text-mono-sm);
+  font-size: 9px;
+  color: var(--fg-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}

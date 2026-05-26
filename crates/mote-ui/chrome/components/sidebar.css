@@ -1,0 +1,109 @@
+/*
+ * sidebar.css — side-slot host: activity bar + swappable panel. Per
+ * spec/components/sidebar.md. Docked (no shadow). The panel header uses the
+ * [tabs] bracket lockup. Token-only. Activity icons <= 28px, no labels.
+ */
+
+.sidebar {
+  display: grid;
+  grid-template-columns: 36px 280px; /* activity bar + panel */
+  border-right: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+/* When placed in right-sidebar, the divider flips. */
+.sidebar.side-right {
+  border-right: 0;
+  border-left: 1px solid var(--border);
+  grid-template-columns: 280px 36px;
+}
+
+.activitybar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 0;
+  gap: 2px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+
+.activitybar-spacer {
+  flex: 1;
+}
+
+.activity-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  color: var(--fg-2);
+  cursor: pointer;
+  position: relative;
+  transition: background var(--dur-micro) var(--ease-out);
+}
+
+.activity-btn:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.activity-btn.is-active {
+  color: var(--accent);
+}
+
+.activity-btn.is-active::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--accent);
+}
+
+.activity-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ---- Panel ---- */
+.sidepanel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface-1);
+}
+
+.sidepanel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+}
+
+.sidepanel-slot .br {
+  color: var(--accent);
+}
+
+.sidepanel-slot .name {
+  color: var(--fg);
+}
+
+.sidepanel-meta {
+  color: var(--fg-2);
+}
+
+.sidepanel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}

@@ -1,0 +1,95 @@
+/*
+ * button.css — keycap-construction buttons. Per spec/components/button.md.
+ * Token-only. No pills, no gradients, no drop shadows, no hover scale.
+ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 14px;
+  font: var(--text-small);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px; /* keycap */
+  border-radius: var(--radius-1);
+  background: var(--surface-1);
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    background var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out),
+    border-bottom-width var(--dur-micro) var(--ease-out),
+    border-color var(--dur-micro) var(--ease-out);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: var(--accent-deep);
+}
+
+.btn-secondary {
+  background: var(--surface-1);
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--fg-1);
+  border-color: var(--border-subtle); /* always visible — never borderless */
+}
+
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: rgba(200, 74, 44, 0.4);
+}
+
+.btn-icon {
+  width: 32px;
+  padding: 0;
+}
+
+/* ---- States ---- */
+
+.btn-primary:hover {
+  background: var(--accent-soft);
+}
+
+.btn-secondary:hover {
+  background: var(--surface-2);
+}
+
+.btn-ghost:hover {
+  background: var(--surface-1);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.btn-danger:hover {
+  background: rgba(200, 74, 44, 0.08);
+  border-color: rgba(200, 74, 44, 0.6);
+}
+
+/* Press: bottom border collapses to 1px and the cap drops 1px. */
+.btn:active {
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+  background: var(--surface-3); /* paired press signal for reduced motion */
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}

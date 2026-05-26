@@ -1,0 +1,53 @@
+/*
+ * badge.css — small inline status/count label. Per spec/components/badge.md.
+ * Slab feel (radius-1, not pill). Desaturated border-only colors. Token-only.
+ * No icons, no filled saturated backgrounds.
+ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px;
+  font: var(--text-mono-sm);
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  background: var(--surface-1);
+  color: var(--fg-1);
+}
+
+.badge.success {
+  color: var(--success);
+  border-color: rgba(107, 142, 78, 0.3);
+}
+
+.badge.danger {
+  color: var(--danger);
+  border-color: rgba(200, 74, 44, 0.35);
+}
+
+.badge.info {
+  color: var(--info);
+  border-color: rgba(91, 124, 163, 0.35);
+}
+
+.badge.special {
+  color: var(--special);
+  border-color: rgba(142, 111, 160, 0.35);
+}
+
+.badge.accent {
+  color: var(--accent);
+  border-color: rgba(224, 164, 88, 0.4);
+}
+
+.badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}

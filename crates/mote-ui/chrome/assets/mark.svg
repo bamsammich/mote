@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none" role="img" aria-label="mote">
+  <!-- The [·] mark, favicon. Brackets + dot hard-coded amber (spec/06). -->
+  <text x="3" y="23" font-family="JetBrains Mono, ui-monospace, monospace" font-size="22" fill="#E0A458">[</text>
+  <circle cx="16" cy="16" r="2.5" fill="#E0A458" />
+  <text x="21" y="23" font-family="JetBrains Mono, ui-monospace, monospace" font-size="22" fill="#E0A458">]</text>
+</svg>

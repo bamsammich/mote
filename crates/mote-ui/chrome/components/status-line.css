@@ -1,0 +1,86 @@
+/*
+ * status-line.css — 22px persistent mono strip in bottom-bar. Per
+ * spec/components/status-line.md. Composed of status-indicator segments.
+ * Token-only. No icons (mono text surface), no animated swaps, taller than 22px.
+ */
+
+.sl {
+  display: flex;
+  align-items: stretch;
+  height: var(--chrome-statusline); /* 22px */
+  background: var(--surface-1);
+  border-top: 1px solid var(--border);
+  font: var(--text-mono-sm);
+  color: var(--fg-1);
+}
+
+.sl .seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-right: 1px solid var(--border);
+}
+
+.sl .seg:last-child {
+  border-right: 0;
+}
+
+.sl .spacer {
+  flex: 1;
+  border-right: 0;
+  padding: 0;
+}
+
+/* ---- Vim mode chip ---- */
+.sl .mode {
+  background: var(--accent);
+  color: var(--accent-on);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.sl .mode.insert {
+  background: var(--moss);
+  color: var(--ink-900);
+}
+
+.sl .mode.cmd {
+  background: var(--dusk-blue);
+  color: var(--paper-100);
+}
+
+/* ---- Status dots ---- */
+.sl .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-dot);
+  background: var(--fg-3);
+  flex: none;
+}
+
+.sl .dot.ok {
+  background: var(--success);
+}
+
+.sl .dot.work {
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* Reserved plum "working" treatment for a plugin-provided indicator. */
+.sl .dot.special {
+  background: var(--special);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.sl .dot.off {
+  background: var(--fg-3);
+}
+
+/* The theme segment is clickable (cycles theme). */
+.sl .theme-btn {
+  cursor: pointer;
+}

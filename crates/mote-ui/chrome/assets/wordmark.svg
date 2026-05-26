@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="24" viewBox="0 0 96 24" fill="none" role="img" aria-label="mote">
+  <!-- Brackets hard-coded amber so the mark stays recognizable across themes;
+       wordmark text uses currentColor (spec/06). -->
+  <text x="2" y="18" font-family="JetBrains Mono, ui-monospace, monospace" font-size="18" fill="#E0A458">[</text>
+  <text x="14" y="18" font-family="Geist, ui-sans-serif, sans-serif" font-size="17" font-weight="600" fill="currentColor">mote</text>
+  <text x="76" y="18" font-family="JetBrains Mono, ui-monospace, monospace" font-size="18" fill="#E0A458">]</text>
+</svg>
