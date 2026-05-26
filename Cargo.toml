@@ -30,6 +30,13 @@ authors = ["Travis Huddleston <travis@huddlehaus.com>"]
 # Validated by the UI spike at 148.2.0 (Chromium 148); see
 # docs/research/ui-spike-cef-html.md.
 cef = "148.2.0"
+# Windowing + GPU compositor stack (ADR-0004). winit owns the OS window/event
+# loop (mote-shell); wgpu + raw-window-handle back the chrome+page texture
+# compositor (mote-ui). Versions verified compatible: winit 0.30 exposes rwh
+# 0.6, wgpu 29 consumes rwh 0.6 with a safe `create_surface`.
+winit = "0.30"
+wgpu = "29"
+raw-window-handle = "0.6"
 # Fast content-addressed plugin checksums (`blake3:<hex>`); see DESIGN §Integrity verification.
 blake3 = "1.8"
 # Ergonomic, idiomatic error enums for the shared vocabulary.
