@@ -130,9 +130,15 @@ impl Registry {
     /// `permissions`, `capabilities`, and `consumes` term references a known
     /// registry entry with correct grammar.
     ///
-    /// Handles dynamic-resource forms (risk C4): for a `dynamic`-shaped
-    /// permission the validator checks the `domain:action` is known and a
-    /// resource segment is present, but does not constrain the concrete name.
+    /// For `dynamic`-shaped permissions (`mcp:client:<name>`,
+    /// `secret:read:<name>`), the validator additionally checks that the
+    /// resource segment is a **literal name** matching `[A-Za-z0-9_.:-]+`.
+    /// Glob metacharacters (`*`, `!`, `[`, `?`, `{`) are rejected, preventing
+    /// a plugin from requesting access to every secret or every MCP server via
+    /// a wildcard resource.  A `dynamic` resource that passes this check is
+    /// guaranteed to match exactly one named target via exact equality — the
+    /// absence of metacharacters means the underlying [`GlobSet`] evaluation
+    /// degenerates to a literal string comparison.
     ///
     /// All term lists are checked; the **first** offending term yields its
     /// specific error.
@@ -140,7 +146,8 @@ impl Registry {
     /// # Errors
     ///
     /// Returns the first [`SchemaValidationError`] encountered: unknown
-    /// permission/capability, a grammar failure, or a resource-shape mismatch.
+    /// permission/capability, a grammar failure, a resource-shape mismatch, or
+    /// an invalid dynamic resource name.
     pub fn validate_schema(
         &self,
         permissions: &[String],
@@ -193,12 +200,35 @@ impl Registry {
                 }
             }
             ResourceShape::Dynamic => {
-                if parsed.resource().is_none() {
-                    return Err(SchemaValidationError::MissingResource {
-                        term: term.to_owned(),
-                        domain: parsed.domain().to_owned(),
-                        action: parsed.action().to_owned(),
-                    });
+                match parsed.resource() {
+                    None => {
+                        return Err(SchemaValidationError::MissingResource {
+                            term: term.to_owned(),
+                            domain: parsed.domain().to_owned(),
+                            action: parsed.action().to_owned(),
+                        });
+                    }
+                    Some(res) => {
+                        // Dynamic permissions grant access to exactly ONE named
+                        // resource (`mcp:client:<server-name>`,
+                        // `secret:read:<name>`).  The name must be a literal
+                        // identifier — no glob metacharacters.  Allowing `*` or
+                        // `!` here would silently widen the grant to every
+                        // resource, defeating the per-resource scoping.
+                        //
+                        // Allowed charset: `[A-Za-z0-9_.:-]`.  This covers real
+                        // secret names (e.g. `anthropic_api_key`) and MCP server
+                        // names (e.g. `my-mcp-server`, `corp.internal:8080`).
+                        // Any other character — including `*`, `!`, `[`, `?`,
+                        // `{` — is rejected here.
+                        if !is_valid_dynamic_name(res.to_string().as_str()) {
+                            return Err(SchemaValidationError::InvalidDynamicResource {
+                                term: term.to_owned(),
+                                domain: parsed.domain().to_owned(),
+                                action: parsed.action().to_owned(),
+                            });
+                        }
+                    }
                 }
             }
             // Glob: resource optional; absent means all-in-scope.
@@ -260,6 +290,23 @@ impl Registry {
         }
         Ok(())
     }
+}
+
+/// Returns `true` if `name` is a valid literal resource name for a
+/// `dynamic`-shaped permission.
+///
+/// The allowed charset is `[A-Za-z0-9_.:-]` — every character that appears in
+/// real secret names (`anthropic_api_key`, `STRIPE_SECRET_KEY`) and MCP server
+/// names (`my-mcp-server`, `corp.internal:8080`).  Any glob metacharacter
+/// (`*`, `!`, `[`, `]`, `?`, `{`, `}`) is excluded, guaranteeing that the
+/// name can only ever match itself (exact equality) when evaluated as a glob.
+///
+/// An empty name is also rejected.
+fn is_valid_dynamic_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '.' | ':' | '-'))
 }
 
 #[cfg(test)]
@@ -511,6 +558,146 @@ mod tests {
             .validate_schema(&["secret:read".to_owned()], &[], &[])
             .unwrap_err();
         assert!(matches!(err, SchemaValidationError::MissingResource { .. }));
+    }
+
+    // --- step 1: dynamic resource must be a literal name (no globs) ----------
+
+    #[test]
+    fn dynamic_wildcard_resource_is_rejected() {
+        // `secret:read:*` must fail — a wildcard would grant access to ALL
+        // secrets, defeating per-resource scoping.
+        let r = v1();
+        let err = r
+            .validate_schema(&["secret:read:*".to_owned()], &[], &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, SchemaValidationError::InvalidDynamicResource { .. }),
+            "expected InvalidDynamicResource, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_mcp_wildcard_resource_is_rejected() {
+        // `mcp:client:*` must fail — same reason as above.
+        let r = v1();
+        let err = r
+            .validate_schema(&["mcp:client:*".to_owned()], &[], &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, SchemaValidationError::InvalidDynamicResource { .. }),
+            "expected InvalidDynamicResource, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_partial_glob_resource_is_rejected() {
+        // `secret:read:*key` still contains a glob metacharacter — must fail.
+        let r = v1();
+        let err = r
+            .validate_schema(&["secret:read:*key".to_owned()], &[], &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, SchemaValidationError::InvalidDynamicResource { .. }),
+            "expected InvalidDynamicResource, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_negation_resource_is_rejected() {
+        // `secret:read:!anthropic_api_key` contains `!` — must fail.
+        // (This also exercises the deny-glob path via `!`.)
+        // Note: `!`-prefixed strings parse as negated globs in the permission
+        // grammar; we still reject them for dynamic resources.
+        let r = v1();
+        let err = r
+            .validate_schema(&["secret:read:!anthropic_api_key".to_owned()], &[], &[])
+            .unwrap_err();
+        // The `!` is rejected either as a grammar error (negated glob rejected at
+        // parse time if the glob parser is strict) or as InvalidDynamicResource.
+        // Either way the term must not pass validation.
+        assert!(
+            matches!(
+                err,
+                SchemaValidationError::InvalidDynamicResource { .. }
+                    | SchemaValidationError::PermissionGrammar { .. }
+            ),
+            "expected validation failure for negated dynamic resource, got {err:?}"
+        );
+    }
+
+    // --- step 1 + gatekeeper: dynamic literal allows exactly one resource ----
+
+    #[test]
+    fn dynamic_literal_allows_exactly_named_resource() {
+        // A literal dynamic permission grants access to exactly the named resource
+        // and nothing else.
+        use mote_permissions::{Decision, Gatekeeper, GrantSet, GrantSetGatekeeper, Permission};
+
+        let r = v1();
+        // Passes step-1 validation.
+        r.validate_schema(&["secret:read:anthropic_api_key".to_owned()], &[], &[])
+            .expect("literal dynamic permission must pass step-1 validation");
+
+        // Build a gatekeeper for the validated permission.
+        let perm: Permission = "secret:read:anthropic_api_key".parse().unwrap();
+        let gs = GrantSet::from_permissions(&[perm]).unwrap();
+        let gk = GrantSetGatekeeper::new(gs);
+
+        // Exact match: allowed.
+        assert_eq!(
+            gk.check("secret", "read", "anthropic_api_key"),
+            Decision::Allow,
+            "exact resource must be allowed"
+        );
+        // Any other resource: not allowed.
+        assert!(
+            !gk.check("secret", "read", "other_secret").is_allowed(),
+            "a different resource must not be allowed"
+        );
+        assert!(
+            !gk.check("secret", "read", "anthropic_api_key_extra")
+                .is_allowed(),
+            "a superstring of the resource must not be allowed"
+        );
+        assert!(
+            !gk.check("secret", "read", "*").is_allowed(),
+            "a wildcard query must not be allowed by a literal grant"
+        );
+    }
+
+    // --- regression: non-dynamic glob permissions still use glob semantics ---
+
+    #[test]
+    fn glob_permission_still_uses_glob_semantics() {
+        // `http:fetch:https://*.example.com/*` is a Glob-shaped permission and
+        // must continue to match via glob (wildcard expansion), not exact equality.
+        use mote_permissions::{Decision, Gatekeeper, GrantSet, GrantSetGatekeeper, Permission};
+
+        let r = v1();
+        r.validate_schema(&["http:fetch:https://*.example.com/*".to_owned()], &[], &[])
+            .expect("glob http:fetch permission must pass step-1 validation");
+
+        let perm: Permission = "http:fetch:https://*.example.com/*".parse().unwrap();
+        let gs = GrantSet::from_permissions(&[perm]).unwrap();
+        let gk = GrantSetGatekeeper::new(gs);
+
+        // Subdomain matches via glob.
+        assert_eq!(
+            gk.check("http", "fetch", "https://api.example.com/v1"),
+            Decision::Allow,
+            "subdomain URL must match the glob"
+        );
+        assert_eq!(
+            gk.check("http", "fetch", "https://static.example.com/img/logo.png"),
+            Decision::Allow,
+            "another subdomain URL must match the glob"
+        );
+        // A different domain must not match.
+        assert!(
+            !gk.check("http", "fetch", "https://evil.com/exfil")
+                .is_allowed(),
+            "a different domain must not match the glob"
+        );
     }
 
     #[test]

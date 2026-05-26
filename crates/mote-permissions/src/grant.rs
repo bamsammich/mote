@@ -74,6 +74,16 @@ impl GrantSet {
     /// [`GlobSet`]; their resource globs are combined.  A permission without an
     /// explicit resource is treated as `*` (allow all resources for that pair).
     ///
+    /// ## Exact-match guarantee for dynamic resources
+    ///
+    /// `dynamic`-shaped permissions (`mcp:client:<name>`, `secret:read:<name>`)
+    /// are validated by `mote-registry` step 1 to contain **no glob
+    /// metacharacters** before they can reach this function.  A resource string
+    /// containing only `[A-Za-z0-9_.:-]` characters (the enforced charset) is
+    /// treated by the underlying [`GlobSet`] as a literal — it matches exactly
+    /// one string (itself).  No additional exact-match storage path is needed;
+    /// the glob semantics degenerate to equality for metacharacter-free patterns.
+    ///
     /// # Errors
     ///
     /// Returns [`GlobParseError`] if the implicit `*` resource cannot be parsed

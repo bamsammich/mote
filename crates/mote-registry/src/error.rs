@@ -117,6 +117,27 @@ pub enum SchemaValidationError {
         action: String,
     },
 
+    /// The resource segment of a `dynamic`-shaped permission contains glob
+    /// metacharacters or characters outside the allowed literal-name charset
+    /// (`[A-Za-z0-9_.:-]`).
+    ///
+    /// Dynamic permissions (`mcp:client:<name>`, `secret:read:<name>`) grant
+    /// access to ONE named resource.  Glob metacharacters (`*`, `!`, `[`, `?`,
+    /// `{`) would silently widen the grant to multiple resources, which is
+    /// forbidden.  Use an exact, literal name only.
+    #[error(
+        "permission `{domain}:{action}` takes a literal resource name, but {term:?} contains \
+         glob metacharacters or invalid characters (allowed: [A-Za-z0-9_.:-])"
+    )]
+    InvalidDynamicResource {
+        /// The offending term, verbatim.
+        term: String,
+        /// The parsed domain.
+        domain: String,
+        /// The parsed action.
+        action: String,
+    },
+
     /// A capability term (in `capabilities` or `consumes`) is not a known
     /// capability in this registry.
     #[error("unknown capability {term:?}: not in the {version} registry")]

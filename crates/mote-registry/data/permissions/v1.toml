@@ -385,7 +385,7 @@ domain = "mcp"
 action = "client"
 resource = "dynamic"
 description = "Call out to a named external MCP server. The <server-name> resource is plugin-supplied."
-risk = "Outbound MCP connection; the concrete server name is validated at resolution time."
+risk = "Outbound MCP connection; the server name is validated at load time (step 1) to a literal name, not a glob."
 
 [[permission]]
 domain = "mcp"
