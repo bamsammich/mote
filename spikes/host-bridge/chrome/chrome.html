@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- A restrictive CSP for the privileged chrome document: no remote anything,
+     no inline-injected script other than this trusted bootstrap. In production
+     this would be served from a mote:// scheme with a strict policy. -->
+<title>chrome-boot</title>
+</head>
+<body>
+<div id="out">pending</div>
+<script>
+// PRIVILEGED CHROME BOOTSTRAP.
+// The cef message router installs window.cefQuery on THIS document's context
+// (the renderer gates registration to the chrome URL only — see RenderProcessHandler).
+// We wrap the raw cefQuery into a structured, promise-returning window.mote.invoke.
+(function () {
+  if (typeof window.cefQuery !== "function") {
+    document.title = "BRIDGE-MISSING"; // would indicate the gate failed
+    document.getElementById("out").textContent = "no cefQuery";
+    return;
+  }
+  window.mote = {
+    // Structured op: a fixed verb + a JSON-serializable payload. NOT arbitrary eval.
+    invoke: function (op, params) {
+      return new Promise(function (resolve, reject) {
+        window.cefQuery({
+          request: JSON.stringify({ op: op, params: params || {} }),
+          onSuccess: function (response) {
+            try { resolve(JSON.parse(response)); }
+            catch (e) { resolve(response); }
+          },
+          onFailure: function (code, msg) { reject({ code: code, message: msg }); },
+        });
+      });
+    },
+  };
+
+  // Fire a real round-trip on load: chrome JS -> Rust handler -> chrome JS.
+  window.mote.invoke("list_tabs", { window: 1 }).then(function (res) {
+    // Render the structured response into the DOM (what production chrome does).
+    document.getElementById("out").textContent =
+      "tabs=" + JSON.stringify(res.tabs) + " echoedFrom=" + res.handled_by;
+    // Report success out-of-band via the title so the Rust browser process can
+    // observe the completed round-trip deterministically.
+    document.title = "ROUNDTRIP-OK:" + res.tabs.length;
+  }).catch(function (err) {
+    document.title = "ROUNDTRIP-FAIL:" + (err && err.message);
+  });
+})();
+</script>
+</body>
+</html>

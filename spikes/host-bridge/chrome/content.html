@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>content-boot</title>
+</head>
+<body>
+<div id="out">untrusted web content</div>
+<script>
+// UNTRUSTED WEB CONTENT. This stands in for a hostile page. It probes for the
+// privileged bridge and tries to call it. It MUST find nothing reachable.
+(function () {
+  var hasMote = (typeof window.mote === "object" && window.mote !== null);
+  var hasCefQuery = (typeof window.cefQuery === "function");
+
+  // Try to actually invoke the bridge if either binding leaked.
+  var attempted = false;
+  try {
+    if (hasCefQuery) {
+      attempted = true;
+      window.cefQuery({
+        request: JSON.stringify({ op: "list_tabs", params: {} }),
+        onSuccess: function (r) { document.title = "LEAK:cefQuery-succeeded:" + r; },
+        onFailure: function (c, m) { document.title = "LEAK:cefQuery-present-but-failed"; },
+      });
+    } else if (hasMote) {
+      attempted = true;
+      window.mote.invoke("list_tabs").then(function (r) {
+        document.title = "LEAK:mote-succeeded";
+      });
+    }
+  } catch (e) {
+    attempted = true;
+    document.title = "LEAK:threw:" + e;
+  }
+
+  if (!hasMote && !hasCefQuery) {
+    // Neither privileged binding exists in this renderer context. Isolation holds.
+    document.title = "ISOLATED:no-bridge";
+    document.getElementById("out").textContent = "no mote, no cefQuery — isolated";
+  } else if (!attempted) {
+    document.title = "PARTIAL:binding-present-mote=" + hasMote + "-cefQuery=" + hasCefQuery;
+  }
+})();
+</script>
+</body>
+</html>

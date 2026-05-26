@@ -1,0 +1,25 @@
+# Standalone THROWAWAY spike — empty [workspace] detaches it from the repo workspace
+# (the root workspace also `exclude = ["spikes"]`).
+[workspace]
+
+[package]
+name = "host-bridge-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cef = "148"
+
+[[bin]]
+name = "host-bridge-spike"
+path = "src/main.rs"
+
+# CEF re-execs the SAME-shaped helper for renderer/gpu/utility subprocesses. The
+# helper installs the RENDERER-side message router via a custom App.
+[[bin]]
+name = "host-bridge-spike_helper"
+path = "src/bin/helper.rs"
+
+[profile.release]
+opt-level = 3
