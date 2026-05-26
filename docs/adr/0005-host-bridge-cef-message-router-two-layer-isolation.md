@@ -64,3 +64,14 @@ The spike confirmed content browsers receive neither `window.mote` nor `window.c
 - DISCIPLINES.md §1 — CEF upgrade discipline (`mote-cef` is the only crate touching `cef::`)
 - `docs/research/host-bridge-spike.md` — the validating spike
 - `docs/plans/02-browser-shell.md` §1.4, §3 — host bridge in the shell architecture
+
+## Amendment (2026-05-26): origin/scheme-based gating via a privileged `mote://` scheme
+
+The mechanism above gated the privileged binding on a runtime `chrome_url` string that had to be configured identically in two processes (main + renderer) — stringly-typed agreement across a process boundary, and the one remaining safe-by-convention seam. (A mismatch fails *closed*: the chrome silently loses the bridge rather than leaking it — but it is still fragile and unrepresentable-by-construction was the goal.)
+
+**Resolution (maintainer-approved):** serve the chrome from a fixed, privileged internal scheme — **`mote://chrome`** — registered by `mote-cef` and backed by the embedded chrome assets. The gate matches the document's **origin** (`mote://chrome`), a compile-time constant, not a runtime string:
+
+- There is no `chrome_url` parameter to pass to two places, so nothing can diverge — the fragility is removed by construction.
+- Web content is `http(s)` and **cannot be served from the privileged `mote://` scheme**, so origin-based gating is structurally unforgeable — the standard browser approach for internal pages (`chrome://`, `about:`). This is *stronger* than URL-string matching, not merely more convenient.
+
+This **supersedes** the runtime-`chrome_url` URL-string gate in the Decision Outcome. The scheme is registered standard/secure/local; `mote-cef` exposes a host API to register the served chrome resources (fed by `mote-ui`'s embedded assets) without `mote-cef` depending on `mote-ui`. The `mote-cef` HostBridge drops its `chrome_url`/`bootstrap_with_bridge(url)` parameters in favor of the fixed scheme origin. (Also resolves the plan's open D6 — `mote://` vs `file://` chrome serving — in favor of the custom scheme.)
