@@ -13,3 +13,12 @@ publish = false
 workspace = true
 
 [dependencies]
+# The window + event loop (ADR-0004). The shell is the single OS event source.
+winit.workspace = true
+# The window-handle seam handed to the compositor (mote-ui owns the surface).
+raw-window-handle.workspace = true
+# CEF lifecycle / pages / host bridge — the ONLY crate that may touch cef is
+# mote-cef; the shell goes through its safe API (DISCIPLINES §1).
+mote-cef = { path = "../mote-cef" }
+# The compositor + chrome assets (slot/element/theme model + materialized CSS).
+mote-ui = { path = "../mote-ui" }

@@ -17,3 +17,8 @@ name = "mote"
 path = "src/main.rs"
 
 [dependencies]
+# The CEF process-split shim must run first in main (DISCIPLINES §1: only
+# mote-cef touches cef; mote-app goes through its API).
+mote-cef = { path = "../mote-cef" }
+# The browser composition root the browser process boots.
+mote-shell = { path = "../mote-shell" }
