@@ -143,7 +143,7 @@ Getting the binary to users.
 The work that turns "works on the happy path" into "doesn't make me regret using it."
 
 - [ ] Performance targets met: plugin call overhead <100μs Lua / <500μs WASM, tab switch <1ms, no GC pauses, cold start <500ms
-- [ ] Memory targets met: shell process ~50–100 MB resident excluding CEF renderers
+- [ ] Memory targets met: shell process at/near its ~200–250 MB Chromium-embedding floor, per-page CEF renderer overhead ~10–35 MB (see DESIGN.md Performance targets)
 - [ ] No crashes during ~1 week of primary-developer daily use
 - [ ] All v0.1 plugins tested on both macOS (AeroSpace) and Linux (Hyprland)
 - [ ] Permission approval UI is readable and not overwhelming

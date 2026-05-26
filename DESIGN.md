@@ -133,7 +133,7 @@ The browser shell is written in Rust. The reasoning:
 - Plugin call overhead: <100 μs for Lua, <500 μs for WASM
 - Tab switch latency: <1 ms
 - No GC pauses, ever
-- Shell process resident memory: ~50–100 MB (excluding CEF renderer processes)
+- Shell (main/browser) process resident memory: a ~200–250 MB floor, dominated by the GPU compositor device and the CEF browser process; the figure actively minimized is the **per-page CEF renderer overhead (~10–35 MB)**. (The earlier ~50–100 MB aspiration predated embedding a GPU compositor and CEF in the shell; it is not achievable for any Chromium-embedding browser. Measured across three UI-architecture spikes — see `docs/research/ui-spike-*.md`.)
 - Cold start: <500 ms to first paint
 - Request interception throughput: thousands of concurrent requests/sec without bottlenecking
 
