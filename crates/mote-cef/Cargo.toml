@@ -1,0 +1,15 @@
+[package]
+name = "mote-cef"
+description = "CEF isolation wrapper — the only crate permitted to import cef/cef_rs; wraps the Chromium Embedded Framework lifecycle, browser hosts, resource hooks, and isolated worlds behind safe Rust types."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

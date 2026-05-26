@@ -1,0 +1,15 @@
+[package]
+name = "mote-session"
+description = "Identity/workspace/session state — the three-axis state model: Chromium-profile identities, workspace definitions with pinned tabs, and continuously-persisted session state (open tabs, scroll, history, form drafts)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

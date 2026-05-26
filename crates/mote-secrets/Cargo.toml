@@ -1,0 +1,15 @@
+[package]
+name = "mote-secrets"
+description = "Secret subsystem — secrets.lua parsing, $secret:<name> resolution at plugin-launch, the keyring/password-manager/age/env/file backends, and per-secret permission enforcement with per-identity override."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

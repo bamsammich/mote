@@ -1,0 +1,15 @@
+[package]
+name = "mote-mcp"
+description = "Model Context Protocol endpoint — the MCP server (loopback by default), aggregating namespaced tools from all mcp:server fulfillers, routing calls to the owning plugin under its permissions, and the outbound mcp:client path."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

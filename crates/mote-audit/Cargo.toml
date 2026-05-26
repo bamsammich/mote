@@ -1,0 +1,15 @@
+[package]
+name = "mote-audit"
+description = "Lock-free permission/network audit log — an append-only pipeline feeding every gatekeeper check and dispatch decision into a dedicated thread that writes a ring buffer and periodically flushes to SQLite, with query APIs for the integrity panel."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

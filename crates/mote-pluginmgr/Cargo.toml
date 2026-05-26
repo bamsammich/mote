@@ -1,0 +1,15 @@
+[package]
+name = "mote-pluginmgr"
+description = "Plugin management and provenance — plugins.lua/plugins.lock resolution, source types, the content-addressed cache, BLAKE3 directory hashing, the mote plugin CLI surface, and per-plugin approved-permission tracking."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

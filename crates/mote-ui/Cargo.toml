@@ -1,0 +1,15 @@
+[package]
+name = "mote-ui"
+description = "Chrome rendering and widgets — the slot/element/theme rendering surface and runtime-owned UI (tab strip, urlbar host, sidebar, integrity panel, approval dialog). Rendering backend is gated on the UI-framework ADR."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

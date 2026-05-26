@@ -1,0 +1,15 @@
+[package]
+name = "mote-permissions"
+description = "Permission model and enforcement primitives — the domain:action[:resource] grammar, requested-vs-effective narrowing, deny-precedence matching, and the gatekeeper API the dispatch layer queries."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

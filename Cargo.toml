@@ -24,6 +24,10 @@ authors = ["Travis Huddleston <travis@huddlehaus.com>"]
 # Shared dependency versions live here and are referenced from member crates with
 # `dep.workspace = true`. Populated as real crates are introduced.
 [workspace.dependencies]
+# Fast content-addressed plugin checksums (`blake3:<hex>`); see DESIGN §Integrity verification.
+blake3 = "1.8"
+# Ergonomic, idiomatic error enums for the shared vocabulary.
+thiserror = "2.0"
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.

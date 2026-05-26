@@ -1,0 +1,15 @@
+[package]
+name = "mote-shell"
+description = "Browser composition root — wires runtime, session, UI, secrets, pluginmgr, and MCP into a browser: window/tab management, the init.lua config loader, and the event-loop integration where the integration seams live."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

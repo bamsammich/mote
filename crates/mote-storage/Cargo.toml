@@ -1,0 +1,15 @@
+[package]
+name = "mote-storage"
+description = "SQLite-backed persistence primitives — the single owner of rusqlite access, connection pooling, WAL mode, migrations, and the per-plugin storage-namespace abstraction (identity-scoped where required)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

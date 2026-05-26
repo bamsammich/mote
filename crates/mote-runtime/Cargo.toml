@@ -1,0 +1,15 @@
+[package]
+name = "mote-runtime"
+description = "Plugin lifecycle orchestrator — drives the four-step load pipeline, owns the live plugin table and capability fulfillment map, handles hot reload, and assembles the mote.* host API exposed through the language runtimes."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

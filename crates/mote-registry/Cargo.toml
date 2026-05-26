@@ -1,0 +1,15 @@
+[package]
+name = "mote-registry"
+description = "Versioned permission/capability/token registries — loads and validates the machine-readable registry files, resolves a plugin's targeted schema version, and provides capability-contract descriptors for load-time conformance checks."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

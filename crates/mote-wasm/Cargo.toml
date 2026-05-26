@@ -1,0 +1,15 @@
+[package]
+name = "mote-wasm"
+description = "WASM plugin runtime — embeds wasmtime (Cranelift JIT, instance pooling) and exposes the host-function surface to WASM plugins via explicitly exported host functions only, with no ambient capability."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

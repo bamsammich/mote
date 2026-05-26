@@ -1,0 +1,19 @@
+[package]
+name = "mote-app"
+description = "The Mote binary — parses args, dispatches to the CLI (management subcommands) or boots the browser shell, and owns the CEF subprocess entry shim required by Chromium's multi-process model."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mote"
+path = "src/main.rs"
+
+[dependencies]
