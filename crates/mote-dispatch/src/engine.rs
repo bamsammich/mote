@@ -42,7 +42,15 @@ impl Clock for SystemClock {
 /// One registered hook: its type and the ordered handler registrations.
 #[derive(Debug)]
 struct HookEntry {
-    hook_type: HookType,
+    /// The dispatch model fixed by the **first real registration**.
+    ///
+    /// `None` until a handler registers: an ordering-only stub created by
+    /// [`set_user_order`](DispatchEngine::set_user_order) for a not-yet-registered
+    /// hook records the pinned order without committing to a type, so the first
+    /// real registration of *any* type still succeeds (it is not pre-constrained
+    /// to `FilterChain`). All dispatch paths treat a `None` type as "no matching
+    /// hook" — an order pin alone runs no handlers.
+    hook_type: Option<HookType>,
     registrations: Vec<Registration>,
     /// User-pinned plugin order (DESIGN §Dispatch ordering, "User config wins
     /// absolutely"). When present, registrations are ordered by this list;
@@ -109,16 +117,22 @@ where
     ) -> Result<(), RegisterError> {
         let key = hook_key.into();
         let entry = self.hooks.entry(key.clone()).or_insert_with(|| HookEntry {
-            hook_type,
+            hook_type: None,
             registrations: Vec::new(),
             user_order: None,
         });
-        if entry.hook_type != hook_type {
-            return Err(RegisterError::HookTypeMismatch {
-                hook_key: key,
-                existing: entry.hook_type,
-                requested: hook_type,
-            });
+        match entry.hook_type {
+            // First real registration fixes the dispatch model (even if an
+            // ordering-only stub already pinned the order with no type).
+            None => entry.hook_type = Some(hook_type),
+            Some(existing) if existing != hook_type => {
+                return Err(RegisterError::HookTypeMismatch {
+                    hook_key: key,
+                    existing,
+                    requested: hook_type,
+                });
+            }
+            Some(_) => {}
         }
         entry.registrations.push(registration);
         Ok(())
@@ -133,14 +147,13 @@ where
     pub fn set_user_order(&mut self, hook_key: impl Into<String>, order: Vec<PluginName>) {
         let key = hook_key.into();
         let entry = self.hooks.entry(key).or_insert_with(|| HookEntry {
-            // A bare override before any registration cannot know the hook type;
-            // default to FilterChain, which the first real registration
-            // overwrites via the type-match check path. To stay correct we
-            // instead leave type as-is and let registration set it; but since
-            // we must pick something, FilterChain is the safe default for an
-            // ordering-only stub and is replaced on first register of a
-            // different type.
-            hook_type: HookType::FilterChain,
+            // An ordering-only pin before any registration cannot know the hook
+            // type, so it is left `None`. The first real registration fixes the
+            // type (of whatever model it is); until then this stub runs no
+            // handlers. This avoids poisoning the type — a prior bug pinned it to
+            // `FilterChain`, which then rejected a later real registration of a
+            // different model with `HookTypeMismatch`.
+            hook_type: None,
             registrations: Vec::new(),
             user_order: None,
         });
@@ -267,7 +280,7 @@ where
         let Some(handlers) = self
             .hooks
             .get(hook_key)
-            .filter(|e| e.hook_type == HookType::FilterChain)
+            .filter(|e| e.hook_type == Some(HookType::FilterChain))
             .map(|e| self.ordered_handlers(e))
         else {
             return FilterChainOutcome {
@@ -379,7 +392,7 @@ where
         let Some(handlers) = self
             .hooks
             .get(hook_key)
-            .filter(|e| e.hook_type == HookType::Broadcast)
+            .filter(|e| e.hook_type == Some(HookType::Broadcast))
             .map(|e| self.ordered_handlers(e))
         else {
             return BroadcastOutcome { auto_disabled };
@@ -439,7 +452,7 @@ where
         let Some(handlers) = self
             .hooks
             .get(hook_key)
-            .filter(|e| e.hook_type == HookType::Keybind)
+            .filter(|e| e.hook_type == Some(HookType::Keybind))
             .map(|e| self.ordered_handlers(e))
         else {
             return KeybindOutcome {

@@ -1,13 +1,21 @@
-//! The plugin lifecycle orchestrator: the four-step load pipeline, the live
-//! plugin table, and the `load` / `reload` / `unload` lifecycle.
+//! The plugin lifecycle orchestrator: the load pipeline, the live plugin table,
+//! and the `load` / `reload` / `unload` lifecycle.
 //!
 //! See the crate documentation for the end-to-end picture. This module ties the
-//! integrated crates together:
+//! integrated crates together. The pipeline runs in this **actual** order
+//! (DESIGN §Enforcement Rules; ADR-0001 "load != run"):
 //!
-//! 1. **Schema validation** — [`mote_registry::Registry::validate_schema`] over
-//!    the manifest's `permissions` / `capabilities` / `consumes`, plus the
-//!    dangling-consumer and exclusive-double-claim resolution this crate owns.
-//! 2. **Module load** — [`mote_lua::load_plugin`] (does *not* call `setup()`).
+//! 1. **Sandboxed module load / manifest parse** — [`mote_lua::load_plugin`]
+//!    evaluates the module body in the constrained sandbox to extract its
+//!    declarative surface, including the manifest. This runs **first** because
+//!    every subsequent step needs the parsed manifest terms (`permissions` /
+//!    `capabilities` / `consumes`), and it is safe to do first: loading
+//!    evaluates only the module body to build `M` and **never calls `setup()`**,
+//!    so no plugin side effect occurs before validation.
+//! 2. **Schema validation + resolution** —
+//!    [`mote_registry::Registry::validate_schema`] over the manifest's
+//!    `permissions` / `capabilities` / `consumes`, plus the dangling-consumer
+//!    and exclusive-double-claim resolution this crate owns.
 //! 3. **Contract conformance** — [`mote_registry::Registry::check_conformance`].
 //! 4. **Permission approval** — the injected [`ApprovalPolicy`], producing the
 //!    effective [`GrantSet`](mote_permissions::GrantSet).
@@ -15,7 +23,8 @@
 //! Only when all four pass does the runtime install the `mote.*` host API into
 //! the plugin's Lua state, register its `M.hooks` into the
 //! [`DispatchEngine`](mote_dispatch::DispatchEngine), record its capabilities
-//! and event subscriptions in the shared core, and call `setup()`.
+//! and event subscriptions in the shared core, and call `setup()`. A failure at
+//! any step discards the loaded module without ever running it.
 
 use std::collections::BTreeMap;
 
@@ -121,7 +130,7 @@ impl Runtime {
     /// storage, and an audit [`EventProducer`].
     #[must_use]
     pub fn new(registry: Registry, store: Store, audit: EventProducer) -> Self {
-        let core = Core::default();
+        let core = Core::new(registry.capabilities().clone());
         let invoker = RuntimeInvoker::new(core.clone());
         let engine = DispatchEngine::new(invoker, NullAudit);
         Self {
@@ -211,10 +220,11 @@ impl Runtime {
         identity: IdentityContext,
         policy: &dyn ApprovalPolicy,
     ) -> Result<RunningPlugin, LoadError> {
-        // --- Step 2 (partial): parse the manifest by loading the module. We
-        // need the manifest terms for step 1, and step 2 IS the module load, so
-        // load once here; if step 1 then fails we discard the loaded module
-        // without ever calling setup(). (ADR-0001: load != run.)
+        // --- Step 1: sandboxed module load / manifest parse -------------------
+        // The module body runs in the sandbox to build `M` and yield the
+        // manifest the later steps need; `setup()` is NOT called (ADR-0001: load
+        // != run). If a later step fails we discard the loaded module without
+        // ever running it.
         let loaded = load_plugin(source, "plugin")?;
         let manifest = loaded.manifest().clone();
 
@@ -224,7 +234,7 @@ impl Runtime {
             });
         }
 
-        // --- Step 1: schema validation + resolution ---------------------------
+        // --- Step 2: schema validation + resolution ---------------------------
         self.registry.validate_schema(
             &manifest.permissions,
             &manifest.capabilities,
@@ -356,20 +366,26 @@ impl Runtime {
                 plugin: name.clone(),
             })?;
 
-        // Reset the plugin's failure history in the engine. The dispatch engine
-        // has no per-key deregistration in Phase 1; removing the plugin's record
-        // from the core (below) makes any lingering registration a no-op — the
-        // invoker can no longer resolve the handler, so it returns a caught
-        // "no context" error and the plugin is skipped.
-        self.engine.reset_plugin(name);
         let _ = &record.registered_hooks; // reserved for future per-key dereg
+        self.cleanup_plugin_state(name);
+        Ok(())
+    }
 
-        // Free capability claims and drop the core record.
+    /// Tears down every shared side effect a plugin's `commit` installs: the
+    /// dispatch failure history, its capability claims, and its core plugin
+    /// record. Idempotent and safe to call for a partially-committed plugin
+    /// (the [`commit`](Self::commit) error path reuses it to roll back; see M1).
+    ///
+    /// The dispatch engine has no per-key deregistration in Phase 1; removing
+    /// the plugin's core record makes any lingering hook registration a no-op —
+    /// the invoker can no longer resolve the handler, so it returns a caught
+    /// "no context" error and the plugin is skipped.
+    fn cleanup_plugin_state(&mut self, name: &PluginName) {
+        self.engine.reset_plugin(name);
         self.core.with_mut(|state| {
             state.capabilities.remove_plugin(name);
             state.plugins.remove(name);
         });
-        Ok(())
     }
 
     // --- pipeline helpers ----------------------------------------------------
@@ -511,17 +527,35 @@ impl Runtime {
         // Register the plugin's hooks into dispatch. The invoker reads the
         // plugin's Lua state from the shared core (recorded just above), so no
         // separate context registration is needed.
+        //
+        // M1: from here on, shared state (capability claims + core record) is
+        // installed but the plugin is not yet in `self.loaded`, so `unload`
+        // cannot reach it. Any failure must roll those side effects back via
+        // `cleanup_plugin_state` BEFORE returning, or the claim (including an
+        // EXCLUSIVE one) and core record leak permanently.
         let mut registered_hooks = Vec::new();
         for hook_key in loaded.hook_keys() {
             let hook_type = self.hook_type_for(hook_key);
-            self.engine
-                .register(hook_key.clone(), hook_type, Registration::new(name.clone()))?;
-            registered_hooks.push((hook_key.clone(), hook_type));
+            match self
+                .engine
+                .register(hook_key.clone(), hook_type, Registration::new(name.clone()))
+            {
+                Ok(()) => registered_hooks.push((hook_key.clone(), hook_type)),
+                Err(e) => {
+                    self.cleanup_plugin_state(&name);
+                    return Err(LoadError::from(e));
+                }
+            }
         }
 
-        // Finally: run setup() (only now, after all four checks + wiring).
-        if loaded.has_setup() {
-            run_setup(&module).map_err(LoadError::Setup)?;
+        // Finally: run setup() (only now, after all four checks + wiring). A
+        // setup() that errors must not leave the capability claim / core record
+        // / hook registrations orphaned (M1) — roll them all back.
+        if loaded.has_setup()
+            && let Err(e) = run_setup(&module)
+        {
+            self.cleanup_plugin_state(&name);
+            return Err(LoadError::Setup(e));
         }
 
         self.loaded.insert(
@@ -589,8 +623,11 @@ const fn resolve_storage_scope(
 }
 
 /// Runs `module.setup()` if present. Errors are caught, never panic.
+///
+/// The `setup` field is read RAW: `M` is a plugin-controlled table, so a
+/// `__index` metamethod on it must not be able to intercept the lookup.
 fn run_setup(module: &mote_lua::Table) -> Result<(), String> {
-    let setup: mote_lua::Value = module.get("setup").map_err(|e| e.to_string())?;
+    let setup: mote_lua::Value = module.raw_get("setup").map_err(|e| e.to_string())?;
     if let mote_lua::Value::Function(f) = setup {
         f.call::<()>(()).map_err(|e| e.to_string())?;
     }

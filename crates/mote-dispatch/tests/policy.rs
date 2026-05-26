@@ -443,6 +443,48 @@ fn user_override_pins_order_absolutely() {
     );
 }
 
+#[test]
+fn pre_registration_order_pin_does_not_constrain_hook_type() {
+    // S6: pinning order for a not-yet-registered hook must not lock the hook
+    // type to FilterChain. A later real registration as a Broadcast must
+    // succeed (no HookTypeMismatch) and honor the pinned order.
+    let mut inv = MockInvoker::default();
+    inv.program("late", "tabs:on_change", Behavior::Done);
+    inv.program("early", "tabs:on_change", Behavior::Done);
+
+    let audit = CapturingAudit::default();
+    let mut engine = DispatchEngine::new(inv, audit.clone());
+
+    // Pin the order BEFORE any handler registers.
+    engine.set_user_order("tabs:on_change", vec![plugin("late"), plugin("early")]);
+
+    // Now register the hook as a Broadcast — a different model than the old
+    // hardcoded FilterChain stub. This must not error.
+    engine
+        .register(
+            "tabs:on_change",
+            HookType::Broadcast,
+            Registration::with_priority(plugin("early"), 90),
+        )
+        .expect("registering a Broadcast after an order pin must succeed");
+    engine
+        .register(
+            "tabs:on_change",
+            HookType::Broadcast,
+            Registration::with_priority(plugin("late"), 10),
+        )
+        .expect("second Broadcast handler registers");
+
+    // The broadcast actually dispatches (type was fixed to Broadcast), and the
+    // pinned order is honored over priority.
+    let _ = engine.dispatch_broadcast("tabs:on_change", empty());
+    assert_eq!(
+        audit.performers(),
+        vec!["late", "early"],
+        "pinned order honored and broadcast dispatched"
+    );
+}
+
 // ===========================================================================
 // Auto-disable (D3) — per plugin, keybinds exempt
 // ===========================================================================

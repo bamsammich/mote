@@ -19,7 +19,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use mote_audit::{AuditEvent, Decision as AuditDecision, EventProducer};
-use mote_lua::{HookTable, Lua, Table, call_hook_with_deadline};
+use mote_lua::{
+    HookInvokeError, HookTable, Lua, Table, call_function_with_deadline, call_hook_with_deadline,
+};
+use mote_registry::CapabilityRegistry;
 use mote_types::PluginName;
 
 use crate::capability::CapabilityMap;
@@ -29,7 +32,10 @@ use crate::value::HostValue;
 ///
 /// Mirrors the dispatch broadcast budget (100ms) — these are off the
 /// synchronous critical path. A runaway handler is interrupted at the deadline
-/// by the `mote-lua` instruction hook, never hangs the caller.
+/// by the `mote-lua` instruction hook, never hangs the caller. The same budget
+/// now governs a `capabilities.invoke` fulfiller call (S1): the fulfiller's
+/// `M.api` function runs under [`call_function_with_deadline`], so a fulfiller
+/// that loops is interrupted with a timeout rather than wedging the runtime.
 const INTER_PLUGIN_BUDGET: Duration = Duration::from_millis(100);
 
 /// One live plugin's runtime record, as seen by inter-plugin host calls.
@@ -56,9 +62,16 @@ pub(crate) struct CoreState {
 }
 
 /// A cheaply-cloneable handle to the shared core.
-#[derive(Debug, Clone, Default)]
+///
+/// Holds the capability registry (an `Rc`, cheap to clone) so
+/// [`invoke_capability`](Core::invoke_capability) can consult a capability's
+/// conformance contract — specifically its `required_api` — to reject any
+/// function not named in the contract before reaching into the fulfiller's
+/// `M.api` (S1: confused-deputy defence).
+#[derive(Debug, Clone)]
 pub(crate) struct Core {
     inner: Rc<RefCell<CoreState>>,
+    capabilities: Rc<CapabilityRegistry>,
 }
 
 /// The result of an inter-plugin host call that may be denied or error.
@@ -68,14 +81,32 @@ pub(crate) enum InvokeOutcome {
     Ok(HostValue),
     /// No plugin fulfills the requested capability.
     NoFulfiller,
+    /// The requested `function` is not part of the capability's contract
+    /// (`required_api`). Rejected before the fulfiller is touched — a consumer
+    /// may only invoke the contract surface, never arbitrary fulfiller functions
+    /// (S1: confused-deputy defence).
+    NotInContract,
     /// The fulfiller has no such `M.api` function / event handler.
     NoSuchFunction,
+    /// The fulfiller's API exceeded its deadline and was interrupted (S1). The
+    /// fulfiller is not auto-disabled here (that is the dispatch engine's
+    /// concern); the call simply fails.
+    Timeout,
     /// The fulfiller's API raised a Lua error (already recorded as a deny in the
     /// audit trail with the reason).
     Failed,
 }
 
 impl Core {
+    /// Builds a core over the capability registry the runtime loaded. The
+    /// registry is shared (an `Rc`) across every clone of this handle.
+    pub(crate) fn new(capabilities: CapabilityRegistry) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(CoreState::default())),
+            capabilities: Rc::new(capabilities),
+        }
+    }
+
     /// Borrows the inner state mutably (for the runtime's bookkeeping).
     pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut CoreState) -> R) -> R {
         f(&mut self.inner.borrow_mut())
@@ -152,14 +183,43 @@ impl Core {
             return InvokeOutcome::NoFulfiller;
         };
 
-        // The fulfiller's M.api[function] must exist.
-        let Ok(api) = module.get::<mote_lua::Value>("api") else {
+        // S1 (confused deputy): a consumer may only invoke functions the
+        // capability's CONTRACT declares (`required_api`). Reject anything else
+        // BEFORE looking it up in the fulfiller's `M.api`, so a malicious
+        // consumer cannot coerce the fulfiller into running an arbitrary
+        // internal function under the fulfiller's permissions. An unknown
+        // capability (no registry entry) also has no contract → reject.
+        let in_contract = self
+            .capabilities
+            .get(capability)
+            .is_some_and(|entry| entry.contract.required_api.iter().any(|f| f == function));
+        if !in_contract {
+            let chain = format!("invoked_via ({caller} -> {capability})");
+            audit.record(
+                AuditEvent::new(
+                    fulfiller,
+                    format!("{capability}:{function}"),
+                    AuditDecision::Deny,
+                )
+                .with_detail(format!(
+                    "{chain}: function `{function}` is not in the capability contract"
+                )),
+            );
+            return InvokeOutcome::NotInContract;
+        }
+
+        // The fulfiller's M.api[function] must exist. Read RAW: `M` and `M.api`
+        // are plugin-controlled tables and these lookups run with no deadline
+        // installed, so a `__index` metamethod here could loop unbounded and
+        // hang the runtime. A declaration table never legitimately needs a
+        // metatable, so raw access is both safe and correct.
+        let Ok(api) = module.raw_get::<mote_lua::Value>("api") else {
             return InvokeOutcome::Failed;
         };
         let mote_lua::Value::Table(api_table) = api else {
             return InvokeOutcome::NoSuchFunction;
         };
-        let Ok(func) = api_table.get::<mote_lua::Value>(function) else {
+        let Ok(func) = api_table.raw_get::<mote_lua::Value>(function) else {
             return InvokeOutcome::Failed;
         };
         let mote_lua::Value::Function(func) = func else {
@@ -170,16 +230,13 @@ impl Core {
             return InvokeOutcome::Failed;
         };
 
-        // Call the fulfiller's API function. A per-instruction deadline hook
-        // (the `mote-lua` D1 mechanism) is not installed here because the
-        // primitive that does so (`call_hook_with_deadline`) targets the
-        // hooks/events declaration tables, not `M.api`, and the lower-level
-        // mlua trigger types are intentionally not re-exported from
-        // `mote-lua`. A long-running `M.api` call is therefore not preempted in
-        // Phase 1; this is acceptable because the call is synchronous-by-design
-        // and bounded by the fulfiller's own cooperation. (Tracked: thread the
-        // deadline through a future `mote-lua` API-call primitive.)
-        let call_result = func.call::<mote_lua::Value>(lua_arg);
+        // Call the fulfiller's API function under a deadline (S1). The
+        // `mote-lua` primitive installs a global instruction-count hook +
+        // memory ceiling for the duration of the call, so a fulfiller that
+        // loops or allocates without bound is interrupted at the deadline rather
+        // than hanging the runtime.
+        let deadline = Instant::now() + INTER_PLUGIN_BUDGET;
+        let call_result = call_function_with_deadline(&lua, &func, lua_arg, deadline);
         drop(lua); // explicit: the state handle is no longer needed
 
         // Audit the call with performer = fulfiller (D4): the fulfiller's API
@@ -195,7 +252,17 @@ impl Core {
                 audit.record(
                     AuditEvent::new(fulfiller, operation, AuditDecision::Allow).with_detail(chain),
                 );
+                // DEADLINE CONTRACT: protections are lifted before the value is
+                // returned, so `from_lua` MUST read it with raw accessors only —
+                // which it does (no `__index`/`__pairs` triggered).
                 HostValue::from_lua(&ret).map_or(InvokeOutcome::Failed, InvokeOutcome::Ok)
+            }
+            Err(HookInvokeError::Timeout) => {
+                audit.record(
+                    AuditEvent::new(fulfiller, operation, AuditDecision::Deny)
+                        .with_detail(format!("{chain}: deadline exceeded, interrupted")),
+                );
+                InvokeOutcome::Timeout
             }
             Err(e) => {
                 audit.record(

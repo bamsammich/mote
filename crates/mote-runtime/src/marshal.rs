@@ -36,7 +36,13 @@ impl LuaMarshal<HostValue> for HostMarshal {
             return Ok(Decision::Defer);
         };
 
-        let action: Value = table.get("action").map_err(|e| e.to_string())?;
+        // The decision table is a plugin-RETURNED value: `mote-lua` lifts the
+        // deadline/memory protections before handing it back, so every field
+        // read here MUST be raw (`raw_get`) — a `__index` metamethod could
+        // otherwise re-enter unbounded plugin code with no deadline and hang the
+        // dispatch (the post-deadline metamethod-reentry hazard, M5). `from_lua`
+        // (below) is likewise raw.
+        let action: Value = table.raw_get("action").map_err(|e| e.to_string())?;
         let Value::String(action) = action else {
             return Ok(Decision::Defer);
         };
@@ -44,7 +50,7 @@ impl LuaMarshal<HostValue> for HostMarshal {
 
         match action.as_ref() {
             "block" => {
-                let reason: Value = table.get("reason").map_err(|e| e.to_string())?;
+                let reason: Value = table.raw_get("reason").map_err(|e| e.to_string())?;
                 let reason = match reason {
                     Value::String(s) => s.to_str().map_err(|e| e.to_string())?.to_string(),
                     _ => "blocked".to_owned(),
@@ -52,7 +58,7 @@ impl LuaMarshal<HostValue> for HostMarshal {
                 Ok(Decision::Block { reason })
             }
             "modify" => {
-                let payload: Value = table.get("payload").map_err(|e| e.to_string())?;
+                let payload: Value = table.raw_get("payload").map_err(|e| e.to_string())?;
                 let hv = HostValue::from_lua(&payload)?;
                 Ok(Decision::Modify { payload: hv })
             }

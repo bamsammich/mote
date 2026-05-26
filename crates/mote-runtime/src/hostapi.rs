@@ -222,8 +222,15 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
                     };
                     match core.invoke_capability(&g.plugin, &capability, &function, &hv, &audit) {
                         InvokeOutcome::Ok(ret) => Ok(ret.to_lua(lua).unwrap_or(Value::Nil)),
+                        // Every failure mode (no fulfiller, function outside the
+                        // capability contract, missing function, deadline
+                        // timeout, or a Lua error in the fulfiller) surfaces to
+                        // the caller as `nil`; the reason is recorded in the
+                        // audit trail (S1).
                         InvokeOutcome::NoFulfiller
+                        | InvokeOutcome::NotInContract
                         | InvokeOutcome::NoSuchFunction
+                        | InvokeOutcome::Timeout
                         | InvokeOutcome::Failed => Ok(Value::Nil),
                     }
                 },

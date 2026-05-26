@@ -231,6 +231,113 @@ fn denied_host_call_is_audited_as_denial() {
     log.shutdown().unwrap();
 }
 
+/// A plugin fulfilling the EXCLUSIVE `ui:urlbar_provider` capability whose
+/// `setup()` raises. Used to prove M1: a failed `setup()` must roll back the
+/// capability claim, core record, and hook registrations so the name and the
+/// exclusive capability are loadable again.
+fn exclusive_with_failing_setup(name: &str) -> String {
+    format!(
+        r#"
+local M = {{}}
+M.manifest = {{
+  schema = "v1",
+  name = "{name}",
+  version = "1.0.0",
+  permissions = {{ "net:intercept_request" }},
+  capabilities = {{ "ui:urlbar_provider" }},
+  identity_scope = "global",
+}}
+M.api = {{ query = function(text) return {{}} end }}
+M.hooks = {{
+  ["net:intercept_request"] = function(req) return {{ action = "allow" }} end,
+}}
+function M.setup()
+  error("setup blew up")
+end
+return M
+"#
+    )
+}
+
+/// A well-behaved plugin fulfilling the same exclusive capability (no failing
+/// setup). Used to prove the exclusive capability is reclaimable after a rolled
+/// back load.
+fn exclusive_ok(name: &str) -> String {
+    format!(
+        r#"
+local M = {{}}
+M.manifest = {{
+  schema = "v1",
+  name = "{name}",
+  version = "1.0.0",
+  permissions = {{}},
+  capabilities = {{ "ui:urlbar_provider" }},
+  identity_scope = "global",
+}}
+M.api = {{ query = function(text) return {{}} end }}
+function M.setup() end
+return M
+"#
+    )
+}
+
+#[test]
+fn failed_setup_rolls_back_capability_and_state() {
+    // M1: setup() raising must not orphan the capability claim, the core record,
+    // or hook registrations.
+    let (mut rt, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+
+    let err = rt
+        .load(
+            &exclusive_with_failing_setup("urlbar-a"),
+            identity(),
+            &policy,
+        )
+        .expect_err("a plugin whose setup() raises must fail to load");
+    assert!(matches!(err, LoadError::Setup(_)), "got {err:?}");
+
+    // The plugin is NOT considered loaded.
+    assert!(!rt.is_loaded(&name("urlbar-a")));
+
+    // The same name is loadable again (its core record was rolled back). Use the
+    // failing variant again to confirm the rollback is repeatable.
+    let err2 = rt
+        .load(
+            &exclusive_with_failing_setup("urlbar-a"),
+            identity(),
+            &policy,
+        )
+        .expect_err("retry still fails in setup(), but must not be AlreadyLoaded");
+    assert!(
+        matches!(err2, LoadError::Setup(_)),
+        "a re-load must reach setup() again (capability + record were freed), got {err2:?}"
+    );
+
+    // The EXCLUSIVE capability was freed: a DIFFERENT plugin can now claim it and
+    // load cleanly. If the claim had leaked, this would be an
+    // ExclusiveCapabilityConflict.
+    let ok = rt
+        .load(&exclusive_ok("urlbar-b"), identity(), &policy)
+        .expect("the exclusive capability must be reclaimable after a rolled-back load");
+    assert_eq!(ok.name, name("urlbar-b"));
+    assert!(rt.is_loaded(&name("urlbar-b")));
+
+    // And dispatching the filter-chain hook the failed plugin had registered
+    // resolves cleanly (its orphaned registration, if any, is a no-op — the core
+    // record is gone, so nothing it registered can run).
+    let outcome = rt.dispatch_filter_chain("net:intercept_request", HostValue::Nil);
+    assert!(
+        matches!(
+            outcome.resolution,
+            mote_runtime::ChainResolution::Allowed { .. }
+        ),
+        "no orphaned handler from the failed plugin should run"
+    );
+
+    log.shutdown().unwrap();
+}
+
 #[test]
 fn unknown_permission_term_fails_step1() {
     let (mut rt, mut log) = make_runtime();

@@ -1,16 +1,20 @@
 //! Plugin lifecycle orchestrator for Mote — the Phase-1 capstone.
 //!
-//! This crate integrates the plugin runtime end-to-end. It drives the
-//! **four-step load pipeline** in order, each step gated by the preceding one
-//! (DESIGN §Enforcement Rules; ADR-0001):
+//! This crate integrates the plugin runtime end-to-end. It drives the load
+//! pipeline, each step gated by the preceding one (DESIGN §Enforcement Rules;
+//! ADR-0001). The steps run in this **actual** order:
 //!
-//! 1. **Schema validation** — every `permissions` / `capabilities` / `consumes`
+//! 1. **Sandboxed module load / manifest parse** — the Lua module is evaluated
+//!    in the constrained sandbox and its declarative surface (including the
+//!    manifest) extracted ([`mote_lua::load_plugin`]); **`setup()` is not
+//!    called**. This is first because the steps below need the parsed manifest
+//!    terms, and it is sandboxed-safe: only the module body runs, never a plugin
+//!    side effect.
+//! 2. **Schema validation** — every `permissions` / `capabilities` / `consumes`
 //!    term references a known registry entry
 //!    ([`mote_registry::Registry::validate_schema`]), the plugin's `consumes`
 //!    are all fulfilled by a loaded plugin (else the dangling-consumer error),
 //!    and no exclusive capability is double-claimed.
-//! 2. **Module load** — the Lua module is evaluated and its declarative surface
-//!    extracted ([`mote_lua::load_plugin`]); **`setup()` is not called**.
 //! 3. **Contract conformance** — each claimed capability's required API/event
 //!    surface is present ([`mote_registry::Registry::check_conformance`]).
 //! 4. **Permission approval** — an injected [`ApprovalPolicy`] approves or
@@ -62,11 +66,15 @@
 //!   in Phase 1); a `keys:*` key → `Keybind` (the registry does not enumerate
 //!   keybinds); an unknown key (e.g. a capability-contract event placed in
 //!   `M.hooks`) defaults to broadcast.
-//! - **`capabilities.invoke` deadline.** The fulfiller's `M.api` function is
-//!   called without a per-instruction deadline hook because the `mote-lua`
-//!   primitive that installs one targets the hooks/events tables and the
-//!   lower-level mlua trigger types are not re-exported. Tracked for a future
-//!   `mote-lua` API-call primitive.
+//! - **`capabilities.invoke` deadline + contract restriction.** The fulfiller's
+//!   `M.api` function is called under
+//!   [`mote_lua::call_function_with_deadline`], so a fulfiller that loops or
+//!   allocates without bound is interrupted at a 100ms deadline rather than
+//!   hanging the runtime. The invocable surface is restricted to the
+//!   capability's contract `required_api`: a consumer cannot coerce the
+//!   fulfiller into running an arbitrary internal function under the fulfiller's
+//!   permissions (S1 confused-deputy defence). The returned value is read with
+//!   raw accessors only, per the `mote-lua` deadline contract.
 
 // This crate's internal modules hold crate-private support types (the shared
 // `Core`, the host-API installer, the dispatch invoker, the marshal) that are
