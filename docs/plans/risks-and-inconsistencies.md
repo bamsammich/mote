@@ -228,3 +228,10 @@ Every item found while reading `DESIGN.md`, `DISCIPLINES.md`, `ROADMAP.md`, `CLA
 | E1 | "Fully isolated" wording violates DISCIPLINES §5 | INCONSISTENCY (doc fix) | identity docs/marketing |
 
 Everything else (`[GAP]`/`[RISK]`) can be resolved by the implementing engineer with the proposed default, but should be confirmed where flagged. The four `[BLOCKER]`s plus B1/B2 are the ones that, if guessed wrong, cause the most rework — surface these first.
+
+---
+
+## Implementation findings (Phase 1)
+
+### Resource normalization before `Gatekeeper::check` (found building `mote-permissions`, 2026-05-25)
+DESIGN's `net:intercept_request:!*.banking.com` example implies the resource string checked against a permission is a **normalized host** (e.g. `secure.banking.com`), not a full URL with scheme/path (`https://secure.banking.com/login`) — the glob `*.banking.com` only matches the host form. So the runtime seam (`mote-dispatch` / `mote-cef`) MUST normalize each operation's resource to the form permission patterns are written against *before* calling `Gatekeeper::check`. This normalization contract is undocumented in DESIGN. **Assign to `mote-dispatch`/`mote-runtime`; document the canonical resource form per permission domain.**
