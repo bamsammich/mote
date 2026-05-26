@@ -119,6 +119,8 @@ regardless of PATH.
 
 ## Current state
 
-`crates/mote-placeholder` is a **disposable scaffold** — it exists only so the
-toolchain and hooks have real code to act on before the design spec lands.
-Delete it when real crates arrive; nothing depends on it.
+Phase 1 (plugin runtime foundation) is underway — see ROADMAP.md and GitHub
+issue #1. The workspace is scaffolded with the full v0.1 crate topology under
+`crates/` (per `docs/plans/00-master-plan.md`); `mote-types` (shared
+vocabulary) is implemented. Architecture decisions of record live in
+`docs/adr/`. The disposable `mote-placeholder` scaffold has been removed.

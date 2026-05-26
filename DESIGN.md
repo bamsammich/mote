@@ -241,7 +241,7 @@ M.manifest = {
   },
 
   homepage = "https://github.com/...",
-  checksum = "sha256:abc123...",
+  checksum = "blake3:abc123...",
 }
 
 function M.setup()
