@@ -10,11 +10,13 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cef::{CefString, Settings, args::Args, do_message_loop_work, initialize, shutdown};
 
 use crate::error::{CefError, Result};
+use crate::scheme::{self, ChromeResources};
 
 /// Guards against constructing more than one [`Engine`]: CEF's runtime is
 /// process-global and cannot be initialised twice.
@@ -36,18 +38,6 @@ pub struct EngineConfig {
     /// Drive CEF's work via [`Engine::pump`] / [`Engine::run`] rather than CEF's
     /// own internal message loop. Required for the OSR compositor model.
     pub external_message_pump: bool,
-    /// The privileged **chrome document URL** the host bridge is scoped to
-    /// (ADR-0005). When `Some(url)`, `Engine::init` installs the custom CEF `App`
-    /// whose renderer-side `RenderProcessHandler` gates the `window.cefQuery` /
-    /// `window.mote` binding to exactly this URL (isolation layer 1). When `None`
-    /// (the default) no bridge `App` is installed and no page can ever receive
-    /// the binding.
-    ///
-    /// **The same URL must be passed to [`crate::bootstrap_with_bridge`]** so the
-    /// renderer *subprocess* installs the identical gate. Passing it in only one
-    /// place leaves the gate uninstalled in the other process; both `mote-cef`
-    /// entry points take it so the host wires one constant into both.
-    pub chrome_url: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -58,7 +48,6 @@ impl Default for EngineConfig {
                 .join(".mote-cef-cache"),
             no_sandbox: false,
             external_message_pump: true,
-            chrome_url: None,
         }
     }
 }
@@ -106,18 +95,17 @@ impl Engine {
         // v0.1 deliberately uses the CPU `on_paint` fallback, which needs no GPU
         // command-line switches, so none are injected here.
         //
-        // When a chrome URL is configured, install the host-bridge `App` so the
-        // browser-process renderer handler exists and the renderer-side URL gate
-        // (isolation layer 1) is wired. With no chrome URL, no `App` is passed and
-        // no process can ever receive the privileged binding.
-        let mut bridge_app = config
-            .chrome_url
-            .as_deref()
-            .map(crate::bridge::render_process_app);
+        // Always install the host-bridge `App`: its `on_register_custom_schemes`
+        // declares the privileged `mote` scheme in the browser process (it must
+        // also be declared in the subprocess via `bootstrap_with_bridge`), and its
+        // renderer-side `RenderProcessHandler` carries the constant-origin gate
+        // (isolation layer 1). The privileged binding is still only ever installed
+        // for the `mote://chrome` origin, which web content can never carry.
+        let mut bridge_app = crate::bridge::render_process_app();
         let ok = initialize(
             Some(args.as_main_args()),
             Some(&settings),
-            bridge_app.as_mut(),
+            Some(&mut bridge_app),
             std::ptr::null_mut(),
         );
 
@@ -127,6 +115,20 @@ impl Engine {
             ENGINE_LIVE.store(false, Ordering::SeqCst);
             Err(CefError::Initialize)
         }
+    }
+
+    /// Register the chrome assets served from the privileged `mote://chrome`
+    /// origin (ADR-0005 amendment). The host (shell) supplies `resources` built
+    /// from its embedded chrome assets; `mote-cef` serves exactly those paths and
+    /// returns 404 for anything else.
+    ///
+    /// Call this **once, after [`Engine::init`]**, before creating the chrome
+    /// [`crate::HostBridge`] page. The `mote` scheme itself is already declared by
+    /// the bridge `App` in every process; this wires the browser-process factory
+    /// that backs it. Web content (`http(s)`) can never be served from this
+    /// scheme, so the chrome origin is unforgeable.
+    pub fn register_chrome_resources(&self, resources: ChromeResources) {
+        scheme::register_chrome_factory(Arc::new(resources));
     }
 
     /// Pump one slice of CEF work. Call this from the host event loop when using

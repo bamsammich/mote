@@ -3,20 +3,24 @@
 //! real CEF process/subprocess split + a live renderer).
 //!
 //! It reproduces the spike's two-browser proof against the **production**
-//! `mote-cef` public API:
+//! `mote-cef` public API, now over the privileged `mote://chrome` scheme
+//! (ADR-0005 amendment) — there is **no `chrome_url` parameter anywhere**:
 //!
-//!   1. ROUND-TRIP: a `Chrome`-role page (wired via `HostBridge::for_chrome`)
-//!      runs `window.mote.invoke("ping", {n:3})`. The Rust `ping` op replies with
+//!   1. ROUND-TRIP: the chrome assets are registered with the engine via
+//!      `ChromeResources`, and the chrome page is loaded from
+//!      `mote://chrome/index.html` (wired via `HostBridge::for_chrome`). It runs
+//!      `window.mote.invoke("ping", {n:3})`. The Rust `ping` op replies with
 //!      `{"n":3}`; the chrome JS then calls `window.mote.invoke("ack", {got:3})`.
 //!      The `ack` op firing with the echoed value proves a full bidirectional
 //!      JS→Rust→JS→Rust round-trip with structured data (never eval).
 //!
 //!   2. ISOLATION: a second `Content`-role page (an untrusted-web-content
-//!      stand-in) probes for `window.mote` / `window.cefQuery` and tries to call
-//!      a uniquely-named `content_probe` op. Because the renderer URL gate
-//!      (layer 1) never installs the binding for a non-chrome URL AND the
-//!      browser-side router (layer 2) is attached only to the chrome client,
-//!      the `content_probe` op MUST NEVER fire. Content has no binding to call.
+//!      stand-in, loaded from a `data:` URL — it can never carry the
+//!      `mote://chrome` origin) probes for `window.mote` / `window.cefQuery` and
+//!      tries to call a uniquely-named `content_probe` op. Because the renderer
+//!      ORIGIN gate (layer 1) never installs the binding for a non-`mote://chrome`
+//!      origin AND the browser-side router (layer 2) is attached only to the
+//!      chrome client, the `content_probe` op MUST NEVER fire.
 //!
 //! Evidence is collected entirely in Rust via the op registry (atomic flags the
 //! op handlers set) — no title side-channel needed. The op handlers are the
@@ -38,15 +42,16 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use mote_cef::{
-    ChromePageRequest, Engine, EngineConfig, HostBridge, OpRegistry, OpResponse, Page, PageOptions,
-    PageRole, ProcessRole,
+    ChromePageRequest, ChromeResources, Engine, EngineConfig, HostBridge, OpRegistry, OpResponse,
+    Page, PageOptions, PageRole, ProcessRole, chrome_url,
 };
 
-// The privileged chrome document. A strict CSP (no remote anything, no inline
-// script beyond this trusted bootstrap) + the structured window.mote wrapper.
-// The bootstrap fires a real round-trip on load.
+// The privileged chrome document, served from `mote://chrome`. A strict CSP
+// (script only from this trusted inline bootstrap; connect/default scoped to the
+// `mote:` scheme) + the structured window.mote wrapper. The bootstrap fires a
+// real round-trip on load.
 const CHROME_HTML: &str = "<!doctype html><html><head>\
-<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'\">\
+<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' mote:; script-src 'unsafe-inline'; connect-src mote:\">\
 </head><body><div id=out>pending</div><script>\
 (function(){\
 if(typeof window.cefQuery!=='function'){document.getElementById('out').textContent='NO-CEFQUERY';return;}\
@@ -75,9 +80,9 @@ document.getElementById('out').textContent=(!hasMote&&!hasCef)?'isolated':'LEAK'
 })();</script></body></html>";
 
 fn data_url(html: &str) -> String {
-    // CEF accepts a (loosely) percent-unencoded data: URL for these chars; the
-    // renderer gate compares the resulting frame URL for exact equality, so we
-    // build the chrome page's URL from this same string.
+    // The untrusted content stand-in is loaded from a `data:` URL — its origin is
+    // opaque and can NEVER be the privileged `mote://chrome` origin, so the
+    // renderer origin gate never opens for it.
     format!("data:text/html,{html}")
 }
 
@@ -94,22 +99,24 @@ fn pump(engine: &Engine, ms: u64) {
     reason = "linear integration-proof narrative; splitting hurts the end-to-end flow"
 )]
 fn main() -> ExitCode {
-    let chrome_url = data_url(CHROME_HTML);
+    // The chrome page is served from the privileged `mote://chrome` origin. The
+    // origin gate is a compile-time constant — there is NO chrome_url parameter to
+    // pass to bootstrap or the engine, so nothing can diverge across processes.
+    let chrome_entry = chrome_url("index.html");
 
-    // STEP 1: process split. Subprocesses install the URL-GATED renderer handler
-    // (isolation layer 1) via the same chrome URL.
-    match mote_cef::bootstrap_with_bridge(&chrome_url) {
+    // STEP 1: process split. Subprocesses install the ORIGIN-gated renderer
+    // handler (isolation layer 1) and declare the `mote` scheme. No URL is passed.
+    match mote_cef::bootstrap_with_bridge() {
         ProcessRole::Subprocess { exit_code } => {
             return ExitCode::from(u8::try_from(exit_code.clamp(0, 255)).unwrap_or(0));
         }
         ProcessRole::Browser => {}
     }
 
-    // STEP 2: engine, configured with the chrome URL (browser-process side of the
-    // gate). no_sandbox for the headless/dev environment.
+    // STEP 2: engine. no_sandbox for the headless/dev environment. The bridge App
+    // (always installed) declares the `mote` scheme and carries the origin gate.
     let config = EngineConfig {
         no_sandbox: true,
-        chrome_url: Some(chrome_url.clone()),
         ..EngineConfig::default()
     };
     let engine = match Engine::init(&config) {
@@ -119,6 +126,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // STEP 2b: the HOST registers the chrome assets served from mote://chrome/...
+    // (in production these are mote-ui's embedded assets; mote-cef never depends
+    // on mote-ui). An unregistered path would 404.
+    engine.register_chrome_resources(ChromeResources::new().register(
+        "index.html",
+        CHROME_HTML,
+        "text/html; charset=utf-8",
+    ));
 
     // Ground-truth flags the op handlers flip. These are the ONLY evidence
     // channel — there is no way for content to set them without the bridge.
@@ -156,7 +172,7 @@ fn main() -> ExitCode {
     // STEP 4: the chrome page, wired through the ONLY constructor. There is no API
     // path to attach this router to a content page.
     let chrome_req = ChromePageRequest::new(
-        &chrome_url,
+        &chrome_entry,
         &PageOptions {
             width: 320,
             height: 240,

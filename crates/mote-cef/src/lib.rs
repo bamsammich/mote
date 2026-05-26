@@ -26,8 +26,14 @@
 //!   [`ChromePage`] / [`ChromePageRequest`] — the privileged chrome↔Rust
 //!   transport (ADR-0005). `window.mote.invoke(op, params)` over the CEF message
 //!   router, dispatched to a closed set of structured ops, scoped to the chrome
-//!   browser in two independent layers (renderer URL gate + chrome-only router),
-//!   made **unrepresentable to misconfigure** by construction.
+//!   browser in two independent layers (renderer origin gate + chrome-only
+//!   router), made **unrepresentable to misconfigure** by construction.
+//! - [`ChromeResources`] / [`CHROME_ORIGIN`] / [`chrome_url`] — the privileged
+//!   internal `mote://chrome` scheme that serves the chrome assets (ADR-0005
+//!   amendment). The host registers `path -> (bytes, content-type)` resources;
+//!   `mote-cef` serves them from `mote://chrome/...`. The host-bridge gates on the
+//!   fixed [`CHROME_ORIGIN`] origin constant, not a runtime URL — web content is
+//!   `http(s)` and can never carry that origin, so the gate is unforgeable.
 //!
 //! # Off-screen rendering
 //!
@@ -53,6 +59,7 @@ mod interceptor;
 mod paint;
 mod process;
 mod profile;
+mod scheme;
 
 pub use bridge::{HostBridge, OpHandler, OpRegistry, OpResponse};
 pub use browser::{ChromePage, ChromePageRequest, Page, PageOptions, PageRole};
@@ -63,6 +70,7 @@ pub use interceptor::{AllowAll, RequestDecision, RequestInfo, ResourceIntercepto
 pub use paint::{PaintFrame, PixelFormat};
 pub use process::{ProcessRole, bootstrap, bootstrap_with_bridge};
 pub use profile::{IdentityId, ProfileHandle, ProfileManager};
+pub use scheme::{CHROME_HOST, CHROME_ORIGIN, CHROME_SCHEME, ChromeResources, chrome_url};
 
 #[cfg(test)]
 mod guard_test {

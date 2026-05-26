@@ -21,10 +21,12 @@
 //! Per ADR-0005 the bridge is scoped to the chrome browser in **two independent
 //! layers** on top of Chromium's process-per-site isolation:
 //!
-//! 1. **Renderer-side URL gate** ([`render_process_app`]'s `on_context_created`):
+//! 1. **Renderer-side origin gate** ([`render_process_app`]'s `on_context_created`):
 //!    `window.cefQuery` / `window.mote` is installed *only* into V8 contexts
-//!    whose frame URL equals the configured chrome URL. Untrusted content has no
-//!    binding name to call.
+//!    whose frame **origin** is the privileged [`crate::scheme::CHROME_ORIGIN`]
+//!    (`mote://chrome`), a compile-time constant — never a runtime URL string.
+//!    Untrusted content is `http(s)` and can never carry that origin, so it has
+//!    no binding name to call.
 //! 2. **Browser-side router scoping**: the [`BrowserSideRouter`] is attached
 //!    *only* to the chrome browser's `Client` (via [`ChromePage`]). A content
 //!    [`crate::Page`]'s client carries no router, so even a stray query message
@@ -34,8 +36,10 @@
 //! load-bearing: disabling either leaks the binding. So the API makes the
 //! unscoped configuration *unrepresentable*:
 //!
-//! - The renderer gate is wired internally whenever a chrome [`App`] is built;
-//!   there is no public knob to install the binding without the URL gate.
+//! - The renderer gate is wired internally whenever the bridge [`App`] is built;
+//!   there is no public knob to install the binding without the origin gate, and
+//!   the gate is a fixed constant ([`crate::scheme::CHROME_ORIGIN`]) — there is no
+//!   API to gate on anything else.
 //! - The browser-side router is only ever attached through [`HostBridge::for_chrome`],
 //!   which takes a [`ChromePage`]. A content [`crate::Page`] has **no method** that
 //!   yields a router, a [`ChromePage`], or a [`HostBridge`]. There is no API path to
@@ -79,11 +83,13 @@ use cef::wrapper::message_router::{
 };
 use cef::{
     App, Browser, Client, Frame, ImplApp, ImplClient, ImplFrame, ImplRenderProcessHandler,
-    ProcessId, ProcessMessage, RenderHandler, RenderProcessHandler, V8Context, WrapApp, WrapClient,
-    WrapRenderProcessHandler, wrap_app, wrap_client, wrap_render_process_handler,
+    ProcessId, ProcessMessage, RenderHandler, RenderProcessHandler, SchemeRegistrar, V8Context,
+    WrapApp, WrapClient, WrapRenderProcessHandler, wrap_app, wrap_client,
+    wrap_render_process_handler,
 };
 
 use crate::error::Result;
+use crate::scheme;
 
 /// Runs a callback body, catching any panic so it never unwinds across the C ABI
 /// (UB under `panic = "abort"`). On panic, logs and returns `default`. Mirrors
@@ -333,9 +339,7 @@ fn renderer_router() -> Arc<RendererSideRouter> {
 }
 
 wrap_render_process_handler! {
-    struct BridgeRenderProcessHandler {
-        chrome_url: String,
-    }
+    struct BridgeRenderProcessHandler {}
 
     impl RenderProcessHandler {
         fn on_context_created(
@@ -345,17 +349,20 @@ wrap_render_process_handler! {
             context: Option<&mut V8Context>,
         ) {
             guard((), || {
-                // LAYER 1 — the renderer URL gate. on_context_created is the call
-                // that installs window.cefQuery into a V8 context. We invoke it
-                // ONLY for the privileged chrome document's frame URL. Every other
-                // frame (untrusted content, subframes) gets NOTHING — no binding
-                // name to call. There is no code path here that installs the
-                // binding without first matching the gate.
+                // LAYER 1 — the renderer ORIGIN gate. on_context_created is the
+                // call that installs window.cefQuery into a V8 context. We invoke
+                // it ONLY for frames whose origin is the privileged
+                // `mote://chrome` (scheme::CHROME_ORIGIN) — a compile-time
+                // constant, never a runtime URL string. Every other frame
+                // (untrusted http/https content, subframes) gets NOTHING — no
+                // binding name to call. There is no code path here that installs
+                // the binding without matching the constant origin, and no API to
+                // gate on any other value.
                 let url = frame
                     .as_ref()
                     .map(|f| cef::CefString::from(&f.url()).to_string())
                     .unwrap_or_default();
-                if url != self.chrome_url {
+                if !scheme::is_chrome_origin(&url) {
                     return;
                 }
                 renderer_router().on_context_created(
@@ -402,28 +409,40 @@ wrap_render_process_handler! {
 }
 
 wrap_app! {
-    struct BridgeApp {
-        chrome_url: String,
-    }
+    struct BridgeApp {}
 
     impl App {
         fn render_process_handler(&self) -> Option<RenderProcessHandler> {
-            guard(None, || {
-                Some(BridgeRenderProcessHandler::new(self.chrome_url.clone()))
-            })
+            guard(None, || Some(BridgeRenderProcessHandler::new()))
+        }
+
+        fn on_register_custom_schemes(&self, registrar: Option<&mut SchemeRegistrar>) {
+            // CEF invokes this in EVERY process (browser + each subprocess), which
+            // is exactly where the privileged `mote` scheme must be declared so a
+            // `mote://chrome` document is a secure standard origin everywhere. The
+            // origin gate above relies on this registration existing in the
+            // renderer subprocess too.
+            guard((), || {
+                if let Some(registrar) = registrar {
+                    scheme::register_custom_scheme(registrar);
+                }
+            });
         }
     }
 }
 
-/// Build the custom CEF [`App`] that installs the renderer-side bridge gated to
-/// `chrome_url`. The **same** app must be passed to `execute_process` (so the
-/// renderer subprocess installs the gated `RenderProcessHandler`) and to
-/// `initialize` (browser process). `mote-cef` wires this internally:
+/// Build the custom CEF [`App`] that (a) declares the privileged `mote` scheme in
+/// every process via `on_register_custom_schemes` and (b) installs the
+/// renderer-side bridge gated to the constant `mote://chrome` origin. The **same**
+/// app must be passed to `execute_process` (so the renderer subprocess installs
+/// the gated `RenderProcessHandler` and registers the scheme) and to `initialize`
+/// (browser process). `mote-cef` wires this internally:
 /// [`crate::bootstrap_with_bridge`] (subprocess) and [`crate::Engine::init`]
 /// (browser) both call here. There is no public API to obtain an app that
-/// installs the binding *without* the URL gate — the gate is unconditional.
-pub(crate) fn render_process_app(chrome_url: &str) -> App {
-    BridgeApp::new(chrome_url.to_string())
+/// installs the binding *without* the origin gate, and the gated value is a fixed
+/// constant — nothing can diverge across processes.
+pub(crate) fn render_process_app() -> App {
+    BridgeApp::new()
 }
 
 // =============================================================================
@@ -533,9 +552,11 @@ impl HostBridge {
     /// producible from a [`crate::PageOptions`] whose role is
     /// [`crate::PageRole::Chrome`]): the page's chrome client — carrying the
     /// browser-side router — is created here, so there is no way to attach the
-    /// router to a content browser. The renderer URL gate must already be
-    /// installed via [`crate::EngineConfig::chrome_url`] /
-    /// [`crate::bootstrap_with_bridge`].
+    /// router to a content browser. The renderer origin gate is already installed
+    /// by the bridge [`App`] both [`crate::bootstrap_with_bridge`] (subprocess)
+    /// and [`crate::Engine::init`] (browser) install, and the chrome assets must
+    /// be registered via [`crate::Engine::register_chrome_resources`] so the
+    /// `mote://chrome` page can load.
     ///
     /// # Errors
     /// [`CefError::BrowserCreate`] if the chrome browser could not be created.
