@@ -26,22 +26,24 @@ The version Mote becomes a daily driver for its primary developer and a credibly
 
 The substrate everything else stands on. Until this works, nothing else can be tested end-to-end.
 
-- [ ] Rust workspace scaffolded with `cargo workspaces`, crate boundaries matching the design doc's layered architecture
-- [ ] `mote-cef` wrapper crate — all CEF interaction goes through here; CI enforces no `cef::` imports outside it
-- [ ] CEF integration: launch the engine, render a single hardcoded URL, handle window lifecycle, multi-process security working
-- [ ] `mlua` + LuaJIT integration; sandboxed Lua environment with `io`, `os`, `debug`, `loadstring` removed
-- [ ] Capability dispatch layer: load a Lua plugin from disk, parse manifest, register declared hooks/events
-- [ ] Permission registry v1 implemented (all permission domains from the design doc)
-- [ ] Capability registry v1 implemented (all capabilities + their contracts)
-- [ ] Per-hook-type dispatch (filter chains, broadcasts, keybind handlers) with the documented budgets and timeout semantics
-- [ ] Schema validation, module load, contract conformance, permission approval load-time pipeline
-- [ ] Plugin permission enforcement working end-to-end
-- [ ] Plugin event bus (declarative `M.hooks` and `M.events`)
-- [ ] Plugin dependency resolution (semver constraints, library vs leaf plugins, version-naive code)
-- [ ] Per-plugin storage namespaces (SQLite-backed)
-- [ ] Plugin lifecycle: load, run, hot reload, unload
-- [ ] `wasmtime` integration for WASM plugins (minimum viable; can defer full WASM plugin support if needed)
-- [ ] Permission audit log (lock-free, crossbeam channels) with SQLite persistence
+**Status: complete** — all 10 runtime crates built and wired, proven by an end-to-end test (`mote-runtime/tests/end_to_end.rs`). Commits `f80a05c..162ffc1`; GitHub issue #1 closed. A foundation security + code review is in progress (issue #2) before Phase 2 builds on top.
+
+- [x] Rust workspace scaffolded (virtual `[workspace]`, `crates/mote-*` boundaries matching the design doc's layered architecture)
+- [x] `mote-cef` wrapper crate — all CEF interaction goes through here; a guard test fails on any `cef::` import outside it
+- [~] CEF integration: engine launch, render a hardcoded URL (off-screen), and multi-process security all working; **OS window lifecycle lands in Phase 2**
+- [x] `mlua` + LuaJIT integration; sandboxed Lua environment with `io`, `os`, `debug`, `loadstring` (plus `package`, `ffi`, `require`, `load*`) removed
+- [x] Capability dispatch layer: load a Lua plugin, parse manifest, register declared hooks/events
+- [x] Permission registry v1 implemented (all 48 permission terms from the design doc; `introspect:` deferred to v0.2)
+- [x] Capability registry v1 implemented (all 12 capabilities + their contracts) — contracts are a v1 interpretation pending maintainer sign-off before schema freeze
+- [x] Per-hook-type dispatch (filter chains, broadcasts, keybind handlers) with the documented budgets and timeout semantics (risk D1 resolved: 10ms hard timeout enforced on LuaJIT)
+- [x] Schema validation, module load, contract conformance, permission approval load-time pipeline (four-step)
+- [x] Plugin permission enforcement working end-to-end
+- [x] Plugin event bus (declarative `M.hooks` and `M.events`)
+- [x] Inter-plugin dependency resolution via capability contracts (`consumes`) + dangling-consumer resolution. **Semver/`requires` removed per ADR-0002** (superseded the original "semver constraints" wording)
+- [x] Per-plugin storage namespaces (SQLite-backed; per-identity isolation too)
+- [x] Plugin lifecycle: load, run, hot reload (programmatic, re-approval-hashed), unload. **OS file-watch triggering lands in Phase 3 (pluginmgr)**
+- [x] `wasmtime` integration for WASM plugins (minimum viable; host-import ABI)
+- [x] Permission audit log (lock-free, crossbeam channels) with SQLite persistence
 
 ### Phase 2 — Browser shell
 
@@ -224,7 +226,7 @@ These are real possibilities that may or may not happen depending on how the pro
 - **Plugin signing and verification** — only if a third-party plugin registry exists and supply-chain attacks become a credible concern
 - **Cross-machine session sync** — if the dotfile-driven model proves insufficient and someone wants a real solution
 - **Workspace persistence model** — currently SQLite-per-identity; might evolve to flat files or per-workspace directories
-- **UI framework decision** — custom over `wgpu`/Skia vs. adopting `iced`/`egui` — to be resolved during Phase 2 of v0.1 work; the chosen path locks in for the project's life
+- **UI framework decision** — **RESOLVED (ADR-0003):** the chrome is authored as HTML/CSS rendered by CEF off-screen and composited by a thin `wgpu` layer. Decided via a three-way prototype spike (custom-wgpu / egui / HTML-in-CEF); see `docs/research/ui-spike-*.md`
 - **Mote-as-CI** — Mote running headless in a CI environment with the `frontend-introspection-mcp` plugin enabled, becoming the deployment target for AI-driven E2E tests
 - **Plugin marketplace** — only if the bootstrap problem is solved and a curated community emerges
 
