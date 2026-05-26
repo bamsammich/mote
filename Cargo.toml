@@ -59,6 +59,9 @@ cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
 # Noisy in a single-product workspace where the repetition aids readability.
 module_name_repetitions = "allow"
+# Conflicts with rustc's `unreachable_pub` (which we keep): satisfying one
+# triggers the other. Disable the nursery lint; `unreachable_pub` is the policy.
+redundant_pub_crate = "allow"
 
 # Release profile tuned per the design doc's performance/footprint targets.
 [profile.release]
