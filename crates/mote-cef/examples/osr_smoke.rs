@@ -51,7 +51,13 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| "osr_smoke.png".to_string());
 
     // STEP 2: engine.
-    let config = EngineConfig::default();
+    // no_sandbox must be set explicitly here: the default is `false` (sandbox
+    // ON) per the DESIGN security model. This example/smoke test runs in a
+    // headless/dev environment where the sandbox is intentionally disabled.
+    let config = EngineConfig {
+        no_sandbox: true,
+        ..EngineConfig::default()
+    };
     let engine = match Engine::init(&config) {
         Ok(e) => e,
         Err(e) => {

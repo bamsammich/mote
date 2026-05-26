@@ -28,9 +28,10 @@ pub struct EngineConfig {
     /// under the current working directory. A stable path silences the
     /// `root_cache_path` startup warning the spike documented.
     pub cache_path: PathBuf,
-    /// Disable the Chromium sandbox. `true` for headless/dev (the spike's
-    /// setting); production should keep the sandbox and provision
-    /// `chrome-sandbox` (see DESIGN security notes).
+    /// Disable the Chromium sandbox. Defaults to `false` (sandbox ON) to match
+    /// the DESIGN security model — Chromium's renderer sandbox isolates web
+    /// content. Callers that genuinely need the sandbox off (CI, headless dev,
+    /// the `osr_smoke` example) must set this to `true` explicitly.
     pub no_sandbox: bool,
     /// Drive CEF's work via [`Engine::pump`] / [`Engine::run`] rather than CEF's
     /// own internal message loop. Required for the OSR compositor model.
@@ -43,7 +44,7 @@ impl Default for EngineConfig {
             cache_path: std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(".mote-cef-cache"),
-            no_sandbox: true,
+            no_sandbox: false,
             external_message_pump: true,
         }
     }

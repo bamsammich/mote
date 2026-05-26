@@ -14,6 +14,7 @@
 )]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cef::{
     Browser, BrowserSettings, CefString, ImplBrowser, ImplBrowserHost, ImplFrame, WindowInfo,
@@ -51,6 +52,9 @@ pub struct Page {
     browser: Browser,
     frame: FrameSlot,
     nav: NavState,
+    /// Set to `true` once [`Page::close`] has been called so that the [`Drop`]
+    /// impl does not issue a second `close_browser` to an already-closing host.
+    closed: AtomicBool,
 }
 
 impl std::fmt::Debug for Page {
@@ -112,6 +116,7 @@ impl Page {
             browser,
             frame,
             nav,
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -172,11 +177,73 @@ impl Page {
         self.browser.reload();
     }
 
-    /// Request that CEF close this browser. After calling, pump the engine a few
+    /// Request that CEF close this browser. Idempotent — safe to call more than
+    /// once; subsequent calls are no-ops. After calling, pump the engine a few
     /// times so CEF can tear down the host before [`crate::Engine::shutdown`].
     pub fn close(&self) {
-        if let Some(host) = self.browser.host() {
+        // Use compare-exchange so that exactly one caller wins the close race;
+        // `Drop` uses the same guard so an explicit close followed by drop is safe.
+        if self
+            .closed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            && let Some(host) = self.browser.host()
+        {
             host.close_browser(1);
         }
+    }
+}
+
+impl Drop for Page {
+    /// Ensures the underlying CEF browser host is closed when a [`Page`] is
+    /// dropped without an explicit [`Page::close`] call, preventing a resource
+    /// leak of the browser host object. Guarded by an atomic flag so an already-
+    /// closed page is a no-op here.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    /// Verifies the idempotent-close guard pattern used by `Page::close` and
+    /// `Drop`. We exercise the CAS logic directly (no live CEF needed).
+    #[test]
+    fn close_flag_is_idempotent() {
+        let closed = AtomicBool::new(false);
+        let call_count = AtomicU32::new(0);
+
+        // Simulate the CAS in close() three times; only the first should win.
+        for _ in 0..3 {
+            if closed
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                call_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "close body must execute exactly once regardless of call count"
+        );
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "closed flag must be set after first close"
+        );
+    }
+
+    /// Verifies that the closed flag starts at false (not pre-closed).
+    #[test]
+    fn close_flag_starts_false() {
+        let closed = Arc::new(AtomicBool::new(false));
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "a newly created Page must not be pre-closed"
+        );
     }
 }

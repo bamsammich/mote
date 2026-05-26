@@ -165,7 +165,19 @@ wrap_render_handler! {
                 // are lossless.
                 let w = width.cast_unsigned();
                 let h = height.cast_unsigned();
-                let n = (w as usize) * (h as usize) * 4;
+                // Use checked arithmetic to guard against 32-bit overflow: on a
+                // 32-bit target `usize` is 4 bytes; w*h*4 can exceed usize::MAX
+                // for large frames. Bail with a log rather than truncating the
+                // slice length (which would be unsound with from_raw_parts).
+                let n = (w as usize)
+                    .checked_mul(h as usize)
+                    .and_then(|p| p.checked_mul(4));
+                let Some(n) = n else {
+                    eprintln!(
+                        "mote-cef: on_paint frame too large for usize ({w}×{h}×4); skipping"
+                    );
+                    return;
+                };
                 // SAFETY: CEF guarantees `buffer` points to `width * height * 4`
                 // valid BGRA bytes for the duration of this callback. We copy
                 // immediately into an owned Vec; the pointer is not retained.
@@ -374,4 +386,50 @@ pub(crate) fn build_client(
     });
 
     (client, slot, nav)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers used by tests (and extracted for testability)
+// ---------------------------------------------------------------------------
+
+/// Compute `w * h * 4` as a `usize` with overflow protection.
+///
+/// Returns `None` if the result would not fit in `usize` (relevant on 32-bit
+/// targets). This is the same arithmetic that `on_paint` uses to compute the
+/// pixel-buffer length before calling `from_raw_parts`.
+#[allow(dead_code)] // compiled only when tests use it; never dead in test cfg
+pub(crate) fn pixel_buf_len(w: u32, h: u32) -> Option<usize> {
+    (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|p| p.checked_mul(4))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pixel_buf_len;
+
+    #[test]
+    fn pixel_buf_len_normal() {
+        // 640×400 BGRA: 640 * 400 * 4 = 1 024 000
+        assert_eq!(pixel_buf_len(640, 400), Some(1_024_000_usize));
+    }
+
+    #[test]
+    fn pixel_buf_len_one_by_one() {
+        assert_eq!(pixel_buf_len(1, 1), Some(4));
+    }
+
+    #[test]
+    fn pixel_buf_len_zero_dimension() {
+        // Zero dimensions: valid arithmetic, produces 0.
+        assert_eq!(pixel_buf_len(0, 400), Some(0));
+        assert_eq!(pixel_buf_len(640, 0), Some(0));
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn pixel_buf_len_overflows_on_32bit() {
+        // On 32-bit: usize::MAX == 4_294_967_295. 65536 * 65536 * 4 overflows.
+        assert_eq!(pixel_buf_len(65536, 65536), None);
+    }
 }
