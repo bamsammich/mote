@@ -58,22 +58,25 @@
 //! - **Provider-plugin navigation** (`ui:urlbar_provider`): the op accepts a URL
 //!   directly (the chrome bootstrap normalizes omnibox text).
 
+mod picker;
 mod runtime;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mote_cef::{
     ButtonAction, ChromePageRequest, ChromeResources, Engine, EngineConfig, HostBridge, IdentityId,
     KeyAction, KeyInput, Modifiers, MouseButton, MousePosition, OpRegistry, OpResponse, Page,
     PageOptions, PageRole, ProfileHandle, ProfileManager, chrome_url,
 };
-use mote_session::Session;
+use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
 use mote_storage::Store;
 use mote_types::{TabId, WorkspaceId};
 use mote_ui::{Compositor, PixelFormat, ViewportRect};
+
+use crate::picker::{PickerEntry, PickerState};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
@@ -105,6 +108,26 @@ const SESSION_IDENTITY: u64 = 0;
 
 /// The single workspace this slice drives.
 const WORKSPACE: u64 = 0;
+
+/// How often the shell runs the session housekeeping pass (active-tab discard +
+/// hidden-tab reap). The decisions themselves use the configured idle/TTL
+/// thresholds; this is just the polling cadence. A minute is far below either
+/// default threshold, so housekeeping is timely without busy-looping.
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_mins(1);
+
+/// Environment override for the active-tab discard threshold, in **seconds**
+/// (`MOTE_DISCARD_AFTER_SECS`). Lets a test drive the discard path without
+/// waiting the 30-minute default. Unset → [`DiscardConfig::default`] (30 min).
+const DISCARD_AFTER_ENV: &str = "MOTE_DISCARD_AFTER_SECS";
+
+/// Environment override for the hidden-tab TTL, in **seconds**
+/// (`MOTE_HIDDEN_TTL_SECS`). Lets a test drive the reap path without waiting the
+/// 30-day default. Unset → [`HiddenTabConfig::default`] (30 days).
+const HIDDEN_TTL_ENV: &str = "MOTE_HIDDEN_TTL_SECS";
+
+/// Environment override for the housekeeping cadence, in **seconds**
+/// (`MOTE_HOUSEKEEPING_SECS`). Lets a test see discard/reap fire promptly.
+const HOUSEKEEPING_ENV: &str = "MOTE_HOUSEKEEPING_SECS";
 
 /// The start URL a brand-new tab loads. A `data:` URL renders without network,
 /// so the slice is deterministic offline; pass a real URL on the command line
@@ -275,6 +298,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         integrity_page: None,
         integrity_open: false,
         integrity_paints: 0,
+        picker: PickerState::default(),
+        picker_page: None,
+        picker_paints: 0,
+        discarder: Discarder::new(discard_config()),
+        reaper: HiddenTabReaper::new(hidden_tab_config()),
+        housekeeping_interval: housekeeping_interval(),
+        last_housekeeping: Instant::now(),
         session_identity,
         workspace,
         tabs,
@@ -385,6 +415,52 @@ fn state_dir() -> PathBuf {
     PathBuf::from(".mote-state")
 }
 
+/// Parse a `Duration` from an environment variable holding a whole number of
+/// seconds, returning `None` when unset, empty, or unparsable.
+fn env_secs(var: &str) -> Option<Duration> {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+/// Build the active-tab [`DiscardConfig`] from an optional idle override. The
+/// default is 30 minutes with pinned tabs kept loaded (DESIGN); `Some(d)`
+/// shortens the idle threshold (used by [`DISCARD_AFTER_ENV`] for tests).
+fn discard_config_with(discard_after: Option<Duration>) -> DiscardConfig {
+    let mut cfg = DiscardConfig::default();
+    if let Some(after) = discard_after {
+        cfg.discard_after = after;
+    }
+    cfg
+}
+
+/// [`discard_config_with`] sourced from [`DISCARD_AFTER_ENV`].
+fn discard_config() -> DiscardConfig {
+    discard_config_with(env_secs(DISCARD_AFTER_ENV))
+}
+
+/// Build the hidden-tab [`HiddenTabConfig`] from an optional TTL override. The
+/// default TTL is 30 days (DESIGN); `Some(d)` shortens it (used by
+/// [`HIDDEN_TTL_ENV`] for tests).
+fn hidden_tab_config_with(ttl: Option<Duration>) -> HiddenTabConfig {
+    let mut cfg = HiddenTabConfig::default();
+    if let Some(ttl) = ttl {
+        cfg.ttl = Some(ttl);
+    }
+    cfg
+}
+
+/// [`hidden_tab_config_with`] sourced from [`HIDDEN_TTL_ENV`].
+fn hidden_tab_config() -> HiddenTabConfig {
+    hidden_tab_config_with(env_secs(HIDDEN_TTL_ENV))
+}
+
+/// The housekeeping cadence, honouring [`HOUSEKEEPING_ENV`] for tests.
+fn housekeeping_interval() -> Duration {
+    env_secs(HOUSEKEEPING_ENV).unwrap_or(HOUSEKEEPING_INTERVAL)
+}
+
 /// The reverse-DNS application identifier used for the window's Wayland `app_id`
 /// / X11 `WM_CLASS`. Compositors key window rules, icons, and taskbar grouping
 /// off this; leaving it empty makes Mote an unidentified window.
@@ -431,6 +507,11 @@ fn build_chrome_resources(integrity_html: &str) -> ChromeResources {
         .register(
             "integrity.html",
             integrity_html.to_owned(),
+            "text/html; charset=utf-8",
+        )
+        .register(
+            "picker.html",
+            picker::PICKER_HTML,
             "text/html; charset=utf-8",
         )
         .register(
@@ -540,6 +621,23 @@ struct ShellApp {
     integrity_open: bool,
     /// Last integrity paint count uploaded (re-upload only on a new frame).
     integrity_paints: u64,
+    /// The workspace tab picker (`Mod+Space`) state machine. Logic lives
+    /// Rust-side; the overlay page is pure display (see [`picker`]).
+    picker: PickerState,
+    /// The lazily-created picker overlay page (`mote://chrome/picker.html`).
+    /// `None` until the picker is first opened.
+    picker_page: Option<Page>,
+    /// Last picker paint count uploaded (re-upload only on a new frame).
+    picker_paints: u64,
+    /// Applies active-tab renderer-discard decisions (DESIGN §Active tab
+    /// discarding). The shell kills the renderer for each newly-discarded tab.
+    discarder: Discarder,
+    /// Ages out hidden tabs past their TTL (DESIGN §Hidden tab lifecycle).
+    reaper: HiddenTabReaper,
+    /// How often [`Self::run_housekeeping`] runs (discard + reap pass).
+    housekeeping_interval: Duration,
+    /// When housekeeping last ran (throttles the pass to the interval).
+    last_housekeeping: Instant,
     session_identity: mote_types::IdentityId,
     workspace: WorkspaceId,
     /// The open tabs in display order; `active` indexes the focused one.
@@ -872,6 +970,10 @@ impl ShellApp {
     /// content uploads are skipped while it is open, and forced to re-upload when
     /// it closes (the `*_paints` counters are reset in `set_integrity_open`).
     fn upload_frames(&mut self) {
+        if self.picker.open {
+            self.upload_picker_overlay();
+            return;
+        }
         if self.integrity_open {
             self.upload_integrity_overlay();
             return;
@@ -997,6 +1099,304 @@ impl ShellApp {
         }
     }
 
+    // ── Workspace tab picker (Mod+Space) ──────────────────────────────────
+
+    /// Open or close the workspace tab picker overlay.
+    ///
+    /// On open it snapshots the current workspace's tabs in
+    /// [`Session::tab_picker_ranked`] order into [`PickerState`] and lazily
+    /// creates the full-window overlay [`Page`] (`mote://chrome/picker.html`),
+    /// composited like the integrity overlay. Selection/filtering are handled
+    /// Rust-side (see [`picker`]); on close the browser surface re-uploads.
+    fn set_picker_open(&mut self, open: bool) {
+        if open {
+            let entries: Vec<PickerEntry> = self
+                .session
+                .tab_picker_ranked(self.workspace)
+                .into_iter()
+                .map(PickerEntry::from_tab)
+                .collect();
+            self.picker.open(entries);
+            if self.picker_page.is_none() {
+                let url = chrome_url("picker.html");
+                let opts = PageOptions {
+                    width: self.width.max(1),
+                    height: self.height.max(1),
+                    frame_rate: 60,
+                    role: PageRole::Content,
+                };
+                match Page::new(&url, &opts) {
+                    Ok(page) => {
+                        page.notify_resized(self.width.max(1), self.height.max(1));
+                        self.picker_page = Some(page);
+                    }
+                    Err(e) => {
+                        eprintln!("mote-shell: failed to open tab picker: {e}");
+                        self.picker.close();
+                        return;
+                    }
+                }
+            } else if let Some(page) = self.picker_page.as_ref() {
+                page.notify_resized(self.width.max(1), self.height.max(1));
+            }
+            self.picker_paints = 0;
+            eprintln!("mote-shell: tab picker opened");
+        } else {
+            self.picker.close();
+            // Force the browser surface beneath the (now hidden) overlay to
+            // re-upload (the picker drew over the chrome texture).
+            self.chrome_paints = 0;
+            self.content_paints = 0;
+            eprintln!("mote-shell: tab picker closed");
+        }
+    }
+
+    /// Push the picker's current query + filtered rows into the overlay via
+    /// `eval_js` → `window.__motePicker(state)`. Strings are JS-escaped exactly
+    /// like the chrome push (page-derived titles/URLs are injection vectors).
+    fn push_picker_state(&self) {
+        let Some(page) = self.picker_page.as_ref() else {
+            return;
+        };
+        let rows = self.picker.rows_json(js_string);
+        let query = js_string(self.picker.query());
+        page.eval_js(&format!(
+            "window.__motePicker&&window.__motePicker({{query:{query},rows:{rows}}});"
+        ));
+    }
+
+    /// Handle a key event while the picker is open. Returns `true` if the key
+    /// was consumed by the picker (so it is not routed to a page).
+    ///
+    /// Esc closes; Enter selects; Up/Down (and Ctrl+J/K) move; Backspace edits;
+    /// printable characters filter. Every state change re-renders the overlay.
+    fn picker_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        if event.state != ElementState::Pressed {
+            // Swallow key-ups too while open so the page never sees them.
+            return true;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.set_picker_open(false);
+                return true;
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.activate_picker_selection();
+                return true;
+            }
+            Key::Named(NamedKey::ArrowDown) => self.picker.move_down(),
+            Key::Named(NamedKey::ArrowUp) => self.picker.move_up(),
+            Key::Named(NamedKey::Backspace) => self.picker.backspace(),
+            Key::Character(s) if self.modifiers.contains(Modifiers::CONTROL) => {
+                // Vim-style Ctrl+J / Ctrl+K navigation (palette spec).
+                if s.eq_ignore_ascii_case("j") {
+                    self.picker.move_down();
+                } else if s.eq_ignore_ascii_case("k") {
+                    self.picker.move_up();
+                } else {
+                    return true; // swallow other Ctrl-combos while open
+                }
+            }
+            Key::Character(s) => {
+                for c in s.chars() {
+                    self.picker.push_char(c);
+                }
+            }
+            Key::Named(NamedKey::Space) => self.picker.push_char(' '),
+            _ => return true, // swallow anything else; the picker owns input
+        }
+        self.push_picker_state();
+        true
+    }
+
+    /// Resolve the selected picker row and act on it, then close the picker.
+    ///
+    /// An **active** tab → the existing switch path ([`Self::select_tab`]); a
+    /// **hidden** tab → reveal it in the session and materialize/switch to it
+    /// (DESIGN: selecting a hidden tab brings it into the current window).
+    fn activate_picker_selection(&mut self) {
+        let Some(entry) = self.picker.selected_entry() else {
+            self.set_picker_open(false);
+            return;
+        };
+        let id = entry.id;
+        let is_active = entry.is_active();
+        self.set_picker_open(false);
+        if is_active {
+            self.select_tab(id);
+        } else {
+            self.reveal_tab(id);
+        }
+    }
+
+    /// Reveal a hidden tab into the current window: flip it to active in the
+    /// session, add it to the window's tab strip (materializing its page), and
+    /// switch to it. No-op if the tab is missing or already shown in the strip.
+    fn reveal_tab(&mut self, id: TabId) {
+        // Already in this window's strip → just select it.
+        if self.tabs.iter().any(|t| t.id == id) {
+            self.select_tab(id);
+            return;
+        }
+        if let Err(e) = self.session.reveal_tab(id) {
+            eprintln!("mote-shell: reveal tab {id} failed: {e}");
+            return;
+        }
+        let Some(stab) = self.session.tab(id) else {
+            return;
+        };
+        let url = stab.url.clone();
+        let title = stab.title.clone();
+        eprintln!("mote-shell: reveal hidden tab {id} -> {url}");
+        let page = match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("mote-shell: failed to materialize revealed tab {id}: {e}");
+                None
+            }
+        };
+        self.tabs.push(ShellTab {
+            id,
+            url,
+            title,
+            page,
+        });
+        self.active = self.tabs.len() - 1;
+        self.on_active_changed();
+        self.persist_and_push();
+    }
+
+    /// Composite the picker overlay full-window onto the chrome texture. On the
+    /// page's first paint, push the initial picker state (an `eval_js` before the
+    /// document's script runs would be lost — same warm-up as the chrome).
+    fn upload_picker_overlay(&mut self) {
+        if !self.picker.ready
+            && self
+                .picker_page
+                .as_ref()
+                .is_some_and(|p| p.paint_count() >= 1)
+        {
+            self.picker.ready = true;
+            self.push_picker_state();
+        }
+        let frame = self.picker_page.as_ref().and_then(|p| {
+            let count = p.paint_count();
+            (count != self.picker_paints).then(|| {
+                self.picker_paints = count;
+                p.latest_frame()
+            })
+        });
+        let Some(Some(frame)) = frame else {
+            return;
+        };
+        if let Some(compositor) = self.compositor.as_mut()
+            && let Err(e) = compositor.update_chrome(
+                &frame.pixels,
+                frame.width,
+                frame.height,
+                PixelFormat::Bgra8,
+            )
+        {
+            eprintln!("mote-shell: tab picker overlay upload failed: {e}");
+        }
+    }
+
+    // ── Session housekeeping (discard + hidden-tab reap) ───────────────────
+
+    /// Run the periodic session housekeeping pass if the interval has elapsed:
+    /// discard idle active-tab renderers, then reap hidden tabs past their TTL.
+    fn maybe_run_housekeeping(&mut self) {
+        if self.last_housekeeping.elapsed() < self.housekeeping_interval {
+            return;
+        }
+        self.last_housekeeping = Instant::now();
+        let discarded = self.discard_idle_renderers();
+        // Reap is detect-only until mote-session exposes a removal API (see
+        // `reap_hidden_tabs`); it changes no state, so it never forces a flush.
+        let _reap_candidates = self.reap_hidden_tabs();
+        if discarded > 0 {
+            self.persist_and_push();
+        }
+    }
+
+    /// Apply [`Discarder`] to the workspace's tabs and drop the CEF renderer for
+    /// each tab whose `is_discarded` flag newly transitions to `true`. The tab
+    /// entry stays in the strip (DESIGN: a discarded tab reloads on focus). The
+    /// **active, focused** tab is never discarded — `last_visited` is bumped for
+    /// it so its idle timer only starts once the user moves away. Returns the
+    /// number of renderers dropped.
+    ///
+    /// Drives [`Discarder::should_discard`] per tab through the session's public
+    /// per-id API (the session exposes no `&mut [Tab]` slice for the batch
+    /// `discard_all`, so we apply the same decision tab-by-tab).
+    fn discard_idle_renderers(&mut self) -> usize {
+        // Keep the focused tab's idle clock from advancing: it is in use.
+        if let Some(focused) = self.tabs.get(self.active)
+            && let Some(stab) = self.session.tab_mut(focused.id)
+        {
+            stab.last_visited = Some(SystemTime::now());
+        }
+
+        // Decide which tabs to discard (immutable borrow), then apply + drop the
+        // renderers (mutable borrows) — split so the borrows don't overlap.
+        let to_discard: Vec<TabId> = self
+            .session
+            .tab_picker_ranked(self.workspace)
+            .into_iter()
+            .filter(|t| self.discarder.should_discard(t))
+            .map(|t| t.id)
+            .collect();
+
+        let mut dropped = 0;
+        for id in to_discard {
+            if let Some(stab) = self.session.tab_mut(id) {
+                stab.discard();
+            }
+            // Drop the live renderer but KEEP the tab entry (page = None makes it
+            // a placeholder that reloads on focus, the discard contract).
+            if let Some(shell_tab) = self.tabs.iter_mut().find(|t| t.id == id)
+                && let Some(page) = shell_tab.page.take()
+            {
+                page.close();
+                dropped += 1;
+                eprintln!("mote-shell: discarded idle renderer for tab {id}");
+            }
+        }
+        dropped
+    }
+
+    /// Identify hidden tabs past their TTL via [`HiddenTabReaper::should_reap`].
+    ///
+    /// # BLOCKED — needs a mote-session removal API
+    ///
+    /// Reaping must *delete* the tab from the session (DESIGN §Memory cost:
+    /// "Aged out (>30 days hidden) → Deleted"; [`Session::flush`] rebuilds the
+    /// persisted `tab_ids` from `self.tabs.keys()`, so a tab survives unless it
+    /// leaves the session's own map). The session exposes **no** removal method
+    /// and **no** `&mut Vec<Tab>` accessor, so neither
+    /// [`HiddenTabReaper::reap_all`] (wants `&mut Vec<Tab>`) nor a per-tab delete
+    /// is reachable from the shell. `close_tab` only sets `TabState::Closed`; it
+    /// does not remove the entry, so it cannot stand in for reap.
+    ///
+    /// This method therefore only *detects* and logs reap candidates; actual
+    /// removal awaits a mote-session API — see the agent report. Returns the
+    /// number of tabs that *would* be reaped.
+    fn reap_hidden_tabs(&self) -> usize {
+        let candidates = self
+            .session
+            .tab_picker_ranked(self.workspace)
+            .into_iter()
+            .filter(|t| self.reaper.should_reap(t))
+            .count();
+        if candidates > 0 {
+            eprintln!(
+                "mote-shell: {candidates} hidden tab(s) past TTL detected (reap blocked: \
+                 mote-session exposes no tab-removal API)"
+            );
+        }
+        candidates
+    }
+
     /// React to a DPI scale-factor change: recompute the (logical-pixel) chrome
     /// insets at the new scale and resize the active page's surface to the new
     /// physical viewport (high-DPI, plan §1.3).
@@ -1025,6 +1425,10 @@ impl ShellApp {
         self.bridge.page().notify_resized(size.width, size.height);
         // The integrity overlay (if live) is full-window like the chrome.
         if let Some(page) = self.integrity_page.as_ref() {
+            page.notify_resized(size.width, size.height);
+        }
+        // The picker overlay (if live) is full-window like the chrome too.
+        if let Some(page) = self.picker_page.as_ref() {
             page.notify_resized(size.width, size.height);
         }
         let (vw, vh) = self.viewport_dims();
@@ -1097,12 +1501,27 @@ impl ShellApp {
     ///
     /// Uses `Ctrl` (the Linux/dev convention) where the spec writes `⌘`.
     fn intercept_keybind(&mut self, event: &winit::event::KeyEvent) -> bool {
+        // While the tab picker is open it owns ALL keyboard input (filter,
+        // navigate, select, close) — route every key to it before anything else.
+        if self.picker.open {
+            return self.picker_key(event);
+        }
         if event.state != ElementState::Pressed {
             return false;
         }
         // Esc closes the integrity overlay (only when it is open).
         if self.integrity_open && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
             self.set_integrity_open(false);
+            return true;
+        }
+        // Mod+Space (Super or Ctrl) opens the workspace tab picker (DESIGN
+        // §The workspace tab picker — default `Mod+Space`). `Mod` is Super on
+        // Linux; we also accept Ctrl+Space for keyboards/WMs that reserve Super.
+        if matches!(event.logical_key, Key::Named(NamedKey::Space))
+            && (self.modifiers.contains(Modifiers::COMMAND)
+                || self.modifiers.contains(Modifiers::CONTROL))
+        {
+            self.set_picker_open(true);
             return true;
         }
         if !self.modifiers.contains(Modifiers::CONTROL) {
@@ -1273,6 +1692,7 @@ impl ApplicationHandler for ShellApp {
         self.engine.pump();
         self.drain_commands();
         self.sync_active_title();
+        self.maybe_run_housekeeping();
         self.upload_frames();
 
         // Once the chrome has painted, its bootstrap has run; push the initial
@@ -1315,6 +1735,9 @@ impl Drop for ShellApp {
             }
         }
         if let Some(page) = self.integrity_page.as_ref() {
+            page.close();
+        }
+        if let Some(page) = self.picker_page.as_ref() {
             page.close();
         }
         self.bridge.page().close();
@@ -1591,6 +2014,72 @@ mod tests {
             windows_key_code(&Key::Character("a".into())),
             i32::from(b'A')
         );
+    }
+
+    // ── Session-housekeeping wiring (discard + reap) ──────────────────────
+    //
+    // These exercise the shell's config plumbing and that the session crate's
+    // Discarder / HiddenTabReaper make the right decisions at SHORT intervals
+    // (so the logic is testable without waiting the 30-min / 30-day defaults).
+    // The full housekeeping loop also drops CEF renderers, which needs a live
+    // engine and is covered by the manual `mote-app` run, not a unit test.
+
+    use std::time::{Duration, SystemTime};
+
+    use mote_session::{Discarder, HiddenTabReaper, Tab};
+    use mote_types::{TabId, WorkspaceId};
+
+    #[test]
+    fn discard_config_override_shortens_idle_threshold() {
+        let cfg = discard_config_with(Some(Duration::from_secs(2)));
+        assert_eq!(cfg.discard_after, Duration::from_secs(2));
+        assert!(cfg.keep_pinned_loaded); // default preserved
+        // No override → the 30-minute default.
+        assert_eq!(
+            discard_config_with(None).discard_after,
+            Duration::from_mins(30)
+        );
+    }
+
+    #[test]
+    fn hidden_ttl_override_shortens_ttl() {
+        let cfg = hidden_tab_config_with(Some(Duration::from_secs(2)));
+        assert_eq!(cfg.ttl, Some(Duration::from_secs(2)));
+        // No override → the 30-day default.
+        assert_eq!(
+            hidden_tab_config_with(None).ttl,
+            Some(Duration::from_hours(720))
+        );
+    }
+
+    #[test]
+    fn discarder_with_short_threshold_discards_idle_active_tab() {
+        // An active tab idle 5s with a 2s threshold is discard-eligible; the
+        // shell builds the Discarder from `discard_config_with` exactly so.
+        let discarder = Discarder::new(discard_config_with(Some(Duration::from_secs(2))));
+        let mut tab = Tab::new(TabId::new(1), "https://a.com".into(), WorkspaceId::new(0));
+        tab.last_visited = Some(SystemTime::now() - Duration::from_secs(5));
+        assert!(discarder.should_discard(&tab));
+
+        // A freshly-visited tab is not.
+        let mut fresh = Tab::new(TabId::new(2), "https://b.com".into(), WorkspaceId::new(0));
+        fresh.last_visited = Some(SystemTime::now());
+        assert!(!discarder.should_discard(&fresh));
+    }
+
+    #[test]
+    fn reaper_with_short_ttl_reaps_old_hidden_tab() {
+        // A hidden tab released 5s ago with a 2s TTL is reap-eligible; the shell
+        // builds the reaper from `hidden_tab_config_with` exactly so.
+        let reaper = HiddenTabReaper::new(hidden_tab_config_with(Some(Duration::from_secs(2))));
+        let mut tab = Tab::new(TabId::new(1), "https://a.com".into(), WorkspaceId::new(0));
+        tab.hide(SystemTime::now() - Duration::from_secs(5));
+        assert!(reaper.should_reap(&tab));
+
+        // A just-hidden tab is not yet stale.
+        let mut recent = Tab::new(TabId::new(2), "https://b.com".into(), WorkspaceId::new(0));
+        recent.hide(SystemTime::now());
+        assert!(!reaper.should_reap(&recent));
     }
 
     #[test]
