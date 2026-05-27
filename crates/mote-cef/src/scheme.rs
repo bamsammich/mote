@@ -63,6 +63,17 @@ pub const CHROME_SCHEME: &str = "mote";
 /// The privileged chrome host (the `mote://chrome` authority).
 pub const CHROME_HOST: &str = "chrome";
 
+/// The **unprivileged** overlay host (the `mote://overlay` authority).
+///
+/// Trusted shell-rendered surfaces that do NOT need the host-bridge (the tab
+/// picker, the integrity panel) are served from here instead of `mote://chrome`.
+/// They are built and driven by the shell (Rust-side input routing + `eval_js`),
+/// so they need no `window.cefQuery`. Crucially this host is a **different
+/// origin** than `mote://chrome`, so the renderer origin gate ([`is_chrome_origin`])
+/// does NOT match it and the privileged binding is never installed there — even
+/// though the document is trusted, it carries no authority it does not use.
+pub const OVERLAY_HOST: &str = "overlay";
+
 /// The privileged chrome **origin** — the compile-time constant the host-bridge
 /// gates on (ADR-0005 amendment).
 ///
@@ -71,6 +82,10 @@ pub const CHROME_HOST: &str = "chrome";
 /// Web content is `http(s)` and can never carry this origin.
 pub const CHROME_ORIGIN: &str = "mote://chrome";
 
+/// The unprivileged overlay origin (`mote://overlay`). A distinct origin from
+/// [`CHROME_ORIGIN`]; the host-bridge origin gate never matches it.
+pub const OVERLAY_ORIGIN: &str = "mote://overlay";
+
 /// Build a `mote://chrome/<path>` URL for the chrome entry document.
 #[must_use]
 pub fn chrome_url(path: &str) -> String {
@@ -78,16 +93,32 @@ pub fn chrome_url(path: &str) -> String {
     format!("{CHROME_ORIGIN}/{path}")
 }
 
+/// Build a `mote://overlay/<path>` URL for an unprivileged overlay document.
+#[must_use]
+pub fn overlay_url(path: &str) -> String {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    format!("{OVERLAY_ORIGIN}/{path}")
+}
+
 /// Returns `true` if `url`'s origin is the privileged chrome origin
 /// (`mote://chrome`). This is the gate predicate: a frame either *is* the chrome
 /// origin or it is not, with no runtime configuration to get wrong. Web content
-/// (`http(s)`) can never match.
+/// (`http(s)`) can never match, and neither can the unprivileged
+/// [`OVERLAY_ORIGIN`].
 #[must_use]
 pub(crate) fn is_chrome_origin(url: &str) -> bool {
     // Exact origin (rare) or any path under it. We deliberately require the
-    // `mote://chrome` authority verbatim — a different host (`mote://evil`) or a
-    // different scheme never matches.
+    // `mote://chrome` authority verbatim — a different host (`mote://evil`,
+    // `mote://overlay`) or a different scheme never matches.
     url == CHROME_ORIGIN || url.starts_with(&format!("{CHROME_ORIGIN}/"))
+}
+
+/// Returns `true` if `url` is a `mote://` URL of any host. The S1 navigation
+/// guard rejects ALL of these for content-role pages: untrusted web content can
+/// never commit *any* internal `mote://` navigation, privileged or not.
+#[must_use]
+pub(crate) fn is_mote_scheme(url: &str) -> bool {
+    url.starts_with("mote://")
 }
 
 /// Runs a callback body, catching any panic so it never unwinds across the C ABI
@@ -211,12 +242,12 @@ fn normalize_path(path: &str) -> String {
     path.strip_prefix('/').unwrap_or(path).to_string()
 }
 
-/// Extract the path portion of a `mote://chrome/<path>` URL (everything after the
+/// Extract the path portion of a `<origin>/<path>` URL (everything after the
 /// origin). Returns `""` for a bare origin.
-fn url_path(url: &str) -> String {
+fn url_path_for(url: &str, origin: &str) -> String {
     let rest = url
-        .strip_prefix(&format!("{CHROME_ORIGIN}/"))
-        .or_else(|| url.strip_prefix(CHROME_ORIGIN))
+        .strip_prefix(&format!("{origin}/"))
+        .or_else(|| url.strip_prefix(origin))
         .unwrap_or("");
     normalize_path(rest)
 }
@@ -251,9 +282,20 @@ pub(crate) fn register_custom_scheme(registrar: &SchemeRegistrar) {
 // Scheme handler factory + resource handler (step 2 — browser process).
 // =============================================================================
 
+/// The state a [`ChromeSchemeFactory`] carries: the resource map plus the origin
+/// it serves under (so the same factory type backs both the `mote://chrome` and
+/// `mote://overlay` hosts).
+#[derive(Clone)]
+struct FactoryState {
+    resources: Arc<ChromeResources>,
+    /// The origin (`mote://chrome` / `mote://overlay`) requests are stripped of
+    /// to compute the served path.
+    origin: &'static str,
+}
+
 wrap_scheme_handler_factory! {
     struct ChromeSchemeFactory {
-        resources: Arc<ChromeResources>,
+        state: FactoryState,
     }
 
     impl SchemeHandlerFactory {
@@ -269,8 +311,8 @@ wrap_scheme_handler_factory! {
                     .as_ref()
                     .map(|r| CefString::from(&r.url()).to_string())
                     .unwrap_or_default();
-                let path = url_path(&url);
-                Some(self.resources.resolve(&path).map_or_else(
+                let path = url_path_for(&url, self.state.origin);
+                Some(self.state.resources.resolve(&path).map_or_else(
                     MemResourceHandler::not_found,
                     |res| {
                         MemResourceHandler::serve(
@@ -422,10 +464,26 @@ impl MemResourceHandler {
 /// `resources`. Must be called in the **browser process after `cef::initialize`**.
 /// Crate-internal: reached only via [`crate::Engine::register_chrome_resources`].
 pub(crate) fn register_chrome_factory(resources: Arc<ChromeResources>) {
-    let mut factory: SchemeHandlerFactory = ChromeSchemeFactory::new(resources);
+    register_host_factory(CHROME_HOST, CHROME_ORIGIN, resources);
+}
+
+/// Register the scheme handler factory for the **unprivileged** `mote://overlay`
+/// origin, serving `resources`. Must be called in the **browser process after
+/// `cef::initialize`**. Crate-internal: reached only via
+/// [`crate::Engine::register_overlay_resources`]. Documents at this origin never
+/// receive the host-bridge binding (the origin gate matches only `mote://chrome`).
+pub(crate) fn register_overlay_factory(resources: Arc<ChromeResources>) {
+    register_host_factory(OVERLAY_HOST, OVERLAY_ORIGIN, resources);
+}
+
+/// Register a scheme handler factory for one `mote` host, serving `resources`
+/// and stripping `origin` to compute served paths.
+fn register_host_factory(host: &str, origin: &'static str, resources: Arc<ChromeResources>) {
+    let mut factory: SchemeHandlerFactory =
+        ChromeSchemeFactory::new(FactoryState { resources, origin });
     register_scheme_handler_factory(
         Some(&CefString::from(CHROME_SCHEME)),
-        Some(&CefString::from(CHROME_HOST)),
+        Some(&CefString::from(host)),
         Some(&mut factory),
     );
 }
@@ -433,8 +491,8 @@ pub(crate) fn register_chrome_factory(resources: Arc<ChromeResources>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ORIGIN, ChromeResources, chrome_url, is_chrome_origin, normalize_path,
-        split_content_type, url_path,
+        CHROME_ORIGIN, ChromeResources, OVERLAY_ORIGIN, chrome_url, is_chrome_origin,
+        is_mote_scheme, normalize_path, overlay_url, split_content_type, url_path_for,
     };
 
     #[test]
@@ -466,6 +524,23 @@ mod tests {
         assert!(!is_chrome_origin("mote://evil/index.html"));
         assert!(!is_chrome_origin("mote://chromezilla/x"));
         assert!(!is_chrome_origin("data:text/html,hi"));
+        // The unprivileged overlay host is NOT the chrome origin — overlays get
+        // no `window.cefQuery` binding (S2).
+        assert!(!is_chrome_origin("mote://overlay/picker.html"));
+        assert!(!is_chrome_origin(OVERLAY_ORIGIN));
+    }
+
+    #[test]
+    fn mote_scheme_matches_any_internal_host() {
+        // The S1 content-guard rejects ALL mote:// hosts for content pages.
+        assert!(is_mote_scheme("mote://chrome/index.html"));
+        assert!(is_mote_scheme("mote://overlay/picker.html"));
+        assert!(is_mote_scheme("mote://evil/x"));
+        assert!(is_mote_scheme(CHROME_ORIGIN));
+        // Web content and data URLs are never the mote scheme.
+        assert!(!is_mote_scheme("https://example.com/"));
+        assert!(!is_mote_scheme("http://mote/"));
+        assert!(!is_mote_scheme("data:text/html,hi"));
     }
 
     #[test]
@@ -475,11 +550,28 @@ mod tests {
     }
 
     #[test]
+    fn overlay_url_builds_under_overlay_origin() {
+        assert_eq!(overlay_url("picker.html"), "mote://overlay/picker.html");
+        assert_eq!(overlay_url("/picker.html"), "mote://overlay/picker.html");
+    }
+
+    #[test]
     fn url_path_extracts_after_origin() {
-        assert_eq!(url_path("mote://chrome/app.js"), "app.js");
-        assert_eq!(url_path("mote://chrome/"), "");
-        assert_eq!(url_path("mote://chrome"), "");
-        assert_eq!(url_path("mote://chrome/a/b.css?v=1"), "a/b.css");
+        assert_eq!(
+            url_path_for("mote://chrome/app.js", CHROME_ORIGIN),
+            "app.js"
+        );
+        assert_eq!(url_path_for("mote://chrome/", CHROME_ORIGIN), "");
+        assert_eq!(url_path_for("mote://chrome", CHROME_ORIGIN), "");
+        assert_eq!(
+            url_path_for("mote://chrome/a/b.css?v=1", CHROME_ORIGIN),
+            "a/b.css"
+        );
+        // Overlay origin is stripped the same way.
+        assert_eq!(
+            url_path_for("mote://overlay/picker.html", OVERLAY_ORIGIN),
+            "picker.html"
+        );
     }
 
     #[test]

@@ -131,6 +131,21 @@ impl Engine {
         scheme::register_chrome_factory(Arc::new(resources));
     }
 
+    /// Register the assets served from the **unprivileged** `mote://overlay`
+    /// origin (S2). Trusted shell-rendered overlay surfaces (the tab picker, the
+    /// integrity panel) load from here instead of `mote://chrome`: they are driven
+    /// entirely Rust-side and need no host-bridge, so serving them off a distinct
+    /// origin keeps `window.cefQuery` out of them (the origin gate matches only
+    /// `mote://chrome`).
+    ///
+    /// Call this **once, after [`Engine::init`]**, like
+    /// [`Engine::register_chrome_resources`]. The `mote` scheme is already declared
+    /// in every process; this wires the browser-process factory for the overlay
+    /// host.
+    pub fn register_overlay_resources(&self, resources: ChromeResources) {
+        scheme::register_overlay_factory(Arc::new(resources));
+    }
+
     /// Pump one slice of CEF work. Call this from the host event loop when using
     /// an external message pump (the OSR model). Drives `on_paint`, network IO,
     /// and navigation callbacks.

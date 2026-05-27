@@ -37,16 +37,19 @@ use std::sync::{Arc, Mutex};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, Client, DisplayHandler, ImplClient, ImplDisplayHandler, ImplLoadHandler,
-    ImplRenderHandler, ImplRequest, ImplRequestHandler, ImplResourceRequestHandler, LoadHandler,
-    PaintElementType, Rect, RenderHandler, Request, RequestHandler, ResourceRequestHandler,
-    ReturnValue, WrapClient, WrapDisplayHandler, WrapLoadHandler, WrapRenderHandler,
-    WrapRequestHandler, WrapResourceRequestHandler, wrap_client, wrap_display_handler,
-    wrap_load_handler, wrap_render_handler, wrap_request_handler, wrap_resource_request_handler,
+    Browser, CefString, Client, DisplayHandler, ImplClient, ImplDisplayHandler, ImplFrame,
+    ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
+    ImplResourceRequestHandler, LoadHandler, PaintElementType, Rect, RenderHandler, Request,
+    RequestHandler, ResourceRequestHandler, ReturnValue, WrapClient, WrapDisplayHandler,
+    WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler,
+    wrap_client, wrap_display_handler, wrap_load_handler, wrap_render_handler,
+    wrap_request_handler, wrap_resource_request_handler,
 };
 
+use crate::browser::PageRole;
 use crate::interceptor::{RequestDecision, RequestInfo, ResourceInterceptor};
 use crate::paint::{PaintFrame, PixelFormat};
+use crate::scheme;
 
 /// Runs a callback body, catching any panic so it never unwinds across the C
 /// ABI (which would be UB under `panic = "abort"`). On panic, logs to stderr and
@@ -360,6 +363,9 @@ wrap_display_handler! {
 #[derive(Clone)]
 struct InterceptState {
     interceptor: Arc<dyn ResourceInterceptor>,
+    /// The trust role of the owning page. Content pages are barred from
+    /// committing any `mote://` top-level navigation (the S1 nav guard).
+    role: PageRole,
 }
 
 fn request_info(request: Option<&mut Request>, is_nav: i32, is_dl: i32) -> RequestInfo {
@@ -404,12 +410,54 @@ wrap_resource_request_handler! {
     }
 }
 
+/// The pure decision behind the S1 navigation guard: should a top-level browse
+/// to `url` be cancelled for a page of `role`?
+///
+/// A `Content` (untrusted) page is barred from committing ANY top-level `mote://`
+/// navigation; `Chrome`/`Overlay` (trusted, shell-created) pages are exempt.
+/// Subframe loads (`is_main == false`) are never cancelled. Extracted so the
+/// decision is unit-testable without a live CEF frame/request.
+fn should_cancel_navigation(role: PageRole, is_main: bool, url: &str) -> bool {
+    is_main && !role.may_navigate_mote_scheme() && scheme::is_mote_scheme(url)
+}
+
 wrap_request_handler! {
     struct RequestHandlerImpl {
         state: InterceptState,
     }
 
     impl RequestHandler {
+        /// LAYER 0 — the content-page navigation guard (S1, defence-in-depth).
+        ///
+        /// Cancels any top-level navigation whose target is a `mote://` URL when
+        /// the owning page is the untrusted `Content` role. A content page can
+        /// thus NEVER commit a `mote://chrome` (or any internal `mote://`)
+        /// navigation, regardless of CEF's LOCAL-scheme link policy — so even if
+        /// the renderer origin gate were ever defeated, content could not reach a
+        /// privileged-origin document. Trusted shell-created surfaces (Chrome,
+        /// Overlay) are exempt so they can load their own internal URLs.
+        ///
+        /// Returns 1 to cancel the navigation, 0 to allow it.
+        fn on_before_browse(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut cef::Frame>,
+            request: Option<&mut Request>,
+            _user_gesture: ::std::os::raw::c_int,
+            _is_redirect: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            guard(0, || {
+                // Only gate top-level (main-frame) navigations. Subframe loads
+                // can never carry the privileged origin and are out of scope.
+                let is_main = frame.is_some_and(|f| f.is_main() != 0);
+                let url = request
+                    .as_ref()
+                    .map(|r| CefString::from(&r.url()).to_string())
+                    .unwrap_or_default();
+                ::std::os::raw::c_int::from(should_cancel_navigation(self.state.role, is_main, &url))
+            })
+        }
+
         fn resource_request_handler(
             &self,
             _browser: Option<&mut Browser>,
@@ -423,6 +471,7 @@ wrap_request_handler! {
             guard(None, || {
                 Some(ResourceRequestHandlerImpl::new(InterceptState {
                     interceptor: Arc::clone(&self.state.interceptor),
+                    role: self.state.role,
                 }))
             })
         }
@@ -465,14 +514,17 @@ wrap_client! {
     }
 }
 
-/// Builds a fully-wired CEF [`Client`] for an off-screen browser.
+/// Builds a fully-wired CEF [`Client`] for an off-screen browser of trust `role`.
 ///
 /// Returns the client plus the [`FrameSlot`], [`NavState`], and [`TitleSlot`]
 /// the owning `Page` reads from. Keeping construction here keeps every `cef::`
-/// handler type inside the FFI module.
+/// handler type inside the FFI module. The `role` is wired into the request
+/// handler's `on_before_browse` guard: a `Content` page can never commit a
+/// top-level `mote://` navigation (S1).
 pub(crate) fn build_client(
     size: ViewSize,
     interceptor: Arc<dyn ResourceInterceptor>,
+    role: PageRole,
 ) -> (Client, FrameSlot, NavState, TitleSlot, ViewSize) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
@@ -483,7 +535,7 @@ pub(crate) fn build_client(
         size: size.clone(),
     });
     let load = LoadHandlerImpl::new(LoadState { nav: nav.clone() });
-    let request = RequestHandlerImpl::new(InterceptState { interceptor });
+    let request = RequestHandlerImpl::new(InterceptState { interceptor, role });
     let display = DisplayHandlerImpl::new(DisplayState {
         title: title.clone(),
     });
@@ -516,7 +568,69 @@ pub(crate) fn pixel_buf_len(w: u32, h: u32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::pixel_buf_len;
+    use super::{pixel_buf_len, should_cancel_navigation};
+    use crate::browser::PageRole;
+
+    #[test]
+    fn content_page_cancels_mote_navigation() {
+        // A content (untrusted) page must never commit a privileged-origin nav.
+        assert!(should_cancel_navigation(
+            PageRole::Content,
+            true,
+            "mote://chrome/index.html"
+        ));
+        // Any mote:// host, not just chrome (S1 rejects ALL internal navs).
+        assert!(should_cancel_navigation(
+            PageRole::Content,
+            true,
+            "mote://overlay/picker.html"
+        ));
+    }
+
+    #[test]
+    fn content_page_allows_web_navigation() {
+        // Ordinary web navigation is unaffected.
+        assert!(!should_cancel_navigation(
+            PageRole::Content,
+            true,
+            "https://example.com/"
+        ));
+        assert!(!should_cancel_navigation(
+            PageRole::Content,
+            true,
+            "http://example.com/"
+        ));
+        assert!(!should_cancel_navigation(
+            PageRole::Content,
+            true,
+            "data:text/html,hi"
+        ));
+    }
+
+    #[test]
+    fn trusted_roles_may_load_mote_urls() {
+        // The chrome page and shell overlays legitimately load internal URLs.
+        assert!(!should_cancel_navigation(
+            PageRole::Chrome,
+            true,
+            "mote://chrome/index.html"
+        ));
+        assert!(!should_cancel_navigation(
+            PageRole::Overlay,
+            true,
+            "mote://overlay/picker.html"
+        ));
+    }
+
+    #[test]
+    fn subframe_navigation_is_never_cancelled() {
+        // Only top-level navigations are gated; subframes can't carry the origin.
+        assert!(!should_cancel_navigation(
+            PageRole::Content,
+            false,
+            "mote://chrome/index.html"
+        ));
+    }
 
     #[test]
     fn pixel_buf_len_normal() {

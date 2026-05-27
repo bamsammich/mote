@@ -44,11 +44,40 @@ use crate::profile::ProfileHandle;
 pub enum PageRole {
     /// Untrusted web content (the default). A normal browser with no privileged
     /// bindings; this is what every web page Mote loads is.
+    ///
+    /// A content page is **forbidden to navigate to any `mote://` URL**: the
+    /// navigation guard ([`crate::interceptor`] → `on_before_browse`) cancels a
+    /// top-level `mote://` browse on a content-role page, so a hostile page can
+    /// never commit a privileged-origin (or any internal) navigation regardless
+    /// of CEF's LOCAL-scheme link policy. This is defence-in-depth on top of the
+    /// renderer origin gate.
     #[default]
     Content,
-    /// The privileged chrome document. Wave B will scope the host-bridge binding
-    /// to pages created with this role; here it only marks the page.
+    /// The privileged chrome document. Scopes the host-bridge binding (the chrome
+    /// browser's client carries the message router). Loads from `mote://chrome`
+    /// and is exempt from the content navigation guard.
     Chrome,
+    /// A **trusted but unprivileged** internal overlay surface (the tab picker,
+    /// the integrity panel). Created and driven entirely by the shell (Rust-side
+    /// input routing + `eval_js`), so it needs no host-bridge — it carries no
+    /// `window.cefQuery`. It loads from the unprivileged `mote://overlay` origin
+    /// (never `mote://chrome`), and is exempt from the content navigation guard so
+    /// the shell can load that internal URL. Untrusted content cannot obtain this
+    /// role: pages default to [`Content`](PageRole::Content).
+    Overlay,
+}
+
+impl PageRole {
+    /// Whether a page of this role is allowed to commit a top-level `mote://`
+    /// navigation. Only `Content` is barred — it is the untrusted role. `Chrome`
+    /// and `Overlay` are trusted shell-created surfaces that legitimately load
+    /// their own internal `mote://` documents.
+    pub(crate) const fn may_navigate_mote_scheme(self) -> bool {
+        match self {
+            Self::Content => false,
+            Self::Chrome | Self::Overlay => true,
+        }
+    }
 }
 
 /// Options for creating an off-screen [`Page`].
@@ -172,7 +201,7 @@ impl Page {
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
-        let (client, frame, nav, title, size) = ffi::build_client(size, interceptor);
+        let (client, frame, nav, title, size) = ffi::build_client(size, interceptor, options.role);
         // Chrome pages are transparent so the composited page shows through;
         // content pages are opaque.
         let transparent = options.role == PageRole::Chrome;
@@ -503,7 +532,8 @@ impl ChromePageRequest {
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav, title, size) = ffi::build_client(size, Arc::new(AllowAll));
+        let (inner, frame, nav, title, size) =
+            ffi::build_client(size, Arc::new(AllowAll), PageRole::Chrome);
         let client = bridge::chrome_client(inner, router);
         // The chrome browser is always transparent (the page composites through
         // its `<main>` region).

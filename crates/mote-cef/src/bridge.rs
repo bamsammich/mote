@@ -255,68 +255,21 @@ impl BrowserSideHandler for RegistryHandler {
 
 /// Extract `(op, params_json)` from a `{"op":"...","params":{...}}` request.
 ///
-/// Dependency-free, deliberately minimal: it reads the string `op` field and
-/// re-extracts the `params` sub-object as a JSON string to hand to the handler.
-/// We never interpret the request as anything but `(verb, opaque data)`. Returns
-/// `None` if `op` is absent/non-string.
+/// Parses the request as a JSON **object** (anchored — not a first-substring
+/// match) and reads the top-level string `op` field and the `params` sub-object,
+/// which is re-serialised to a JSON string for the handler. We never interpret
+/// the request as anything but `(verb, opaque data)`. Returns `None` if the
+/// request is not a JSON object or `op` is absent/non-string. A missing or
+/// non-object `params` defaults to `{}`.
 fn parse_request(request: &str) -> Option<(String, String)> {
-    let op = json_string_field(request, "op")?;
-    let params = json_object_field(request, "params").unwrap_or_else(|| "{}".to_string());
+    let value: serde_json::Value = serde_json::from_str(request).ok()?;
+    let object = value.as_object()?;
+    let op = object.get("op")?.as_str()?.to_string();
+    let params = object
+        .get("params")
+        .filter(|p| p.is_object())
+        .map_or_else(|| "{}".to_string(), serde_json::Value::to_string);
     Some((op, params))
-}
-
-/// Find a top-level `"field": "value"` string field. Crude but sufficient: the
-/// request is host-bootstrap-authored JSON, not arbitrary content.
-fn json_string_field(json: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\"");
-    let i = json.find(&key)? + key.len();
-    let rest = &json[i..];
-    let colon = rest.find(':')?;
-    let after = rest[colon + 1..].trim_start();
-    let after = after.strip_prefix('"')?;
-    let end = after.find('"')?;
-    Some(after[..end].to_string())
-}
-
-/// Extract a top-level `"field": { ... }` object as a JSON string (balanced
-/// braces). Returns `None` if the field is absent or not an object.
-fn json_object_field(json: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\"");
-    let i = json.find(&key)? + key.len();
-    let rest = &json[i..];
-    let colon = rest.find(':')?;
-    let after = rest[colon + 1..].trim_start();
-    let bytes = after.as_bytes();
-    if bytes.first() != Some(&b'{') {
-        return None;
-    }
-    let mut depth = 0_i32;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (idx, &b) in bytes.iter().enumerate() {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(after[..=idx].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 // =============================================================================
@@ -589,29 +542,56 @@ mod tests {
     //! These cover the CEF-free core: structured-request parsing and the closed
     //! dispatch set (the no-eval guarantee). Live two-layer isolation is proven by
     //! the `host_bridge_isolation` example, which needs the real CEF process split.
-    use super::{OpRegistry, OpResponse, OpResponseInner, json_object_field, json_string_field};
+    use super::{OpRegistry, OpResponse, OpResponseInner, parse_request};
 
     #[test]
     fn parses_top_level_op_field() {
-        assert_eq!(
-            json_string_field(r#"{"op":"list_tabs","params":{}}"#, "op").as_deref(),
-            Some("list_tabs")
-        );
+        let (op, _params) = parse_request(r#"{"op":"list_tabs","params":{}}"#).expect("parses");
+        assert_eq!(op, "list_tabs");
     }
 
     #[test]
     fn extracts_balanced_params_object() {
+        // The `}` inside the nested string must not end the object early — proper
+        // JSON parsing handles this (the old hand-rolled brace-matcher's edge).
         let req = r#"{"op":"x","params":{"a":1,"nested":{"b":"}"}}}"#;
-        // The `}` inside the string must not end the object early.
-        assert_eq!(
-            json_object_field(req, "params").as_deref(),
-            Some(r#"{"a":1,"nested":{"b":"}"}}"#)
-        );
+        let (op, params) = parse_request(req).expect("parses");
+        assert_eq!(op, "x");
+        // Re-serialised params is canonical JSON: re-parse and compare values so
+        // the test does not depend on serde's key ordering / spacing.
+        let got: serde_json::Value = serde_json::from_str(&params).expect("params json");
+        let want: serde_json::Value =
+            serde_json::from_str(r#"{"a":1,"nested":{"b":"}"}}"#).expect("want json");
+        assert_eq!(got, want);
     }
 
     #[test]
     fn missing_op_is_none() {
-        assert!(json_string_field(r#"{"params":{}}"#, "op").is_none());
+        assert!(parse_request(r#"{"params":{}}"#).is_none());
+    }
+
+    #[test]
+    fn missing_params_defaults_to_empty_object() {
+        let (op, params) = parse_request(r#"{"op":"new_tab"}"#).expect("parses");
+        assert_eq!(op, "new_tab");
+        assert_eq!(params, "{}");
+    }
+
+    #[test]
+    fn op_substring_in_value_does_not_confuse_parse() {
+        // A value containing the literal `"op"` must not be mistaken for the key
+        // (the failure mode of first-substring extraction). Anchored parse reads
+        // the real top-level `op`.
+        let (op, _params) =
+            parse_request(r#"{"params":{"note":"\"op\":\"evil\""},"op":"navigate"}"#)
+                .expect("parses");
+        assert_eq!(op, "navigate");
+    }
+
+    #[test]
+    fn non_object_request_is_none() {
+        assert!(parse_request(r#"["op","navigate"]"#).is_none());
+        assert!(parse_request("not json").is_none());
     }
 
     #[test]

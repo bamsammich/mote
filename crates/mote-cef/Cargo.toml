@@ -16,6 +16,9 @@ workspace = true
 # The ONLY place in the workspace `cef` may appear. See DISCIPLINES.md §1.
 cef.workspace = true
 thiserror.workspace = true
+# Proper, object-anchored JSON parsing on the host-bridge request path (replaces
+# the prior hand-rolled first-substring field extractors). Crate-local dep.
+serde_json = "1.0"
 
 [dev-dependencies]
 # `osr_smoke` example writes the first painted frame to a PNG as run-evidence.

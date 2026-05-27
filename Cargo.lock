@@ -1981,6 +1981,7 @@ version = "0.0.0"
 dependencies = [
  "cef",
  "image",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -2079,6 +2080,7 @@ dependencies = [
  "mote-types",
  "mote-ui",
  "raw-window-handle",
+ "serde_json",
  "winit",
 ]
 

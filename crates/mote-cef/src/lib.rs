@@ -70,7 +70,10 @@ pub use interceptor::{AllowAll, RequestDecision, RequestInfo, ResourceIntercepto
 pub use paint::{PaintFrame, PixelFormat};
 pub use process::{ProcessRole, bootstrap, bootstrap_with_bridge};
 pub use profile::{IdentityId, ProfileHandle, ProfileManager};
-pub use scheme::{CHROME_HOST, CHROME_ORIGIN, CHROME_SCHEME, ChromeResources, chrome_url};
+pub use scheme::{
+    CHROME_HOST, CHROME_ORIGIN, CHROME_SCHEME, ChromeResources, OVERLAY_HOST, OVERLAY_ORIGIN,
+    chrome_url, overlay_url,
+};
 
 #[cfg(test)]
 mod guard_test {
