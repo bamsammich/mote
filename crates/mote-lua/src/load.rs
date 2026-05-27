@@ -29,7 +29,7 @@ use crate::sandbox::new_sandbox;
 
 /// How a plugin scopes its identity (DESIGN §Manifest Example
 /// `identity_scope`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum IdentityScope {
     /// One isolated state per browser identity.

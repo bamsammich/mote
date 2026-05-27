@@ -23,16 +23,20 @@
 //! - [`bundle`] — the binary-embedded first-party bundle and its offline unpack.
 //! - [`fetch`] — the [`gix`]-backed git [`fetch`](fetch()) (fetch-at-commit).
 
+pub mod approval_store;
 pub mod bundle;
 pub mod cache;
+pub mod diff;
 pub mod dirhash;
 pub mod fetch;
 pub mod lock;
 pub mod managed;
 pub mod source;
 
+pub use approval_store::{ApprovalStore, ApprovalStoreError};
 pub use bundle::{BundleError, bundled_names, bundled_version, is_bundled, unpack_into_cache};
 pub use cache::{Cache, CacheError, CacheKey};
+pub use diff::{Delta, DeltaKind, DiffReport, diff};
 pub use dirhash::{DirHashError, hash_dir};
 pub use fetch::{FetchError, Fetched, fetch};
 pub use lock::{LockEntry, LockError, LockFile};

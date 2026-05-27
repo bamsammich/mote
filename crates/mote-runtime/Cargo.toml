@@ -20,4 +20,8 @@ mote-permissions = { version = "0.0.0", path = "../mote-permissions" }
 mote-registry = { version = "0.0.0", path = "../mote-registry" }
 mote-storage = { version = "0.0.0", path = "../mote-storage" }
 mote-types = { version = "0.0.0", path = "../mote-types" }
+serde = { version = "1.0", features = ["derive"] }
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0"

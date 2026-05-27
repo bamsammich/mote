@@ -87,7 +87,12 @@ impl ApprovalPolicy for GrantAsRequested {
 /// not gate on hash-equality alone — it compares the field sets directionally
 /// (see [`ApprovalHash::is_expansion_of`]). The hash is the cheap equality
 /// fast-path for the common code-only reload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialization support (via `serde`) is provided so that
+/// `mote-pluginmgr::ApprovalStore` can persist approved hashes across sessions.
+/// The four field-lists are preserved verbatim so `is_expansion_of` can be
+/// re-evaluated on reload without re-loading the original manifest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalHash {
     permissions: Vec<String>,
     capabilities: Vec<String>,
@@ -126,6 +131,42 @@ impl ApprovalHash {
             bytes.extend_from_slice(format!("{scope:?}").as_bytes());
         }
         Checksum::hash(&bytes)
+    }
+
+    /// The canonicalized permission strings (sorted, de-duplicated) captured
+    /// from the manifest at the time this hash was computed.
+    ///
+    /// These are the raw string keys exactly as declared in the manifest (e.g.
+    /// `"storage:persistent"`, `"tabs:list"`). Registry validation is not
+    /// re-run; the store preserves what was approved.
+    #[must_use]
+    pub fn permissions(&self) -> &[String] {
+        &self.permissions
+    }
+
+    /// The canonicalized capability strings (sorted, de-duplicated) captured
+    /// from the manifest.
+    ///
+    /// An empty slice means the plugin fulfills no capabilities.
+    #[must_use]
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// The canonicalized consumed-capability strings (sorted, de-duplicated)
+    /// captured from the manifest.
+    ///
+    /// An empty slice means the plugin consumes no capabilities.
+    #[must_use]
+    pub fn consumes(&self) -> &[String] {
+        &self.consumes
+    }
+
+    /// The identity scope declared by the manifest, or `None` if the manifest
+    /// did not set one.
+    #[must_use]
+    pub const fn identity_scope(&self) -> Option<IdentityScope> {
+        self.identity_scope
     }
 
     /// Whether `self` expands the approval surface beyond `prior`.
@@ -236,6 +277,30 @@ mod tests {
         let new = ApprovalHash::of(&manifest(contracted));
         assert_ne!(prior, new);
         assert!(!new.is_expansion_of(&prior));
+    }
+
+    #[test]
+    fn serde_json_round_trips_approval_hash() {
+        let hash = ApprovalHash::of(&manifest(BASE));
+        let json = serde_json::to_string(&hash).expect("serialize must succeed");
+        let recovered: ApprovalHash =
+            serde_json::from_str(&json).expect("deserialize must succeed");
+        assert_eq!(
+            hash, recovered,
+            "ApprovalHash must round-trip through serde_json unchanged"
+        );
+        // Accessors must match the original manifest data.
+        assert!(
+            recovered
+                .permissions()
+                .contains(&"storage:persistent".to_owned()),
+            "permissions accessor must reflect the manifest"
+        );
+        assert_eq!(
+            recovered.identity_scope(),
+            Some(IdentityScope::Global),
+            "identity_scope accessor must reflect the manifest"
+        );
     }
 
     #[test]

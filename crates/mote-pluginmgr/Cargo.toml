@@ -15,9 +15,12 @@ workspace = true
 [dependencies]
 mote-types = { path = "../mote-types" }
 mote-lua = { path = "../mote-lua" }
+mote-runtime = { path = "../mote-runtime" }
+mote-storage = { path = "../mote-storage" }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "1.1"
 include_dir = "0.7"
 gix = { version = "0.84", default-features = false, features = [

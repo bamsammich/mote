@@ -2928,6 +2928,7 @@ version = "0.0.0"
 dependencies = [
  "mlua",
  "mote-types",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -2952,8 +2953,11 @@ dependencies = [
  "gix",
  "include_dir",
  "mote-lua",
+ "mote-runtime",
+ "mote-storage",
  "mote-types",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
@@ -2982,6 +2986,8 @@ dependencies = [
  "mote-registry",
  "mote-storage",
  "mote-types",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
