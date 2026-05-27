@@ -1,0 +1,19 @@
+# Standalone THROWAWAY spike — empty [workspace] detaches it from the repo workspace.
+[workspace]
+
+[package]
+name = "gix-fetch-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gix = { version = "0.84", default-features = false, features = [
+  "blocking-network-client",
+  "worktree-mutation",
+  "sha1",
+] }
+
+[[bin]]
+name = "gix-fetch-spike"
+path = "src/main.rs"
