@@ -49,18 +49,20 @@ The substrate everything else stands on. Until this works, nothing else can be t
 
 The user-facing chrome that turns "plugin runtime + rendering engine" into "browser."
 
-- [ ] Window management (single window for v0.1; multi-window working)
-- [ ] Tab strip with the documented tab states (active/hidden/closed)
-- [ ] URL bar (functional but minimal; provider is a plugin)
-- [ ] Workspace model with three-axis state (Identity / Workspace / Session)
-- [ ] Identity isolation (Chromium profile-based; documented isolation surface)
-- [ ] Workspace tab picker (the `Mod+Space` UX)
-- [ ] Session persistence with continuous SQLite flush, WAL mode, crash recovery
-- [ ] Active-tab discarding after 30min idle
-- [ ] Hidden-tab TTL (default 30 days)
-- [ ] Settings model (TOML config, dotfile-driven, no GUI in v0.1 except integrity panel)
-- [ ] Integrity panel: active plugins, permissions, audit log, storage, source provenance, integrity status, revoke/update/rollback/reload actions
-- [ ] Permission approval dialog (clean rendering of requested permissions, narrowing UI, install/decline)
+**Status: substantially complete + security-reviewed** (issue #3; Phase-2 security review issue #4 closed — no MUST). HTML/CSS-in-CEF chrome + wgpu compositor (ADR-0003), winit window (ADR-0004), the chrome↔Rust host bridge on the `mote://chrome` scheme (ADR-0005 + amendment), and the plugin runtime running in-process. Drivable on Linux (a Mac build needs Phase-9 packaging).
+
+- [~] Window management — single window working (the v0.1 ask); multi-window deferred
+- [x] Tab strip with the documented tab states (active/hidden/closed)
+- [x] URL bar — functional minimal navigation works; the urlbar *provider* plugin is loaded but suggestions need Phase-5 `history`
+- [x] Workspace model with three-axis state (Identity / Workspace / Session)
+- [x] Identity isolation (Chromium profile-based; cross-profile cookie isolation runtime-verified; `docs/identity-isolation.md`)
+- [x] Workspace tab picker (the `Mod+Space` UX)
+- [x] Session persistence with continuous SQLite flush, WAL mode, crash recovery
+- [x] Active-tab discarding after 30min idle
+- [x] Hidden-tab TTL (default 30 days)
+- [ ] Settings model — deferred; DESIGN says config is **Lua**, ROADMAP said **TOML** (inconsistency to resolve when built)
+- [x] Integrity panel: active plugins, permissions (requested→effective), audit log, storage, provenance, integrity status — live data. (revoke/update/rollback/reload **actions** wire with Phase-3 plugin management)
+- [~] Permission approval dialog — surface built (narrowing UI, dangerous-combo warnings); the install→approval **flow** pairs with Phase-3 plugin install
 
 ### Phase 3 — Plugin management
 
