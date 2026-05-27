@@ -58,6 +58,8 @@
 //! - **Provider-plugin navigation** (`ui:urlbar_provider`): the op accepts a URL
 //!   directly (the chrome bootstrap normalizes omnibox text).
 
+mod runtime;
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -187,8 +189,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let engine = Engine::init(&config)?;
 
-    // Serve the chrome assets from the privileged `mote://chrome` origin.
-    engine.register_chrome_resources(build_chrome_resources());
+    // The single shared per-identity SQLite store backs the session, the plugin
+    // runtime's per-plugin storage, and the audit sink (one database, namespaced).
+    let store = open_session_store()?;
+
+    // Stand up the Phase-1 plugin runtime and load the bundled first-party
+    // plugins through the four-step pipeline (urlbar + workspace-manager). Their
+    // behaviour is still stubbed; the point is they are LOADED and visible in the
+    // integrity panel. A plugin that fails to load is logged and skipped.
+    let host = runtime::PluginHost::boot(store.clone())?;
+
+    // Render the integrity panel from LIVE loaded-plugin / audit / storage data,
+    // and serve it as the `mote://chrome/integrity.html` overlay surface.
+    let integrity_html = runtime::render_panel_html(&host.build_panel());
+
+    // Serve the chrome assets from the privileged `mote://chrome` origin
+    // (including the live-rendered integrity overlay).
+    engine.register_chrome_resources(build_chrome_resources(&integrity_html));
 
     // Per-identity profiles MUST be rooted at the engine's cache path (CEF
     // requires each profile dir to be a direct child of root_cache_path).
@@ -203,7 +220,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Session: per-identity SQLite, restored on launch (empty on first run).
-    let store = open_session_store()?;
+    // Reuses the shared store opened above.
     let session_identity = mote_types::IdentityId::new(SESSION_IDENTITY);
     let ns = Session::open_namespace(&store, session_identity)?;
     let mut session = Session::restore(&ns, session_identity)?;
@@ -226,7 +243,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Build the tab set from the restored session (active-workspace tabs become
     // placeholders), or seed a first tab if the session is empty.
     let workspace = WorkspaceId::new(WORKSPACE);
-    let (vw, vh) = viewport_size(INITIAL_WIDTH, INITIAL_HEIGHT);
+    // Initial sizing uses the logical insets (scale 1.0); `resumed` recomputes
+    // them against the window's real scale factor before the first paint.
+    let (vw, vh) = viewport_size(INITIAL_WIDTH, INITIAL_HEIGHT, VIEWPORT_LEFT, VIEWPORT_TOP);
     let content_opts = PageOptions {
         width: vw,
         height: vh,
@@ -252,6 +271,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         content_opts,
         session,
         store,
+        host,
+        integrity_page: None,
+        integrity_open: false,
+        integrity_paints: 0,
         session_identity,
         workspace,
         tabs,
@@ -263,6 +286,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         content_paints: 0,
         width: INITIAL_WIDTH,
         height: INITIAL_HEIGHT,
+        scale_factor: 1.0,
         cursor: (0, 0),
         modifiers: Modifiers::NONE,
         focus: FocusOwner::Page,
@@ -361,13 +385,52 @@ fn state_dir() -> PathBuf {
     PathBuf::from(".mote-state")
 }
 
-/// Build the `mote://chrome` resource set from mote-ui's embedded assets.
-fn build_chrome_resources() -> ChromeResources {
+/// The reverse-DNS application identifier used for the window's Wayland `app_id`
+/// / X11 `WM_CLASS`. Compositors key window rules, icons, and taskbar grouping
+/// off this; leaving it empty makes Mote an unidentified window.
+const APP_ID: &str = "com.mote.Mote";
+
+/// Build the winit window attributes, setting the title and the Wayland/X11
+/// application identity (`app_id` / `WM_CLASS`).
+///
+/// On Linux the `app_id` (Wayland) and the `WM_CLASS` instance/general names
+/// (X11) are set to [`APP_ID`] so the compositor can identify, group, and
+/// icon-match the window; winit's `with_name` maps to the right protocol field
+/// for whichever backend is active. On other platforms only title + size apply.
+fn window_attributes() -> winit::window::WindowAttributes {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(unused_mut, reason = "only the linux cfg arm mutates `attrs`")
+    )]
+    let mut attrs = Window::default_attributes()
+        .with_title("mote")
+        .with_inner_size(PhysicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+    #[cfg(target_os = "linux")]
+    {
+        // Both backends compile in on Linux; set the identity for whichever the
+        // session uses. `with_name(general, instance)` (fully-qualified to
+        // disambiguate the two extension traits' identically-named method).
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        use winit::platform::x11::WindowAttributesExtX11;
+        attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, "mote");
+        attrs = WindowAttributesExtX11::with_name(attrs, APP_ID, "mote");
+    }
+    attrs
+}
+
+/// Build the `mote://chrome` resource set from mote-ui's embedded assets, plus
+/// the shell-rendered live integrity overlay (`integrity.html`).
+fn build_chrome_resources(integrity_html: &str) -> ChromeResources {
     let css = "text/css; charset=utf-8";
     let mut res = ChromeResources::new()
         .register(
             "index.html",
             mote_ui::CHROME_HTML,
+            "text/html; charset=utf-8",
+        )
+        .register(
+            "integrity.html",
+            integrity_html.to_owned(),
             "text/html; charset=utf-8",
         )
         .register(
@@ -465,11 +528,18 @@ struct ShellApp {
     /// Page geometry/role for a new content page (recomputed on resize).
     content_opts: PageOptions,
     session: Session,
-    #[allow(
-        dead_code,
-        reason = "retained so the session namespace's connection stays open"
-    )]
     store: Store,
+    /// The Phase-1 plugin runtime + audit log + the bundled plugins it loaded.
+    /// Held for the program's lifetime so the audit thread stays alive and the
+    /// integrity panel can be re-queried; `Drop` shuts the audit log down.
+    host: runtime::PluginHost,
+    /// The lazily-created integrity overlay page (loads `mote://chrome/integrity.html`).
+    /// `None` until the panel is first opened.
+    integrity_page: Option<Page>,
+    /// Whether the integrity overlay is currently composited full-window.
+    integrity_open: bool,
+    /// Last integrity paint count uploaded (re-upload only on a new frame).
+    integrity_paints: u64,
     session_identity: mote_types::IdentityId,
     workspace: WorkspaceId,
     /// The open tabs in display order; `active` indexes the focused one.
@@ -485,6 +555,11 @@ struct ShellApp {
     /// Physical window size (chrome covers all of it; the page fills the viewport).
     width: u32,
     height: u32,
+    /// The window's DPI scale factor (1.0 at 96dpi, 1.25 at 120dpi, …). The
+    /// chrome insets are authored in logical pixels, so the physical page
+    /// viewport is computed by scaling them by this factor (plan §1.3): a fixed
+    /// physical inset is wrong on a scaled display.
+    scale_factor: f64,
     /// Last cursor position in physical window pixels (for click routing).
     cursor: (i32, i32),
     /// Active keyboard modifiers (forwarded to CEF).
@@ -515,12 +590,30 @@ impl std::fmt::Debug for ShellApp {
 }
 
 impl ShellApp {
+    /// The chrome's left inset in **physical** pixels for the current display
+    /// scale. The inset is authored in logical pixels (`VIEWPORT_LEFT`); on a
+    /// scaled display (e.g. 1.25×) the physical inset is larger, so a fixed
+    /// physical value would misalign the composited page (plan §1.3).
+    fn inset_left(&self) -> u32 {
+        scale_inset(VIEWPORT_LEFT, self.scale_factor)
+    }
+
+    /// The chrome's top inset in physical pixels for the current display scale.
+    fn inset_top(&self) -> u32 {
+        scale_inset(VIEWPORT_TOP, self.scale_factor)
+    }
+
+    /// The content page's physical surface size (window minus the scaled insets).
+    fn viewport_dims(&self) -> (u32, u32) {
+        viewport_size(self.width, self.height, self.inset_left(), self.inset_top())
+    }
+
     /// The current page-viewport rect in physical pixels.
     fn viewport_rect(&self) -> ViewportRect {
-        let (vw, vh) = viewport_size(self.width, self.height);
+        let (vw, vh) = self.viewport_dims();
         ViewportRect::new(
-            px(VIEWPORT_LEFT),
-            px(VIEWPORT_TOP),
+            px(self.inset_left()),
+            px(self.inset_top()),
             px(vw.max(1)),
             px(vh.max(1)),
         )
@@ -646,7 +739,7 @@ impl ShellApp {
     /// React to a change of active tab: size the new page to the viewport, give
     /// it focus, and force a content re-upload (so the compositor swaps to it).
     fn on_active_changed(&mut self) {
-        let (vw, vh) = viewport_size(self.width, self.height);
+        let (vw, vh) = self.viewport_dims();
         if let Some(page) = self.active_page() {
             page.notify_resized(vw, vh);
         }
@@ -697,6 +790,33 @@ impl ShellApp {
         }
     }
 
+    /// Poll the active tab's live page for a document-title change (CEF reports
+    /// it via `DisplayHandler::on_title_change`, surfaced by `Page::title`). When
+    /// the title differs from what the tab already shows, update the tab + the
+    /// session and push the new tab list into the chrome so the tab strip shows
+    /// the real page title instead of the URL fallback.
+    fn sync_active_title(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let Some(title) = tab.page.as_ref().and_then(Page::title) else {
+            return;
+        };
+        if tab.title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        let id = tab.id;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.title = Some(title.clone());
+        }
+        if let Some(stab) = self.session.tab_mut(id) {
+            stab.title = Some(title);
+        }
+        // No session flush here: title is cosmetic and changes frequently; it is
+        // captured on the next structural flush (open/close/switch/navigate).
+        self.push_state_to_chrome();
+    }
+
     /// Serialise the tab list to a JSON array `[ {id,title,url,active}, … ]` with
     /// every string JS-escaped (these are page-derived; the chrome inserts them
     /// as text nodes, never markup — bridge.rs caller discipline).
@@ -745,7 +865,17 @@ impl ShellApp {
 
     /// Upload any newly painted chrome / active-content frames into the
     /// compositor.
+    ///
+    /// When the integrity overlay is open it is composited full-window onto the
+    /// **chrome** texture (which the compositor draws over the page): the overlay
+    /// document is opaque, so it covers the whole window. The normal chrome /
+    /// content uploads are skipped while it is open, and forced to re-upload when
+    /// it closes (the `*_paints` counters are reset in `set_integrity_open`).
     fn upload_frames(&mut self) {
+        if self.integrity_open {
+            self.upload_integrity_overlay();
+            return;
+        }
         let viewport = self.viewport_rect();
 
         let chrome_count = self.bridge.page().paint_count();
@@ -793,6 +923,94 @@ impl ShellApp {
         }
     }
 
+    /// Composite the integrity overlay full-window onto the chrome texture.
+    fn upload_integrity_overlay(&mut self) {
+        let frame = self.integrity_page.as_ref().and_then(|p| {
+            let count = p.paint_count();
+            (count != self.integrity_paints).then(|| {
+                self.integrity_paints = count;
+                p.latest_frame()
+            })
+        });
+        let Some(Some(frame)) = frame else {
+            return;
+        };
+        if let Some(compositor) = self.compositor.as_mut()
+            && let Err(e) = compositor.update_chrome(
+                &frame.pixels,
+                frame.width,
+                frame.height,
+                PixelFormat::Bgra8,
+            )
+        {
+            eprintln!("mote-shell: integrity overlay upload failed: {e}");
+        }
+    }
+
+    /// Open or close the live integrity overlay.
+    ///
+    /// On first open, lazily creates a full-window opaque [`Page`] loading
+    /// `mote://chrome/integrity.html` (the shell-rendered live view-model). It
+    /// uses the **global** request context (`Page::new`, not `with_profile`) —
+    /// the same context the chrome bridge page loads `mote://chrome` from — so
+    /// the privileged scheme resolves (a per-identity profile context does not
+    /// carry the custom-scheme factory, yielding `ERR_UNKNOWN_URL_SCHEME`). The
+    /// overlay is a trusted runtime surface, not user content. Toggling resets
+    /// the relevant paint counters so the compositor re-uploads the right surface
+    /// on the next pump.
+    fn set_integrity_open(&mut self, open: bool) {
+        self.integrity_open = open;
+        if open {
+            if self.integrity_page.is_none() {
+                let url = chrome_url("integrity.html");
+                let opts = PageOptions {
+                    width: self.width.max(1),
+                    height: self.height.max(1),
+                    frame_rate: 60,
+                    role: PageRole::Content,
+                };
+                match Page::new(&url, &opts) {
+                    Ok(page) => {
+                        page.notify_resized(self.width.max(1), self.height.max(1));
+                        self.integrity_page = Some(page);
+                    }
+                    Err(e) => {
+                        eprintln!("mote-shell: failed to open integrity panel: {e}");
+                        self.integrity_open = false;
+                        return;
+                    }
+                }
+            } else if let Some(page) = self.integrity_page.as_ref() {
+                page.notify_resized(self.width.max(1), self.height.max(1));
+            }
+            self.integrity_paints = 0;
+            eprintln!(
+                "mote-shell: integrity panel opened ({} bundled plugin(s) shown)",
+                self.host.loaded.len()
+            );
+        } else {
+            // Force the chrome + content layers to re-upload, restoring the
+            // browser surface beneath the (now hidden) overlay.
+            self.chrome_paints = 0;
+            self.content_paints = 0;
+            eprintln!("mote-shell: integrity panel closed");
+        }
+    }
+
+    /// React to a DPI scale-factor change: recompute the (logical-pixel) chrome
+    /// insets at the new scale and resize the active page's surface to the new
+    /// physical viewport (high-DPI, plan §1.3).
+    fn on_scale_factor_changed(&mut self, scale: f64) {
+        self.scale_factor = scale;
+        let (vw, vh) = self.viewport_dims();
+        self.content_opts.width = vw;
+        self.content_opts.height = vh;
+        if let Some(page) = self.active_page() {
+            page.notify_resized(vw, vh);
+        }
+        self.content_paints = 0;
+    }
+
     /// Resize: reconfigure the surface, tell the chrome + active page their new
     /// sizes, and force a re-upload.
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {
@@ -805,7 +1023,11 @@ impl ShellApp {
             compositor.resize(size.width, size.height);
         }
         self.bridge.page().notify_resized(size.width, size.height);
-        let (vw, vh) = viewport_size(size.width, size.height);
+        // The integrity overlay (if live) is full-window like the chrome.
+        if let Some(page) = self.integrity_page.as_ref() {
+            page.notify_resized(size.width, size.height);
+        }
+        let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
         if let Some(page) = self.active_page() {
@@ -857,18 +1079,44 @@ impl ShellApp {
 
     /// If window-space `(x, y)` is inside the page viewport, return the
     /// page-local position; otherwise `None` (the event belongs to the chrome).
-    const fn page_local(&self, x: i32, y: i32) -> Option<MousePosition> {
-        page_local_coords(x, y, self.width, self.height)
+    fn page_local(&self, x: i32, y: i32) -> Option<MousePosition> {
+        page_local_coords(
+            x,
+            y,
+            self.width,
+            self.height,
+            self.inset_left(),
+            self.inset_top(),
+        )
     }
 
     /// Intercept the chrome keybinds that must always win before the page sees
     /// the key (plan §1.3 / §6.1): `Ctrl+T` new tab, `Ctrl+W` close active tab,
-    /// `Ctrl+Tab` next tab. Returns `true` if the key was consumed (not routed).
+    /// `Ctrl+Tab` next tab, `Ctrl+Shift+I` toggle the integrity panel, `Esc`
+    /// closes it. Returns `true` if the key was consumed (not routed).
     ///
     /// Uses `Ctrl` (the Linux/dev convention) where the spec writes `⌘`.
     fn intercept_keybind(&mut self, event: &winit::event::KeyEvent) -> bool {
-        if event.state != ElementState::Pressed || !self.modifiers.contains(Modifiers::CONTROL) {
+        if event.state != ElementState::Pressed {
             return false;
+        }
+        // Esc closes the integrity overlay (only when it is open).
+        if self.integrity_open && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.set_integrity_open(false);
+            return true;
+        }
+        if !self.modifiers.contains(Modifiers::CONTROL) {
+            return false;
+        }
+        // Ctrl+Shift+I toggles the integrity panel (the `i` arrives as upper or
+        // lower case depending on the shift state, so match case-insensitively).
+        if self.modifiers.contains(Modifiers::SHIFT)
+            && let Key::Character(s) = &event.logical_key
+            && s.eq_ignore_ascii_case("i")
+        {
+            let open = !self.integrity_open;
+            self.set_integrity_open(open);
+            return true;
         }
         match &event.logical_key {
             Key::Character(s) if s.eq_ignore_ascii_case("t") => {
@@ -943,9 +1191,7 @@ impl ApplicationHandler for ShellApp {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("mote")
-            .with_inner_size(PhysicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+        let attrs = window_attributes();
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -957,6 +1203,9 @@ impl ApplicationHandler for ShellApp {
         let size = window.inner_size();
         self.width = size.width.max(1);
         self.height = size.height.max(1);
+        // Capture the display scale so the chrome insets (authored in logical
+        // pixels) map to the right physical page viewport (HiDPI, plan §1.3).
+        self.scale_factor = window.scale_factor();
 
         match Compositor::new_for_window(Arc::clone(&window), self.width, self.height) {
             Ok(c) => self.compositor = Some(c),
@@ -967,7 +1216,7 @@ impl ApplicationHandler for ShellApp {
             }
         }
 
-        let (vw, vh) = viewport_size(self.width, self.height);
+        let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
         if let Some(page) = self.active_page() {
@@ -976,9 +1225,10 @@ impl ApplicationHandler for ShellApp {
         self.bridge.page().notify_resized(self.width, self.height);
         self.window = Some(window);
         eprintln!(
-            "mote-shell: window {}x{} up; chrome + {} tab(s) live",
+            "mote-shell: window {}x{} (scale {:.2}) up; chrome + {} tab(s) live",
             self.width,
             self.height,
+            self.scale_factor,
             self.tabs.len()
         );
     }
@@ -990,6 +1240,9 @@ impl ApplicationHandler for ShellApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => self.handle_resize(size),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.on_scale_factor_changed(scale_factor);
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (cursor_px(position.x), cursor_px(position.y));
                 self.route_mouse_move();
@@ -1019,6 +1272,7 @@ impl ApplicationHandler for ShellApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.engine.pump();
         self.drain_commands();
+        self.sync_active_title();
         self.upload_frames();
 
         // Once the chrome has painted, its bootstrap has run; push the initial
@@ -1060,20 +1314,43 @@ impl Drop for ShellApp {
                 page.close();
             }
         }
+        if let Some(page) = self.integrity_page.as_ref() {
+            page.close();
+        }
         self.bridge.page().close();
         for _ in 0..25 {
             self.engine.pump();
             std::thread::sleep(Duration::from_millis(2));
+        }
+        // Drain + stop the audit thread cleanly so buffered events flush to the
+        // store before the process exits.
+        if let Err(e) = self.host.audit.shutdown() {
+            eprintln!("mote-shell: audit log shutdown failed: {e}");
         }
     }
 }
 
 /// The content page's surface size for a given window size (window minus the
 /// chrome insets).
-const fn viewport_size(width: u32, height: u32) -> (u32, u32) {
-    let w = width.saturating_sub(VIEWPORT_LEFT);
-    let h = height.saturating_sub(VIEWPORT_TOP);
+const fn viewport_size(width: u32, height: u32, inset_left: u32, inset_top: u32) -> (u32, u32) {
+    let w = width.saturating_sub(inset_left);
+    let h = height.saturating_sub(inset_top);
     (if w == 0 { 1 } else { w }, if h == 0 { 1 } else { h })
+}
+
+/// Scale a logical-pixel chrome inset to physical pixels for the display
+/// `scale` factor (high-DPI). The chrome insets (`VIEWPORT_LEFT`/`VIEWPORT_TOP`)
+/// are CSS/logical pixels; the composited page surface and the window→page
+/// hit-test work in physical pixels, so they must be scaled (a fixed physical
+/// inset misaligns at 1.25×). Rounds to the nearest physical pixel.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "insets are small positive logical pixels; scaled + rounded to a physical pixel"
+)]
+fn scale_inset(logical: u32, scale: f64) -> u32 {
+    (f64::from(logical) * scale.max(1.0)).round() as u32
 }
 
 /// Convert a window/viewport pixel dimension to `f32` for the compositor's
@@ -1096,9 +1373,16 @@ const fn cursor_px(v: f64) -> i32 {
 }
 
 /// The window→page hit-test (plan §1.3).
-const fn page_local_coords(x: i32, y: i32, width: u32, height: u32) -> Option<MousePosition> {
-    let left = VIEWPORT_LEFT.cast_signed();
-    let top = VIEWPORT_TOP.cast_signed();
+const fn page_local_coords(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    inset_left: u32,
+    inset_top: u32,
+) -> Option<MousePosition> {
+    let left = inset_left.cast_signed();
+    let top = inset_top.cast_signed();
     let right = width.cast_signed();
     let bottom = height.cast_signed();
     if x >= left && x < right && y >= top && y < bottom {
@@ -1234,19 +1518,41 @@ mod tests {
 
     #[test]
     fn viewport_size_excludes_chrome_insets() {
-        let (w, h) = viewport_size(1280, 800);
+        let (w, h) = viewport_size(1280, 800, VIEWPORT_LEFT, VIEWPORT_TOP);
         assert_eq!(w, 1280 - VIEWPORT_LEFT);
         assert_eq!(h, 800 - VIEWPORT_TOP);
-        assert_eq!(viewport_size(0, 0), (1, 1));
+        assert_eq!(viewport_size(0, 0, VIEWPORT_LEFT, VIEWPORT_TOP), (1, 1));
+    }
+
+    #[test]
+    fn scale_inset_scales_logical_to_physical() {
+        // At 1.0 the physical inset equals the logical one.
+        assert_eq!(scale_inset(316, 1.0), 316);
+        // At 1.25 it grows proportionally (the bug the fixed inset had).
+        assert_eq!(scale_inset(316, 1.25), 395);
+        assert_eq!(scale_inset(44, 1.25), 55);
+        // A sub-1.0 scale never shrinks below the logical inset.
+        assert_eq!(scale_inset(316, 0.5), 316);
     }
 
     #[test]
     fn hit_test_maps_page_local_and_rejects_chrome() {
-        let pos = page_local_coords(400, 300, 1280, 800).expect("inside viewport");
+        let pos = page_local_coords(400, 300, 1280, 800, VIEWPORT_LEFT, VIEWPORT_TOP)
+            .expect("inside viewport");
         assert_eq!(pos.x, 400 - VIEWPORT_LEFT.cast_signed());
         assert_eq!(pos.y, 300 - VIEWPORT_TOP.cast_signed());
-        assert!(page_local_coords(100, 300, 1280, 800).is_none());
-        assert!(page_local_coords(400, 10, 1280, 800).is_none());
+        assert!(page_local_coords(100, 300, 1280, 800, VIEWPORT_LEFT, VIEWPORT_TOP).is_none());
+        assert!(page_local_coords(400, 10, 1280, 800, VIEWPORT_LEFT, VIEWPORT_TOP).is_none());
+    }
+
+    #[test]
+    fn hit_test_uses_scaled_insets_on_hidpi() {
+        // At 1.25× the left inset is 395px physical; a click at x=350 (inside the
+        // unscaled 316 inset but left of the scaled one) belongs to the chrome.
+        let left = scale_inset(VIEWPORT_LEFT, 1.25);
+        let top = scale_inset(VIEWPORT_TOP, 1.25);
+        assert!(page_local_coords(350, 300, 1600, 1000, left, top).is_none());
+        assert!(page_local_coords(420, 300, 1600, 1000, left, top).is_some());
     }
 
     #[test]

@@ -27,3 +27,12 @@ mote-ui = { path = "../mote-ui" }
 mote-session = { path = "../mote-session" }
 mote-storage = { path = "../mote-storage" }
 mote-types = { path = "../mote-types" }
+# The Phase-1 plugin runtime: the shell instantiates it at startup and loads the
+# bundled first-party plugins through the four-step pipeline. The shell consumes
+# its public introspection API only (RunningPlugin); it never edits the runtime.
+mote-runtime = { path = "../mote-runtime" }
+# The append-only audit log + producer fed into the runtime and queried for the
+# integrity panel's recent-activity / denials sections.
+mote-audit = { path = "../mote-audit" }
+# The permission/capability/event registry the runtime validates plugins against.
+mote-registry = { path = "../mote-registry" }

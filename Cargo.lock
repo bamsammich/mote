@@ -2070,7 +2070,10 @@ dependencies = [
 name = "mote-shell"
 version = "0.0.0"
 dependencies = [
+ "mote-audit",
  "mote-cef",
+ "mote-registry",
+ "mote-runtime",
  "mote-session",
  "mote-storage",
  "mote-types",
