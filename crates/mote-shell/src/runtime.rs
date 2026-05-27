@@ -19,7 +19,7 @@
 //!    sizes.
 //!
 //! The rendered HTML is produced by [`render_panel_html`] and served as the
-//! `mote://chrome/integrity.html` overlay surface; the shell composites it
+//! `mote://overlay/integrity.html` overlay surface; the shell composites it
 //! full-window on the `Ctrl+Shift+I` keybind.
 
 use std::time::Duration;

@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 use mote_session::{Tab, TabState};
 use mote_types::TabId;
 
-/// The picker overlay document, served as `mote://chrome/picker.html`.
+/// The picker overlay document, served as `mote://overlay/picker.html`.
 ///
 /// Pure display: it reuses mote-ui's `palette.css` (the command-palette surface)
 /// over `tokens.css` + `base.css`, and exposes a single `window.__motePicker`
@@ -45,9 +45,9 @@ pub(crate) const PICKER_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<link rel="stylesheet" href="mote://chrome/tokens.css" />
-<link rel="stylesheet" href="mote://chrome/base.css" />
-<link rel="stylesheet" href="mote://chrome/components/palette.css" />
+<link rel="stylesheet" href="tokens.css" />
+<link rel="stylesheet" href="base.css" />
+<link rel="stylesheet" href="components/palette.css" />
 <style>
   /* The overlay composites onto the chrome texture over the page (same as the
      integrity overlay), so the surface must be OPAQUE to fully cover the live

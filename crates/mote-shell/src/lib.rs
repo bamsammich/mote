@@ -69,7 +69,7 @@ use std::time::{Duration, Instant, SystemTime};
 use mote_cef::{
     ButtonAction, ChromePageRequest, ChromeResources, Engine, EngineConfig, HostBridge, IdentityId,
     KeyAction, KeyInput, Modifiers, MouseButton, MousePosition, OpRegistry, OpResponse, Page,
-    PageOptions, PageRole, ProfileHandle, ProfileManager, chrome_url,
+    PageOptions, PageRole, ProfileHandle, ProfileManager, chrome_url, overlay_url,
 };
 use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
 use mote_storage::Store;
@@ -223,12 +223,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let host = runtime::PluginHost::boot(store.clone())?;
 
     // Render the integrity panel from LIVE loaded-plugin / audit / storage data,
-    // and serve it as the `mote://chrome/integrity.html` overlay surface.
+    // and serve it as the `mote://overlay/integrity.html` overlay surface.
     let integrity_html = runtime::render_panel_html(&host.build_panel());
 
-    // Serve the chrome assets from the privileged `mote://chrome` origin
-    // (including the live-rendered integrity overlay).
-    engine.register_chrome_resources(build_chrome_resources(&integrity_html));
+    // Serve the privileged chrome document from `mote://chrome` (the only origin
+    // the host-bridge binding is installed on), and the unprivileged overlay
+    // surfaces (picker + integrity) from the distinct `mote://overlay` origin the
+    // origin gate does NOT match (S2).
+    engine.register_chrome_resources(build_chrome_resources());
+    engine.register_overlay_resources(build_overlay_resources(&integrity_html));
 
     // Per-identity profiles MUST be rooted at the engine's cache path (CEF
     // requires each profile dir to be a direct child of root_cache_path).
@@ -494,24 +497,16 @@ fn window_attributes() -> winit::window::WindowAttributes {
     attrs
 }
 
-/// Build the `mote://chrome` resource set from mote-ui's embedded assets, plus
-/// the shell-rendered live integrity overlay (`integrity.html`).
-fn build_chrome_resources(integrity_html: &str) -> ChromeResources {
+/// Build the privileged `mote://chrome` resource set from mote-ui's embedded
+/// assets. This is the ONLY origin that carries the host-bridge binding, so it
+/// serves only the chrome document and its assets — the overlays live on the
+/// unprivileged `mote://overlay` origin (see [`build_overlay_resources`]).
+fn build_chrome_resources() -> ChromeResources {
     let css = "text/css; charset=utf-8";
     let mut res = ChromeResources::new()
         .register(
             "index.html",
             mote_ui::CHROME_HTML,
-            "text/html; charset=utf-8",
-        )
-        .register(
-            "integrity.html",
-            integrity_html.to_owned(),
-            "text/html; charset=utf-8",
-        )
-        .register(
-            "picker.html",
-            picker::PICKER_HTML,
             "text/html; charset=utf-8",
         )
         .register(
@@ -527,6 +522,34 @@ fn build_chrome_resources(integrity_html: &str) -> ChromeResources {
             "image/svg+xml",
         )
         .register("assets/mark.svg", mote_ui::MARK_SVG, "image/svg+xml");
+    for (name, contents) in mote_ui::COMPONENT_CSS {
+        res = res.register(format!("components/{name}.css"), *contents, css);
+    }
+    res
+}
+
+/// Build the **unprivileged** `mote://overlay` resource set: the shell-rendered
+/// live integrity overlay (`integrity.html`) and the tab-picker overlay
+/// (`picker.html`), plus the design-token + component CSS those documents
+/// reference by relative URL. These surfaces are driven entirely Rust-side
+/// (input routing + `eval_js`) and need no host-bridge, so they are served off a
+/// distinct origin the chrome-origin gate does NOT match (S2) — no
+/// `window.cefQuery` is ever installed in them.
+fn build_overlay_resources(integrity_html: &str) -> ChromeResources {
+    let css = "text/css; charset=utf-8";
+    let mut res = ChromeResources::new()
+        .register(
+            "integrity.html",
+            integrity_html.to_owned(),
+            "text/html; charset=utf-8",
+        )
+        .register(
+            "picker.html",
+            picker::PICKER_HTML,
+            "text/html; charset=utf-8",
+        )
+        .register("tokens.css", mote_ui::TOKENS_CSS, css)
+        .register("base.css", mote_ui::BASE_CSS, css);
     for (name, contents) in mote_ui::COMPONENT_CSS {
         res = res.register(format!("components/{name}.css"), *contents, css);
     }
@@ -614,7 +637,7 @@ struct ShellApp {
     /// Held for the program's lifetime so the audit thread stays alive and the
     /// integrity panel can be re-queried; `Drop` shuts the audit log down.
     host: runtime::PluginHost,
-    /// The lazily-created integrity overlay page (loads `mote://chrome/integrity.html`).
+    /// The lazily-created integrity overlay page (loads `mote://overlay/integrity.html`).
     /// `None` until the panel is first opened.
     integrity_page: Option<Page>,
     /// Whether the integrity overlay is currently composited full-window.
@@ -624,7 +647,7 @@ struct ShellApp {
     /// The workspace tab picker (`Mod+Space`) state machine. Logic lives
     /// Rust-side; the overlay page is pure display (see [`picker`]).
     picker: PickerState,
-    /// The lazily-created picker overlay page (`mote://chrome/picker.html`).
+    /// The lazily-created picker overlay page (`mote://overlay/picker.html`).
     /// `None` until the picker is first opened.
     picker_page: Option<Page>,
     /// Last picker paint count uploaded (re-upload only on a new frame).
@@ -1052,7 +1075,7 @@ impl ShellApp {
     /// Open or close the live integrity overlay.
     ///
     /// On first open, lazily creates a full-window opaque [`Page`] loading
-    /// `mote://chrome/integrity.html` (the shell-rendered live view-model). It
+    /// `mote://overlay/integrity.html` (the shell-rendered live view-model). It
     /// uses the **global** request context (`Page::new`, not `with_profile`) —
     /// the same context the chrome bridge page loads `mote://chrome` from — so
     /// the privileged scheme resolves (a per-identity profile context does not
@@ -1064,12 +1087,16 @@ impl ShellApp {
         self.integrity_open = open;
         if open {
             if self.integrity_page.is_none() {
-                let url = chrome_url("integrity.html");
+                let url = overlay_url("integrity.html");
                 let opts = PageOptions {
                     width: self.width.max(1),
                     height: self.height.max(1),
                     frame_rate: 60,
-                    role: PageRole::Content,
+                    // Trusted, bridgeless overlay surface on the unprivileged
+                    // `mote://overlay` origin (S2). The Overlay role both keeps
+                    // `window.cefQuery` out (origin gate) and lets this internal
+                    // URL load past the content navigation guard (S1).
+                    role: PageRole::Overlay,
                 };
                 match Page::new(&url, &opts) {
                     Ok(page) => {
@@ -1105,7 +1132,7 @@ impl ShellApp {
     ///
     /// On open it snapshots the current workspace's tabs in
     /// [`Session::tab_picker_ranked`] order into [`PickerState`] and lazily
-    /// creates the full-window overlay [`Page`] (`mote://chrome/picker.html`),
+    /// creates the full-window overlay [`Page`] (`mote://overlay/picker.html`),
     /// composited like the integrity overlay. Selection/filtering are handled
     /// Rust-side (see [`picker`]); on close the browser surface re-uploads.
     fn set_picker_open(&mut self, open: bool) {
@@ -1118,12 +1145,14 @@ impl ShellApp {
                 .collect();
             self.picker.open(entries);
             if self.picker_page.is_none() {
-                let url = chrome_url("picker.html");
+                let url = overlay_url("picker.html");
                 let opts = PageOptions {
                     width: self.width.max(1),
                     height: self.height.max(1),
                     frame_rate: 60,
-                    role: PageRole::Content,
+                    // Trusted, bridgeless overlay surface on the unprivileged
+                    // `mote://overlay` origin (S2); see the integrity overlay.
+                    role: PageRole::Overlay,
                 };
                 match Page::new(&url, &opts) {
                     Ok(page) => {
@@ -1872,6 +1901,13 @@ fn windows_key_code(key: &Key) -> i32 {
 /// the control / quote / backslash / line-terminator set so a page-derived URL
 /// or title can never break out of the literal or inject script when the chrome
 /// `eval_js`'s `window.mote.applyOp(...)` call is built.
+///
+/// REVIEW RULE (`eval_js` interpolation chokepoint): this is the SOLE sanctioner of
+/// untrusted data into a `Page::eval_js(format!(...))` string. Every
+/// `eval_js(format!(...))` in the shell MUST interpolate only `js_string(...)`
+/// output or trusted compile-time constants — never a raw page-derived string.
+/// Adding a new `eval_js` call site without routing its dynamic args through
+/// `js_string` is a chrome-context injection bug.
 fn js_string(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() + 2);
@@ -1899,40 +1935,22 @@ fn js_string(s: &str) -> String {
     out
 }
 
-/// Extract a top-level string field `"field": "value"` from a small JSON object.
+/// Extract a top-level string field `"field": "value"` from a JSON object.
+///
+/// Parses `json` as a JSON object (anchored, not a first-substring match) and
+/// returns the named field iff it is present and a string. Returns `None` if
+/// `json` is not an object or the field is absent / not a string.
 fn json_string_field(json: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\"");
-    let i = json.find(&key)? + key.len();
-    let rest = &json[i..];
-    let colon = rest.find(':')?;
-    let after = rest[colon + 1..].trim_start();
-    let after = after.strip_prefix('"')?;
-    let mut out = String::new();
-    let mut chars = after.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return Some(out),
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    None
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value.as_object()?.get(field)?.as_str().map(str::to_string)
 }
 
-/// Extract a top-level numeric field `"field": <number>` from a small JSON
-/// object (the tab-op `id`s the chrome bootstrap sends are integers).
+/// Extract a top-level unsigned-integer field `"field": <number>` from a JSON
+/// object (the tab-op `id`s the chrome bootstrap sends are integers). Returns
+/// `None` if `json` is not an object or the field is absent / not a `u64`.
 fn json_u64_field(json: &str, field: &str) -> Option<u64> {
-    let key = format!("\"{field}\"");
-    let i = json.find(&key)? + key.len();
-    let rest = &json[i..];
-    let colon = rest.find(':')?;
-    let after = rest[colon + 1..].trim_start();
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value.as_object()?.get(field)?.as_u64()
 }
 
 #[cfg(test)]

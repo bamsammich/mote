@@ -36,3 +36,6 @@ mote-runtime = { path = "../mote-runtime" }
 mote-audit = { path = "../mote-audit" }
 # The permission/capability/event registry the runtime validates plugins against.
 mote-registry = { path = "../mote-registry" }
+# Proper, object-anchored JSON parsing of the chrome bootstrap's op `params`
+# (replaces the hand-rolled first-substring field extractors). Crate-local dep.
+serde_json = "1.0"
