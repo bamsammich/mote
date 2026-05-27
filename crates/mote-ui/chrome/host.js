@@ -91,8 +91,68 @@
     });
   }
 
-  // The structured-op application seam (Rust → chrome). Wave C delivers tab
-  // lists, nav state, etc. here. Defined now so the bridge contract is real.
+  // Rebuild the tab strip from the runtime tab list (Rust → chrome push). Each
+  // tab is built with structured DOM construction + text nodes — NEVER innerHTML
+  // of page-derived strings (bridge.rs §"Discipline the caller must uphold":
+  // titles/URLs are injection vectors into the privileged document). Clicking a
+  // tab selects it; the ✕ closes it — both ride the `select_tab`/`close_tab` ops.
+  function renderTabs(tabs) {
+    var strip = document.getElementById("tabstrip");
+    if (!strip || !Array.isArray(tabs)) return;
+    // Clear existing rows (textContent="" drops children without parsing markup).
+    strip.textContent = "";
+    tabs.forEach(function (tab) {
+      var row = document.createElement("div");
+      row.className = tab.active ? "tab is-active" : "tab";
+      row.setAttribute("role", "tab");
+      row.setAttribute("aria-selected", tab.active ? "true" : "false");
+
+      var favicon = document.createElement("span");
+      favicon.className = "favicon";
+      row.appendChild(favicon);
+
+      var title = document.createElement("span");
+      title.className = "title";
+      // Text node: the title/URL is page-derived and must not be parsed as HTML.
+      title.textContent = tab.title || tab.url || "new tab";
+      row.appendChild(title);
+
+      var close = document.createElement("button");
+      close.className = "tab-close";
+      close.setAttribute("aria-label", "close tab");
+      close.textContent = "✕";
+      close.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        if (window.mote && window.mote.invoke) {
+          window.mote.invoke("close_tab", { id: tab.id }).catch(function () {});
+        }
+      });
+      row.appendChild(close);
+
+      row.addEventListener("click", function () {
+        if (window.mote && window.mote.invoke) {
+          window.mote.invoke("select_tab", { id: tab.id }).catch(function () {});
+        }
+      });
+      strip.appendChild(row);
+    });
+  }
+
+  function wireNewTab() {
+    // The omnibox "+" affordance lives in the tabs panel header meta region; if a
+    // new-tab control is present, wire it. Falls back to nothing if absent.
+    var btn = document.querySelector("[data-action='new-tab']");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (window.mote && window.mote.invoke) {
+        window.mote.invoke("new_tab", {}).catch(function () {});
+      }
+    });
+  }
+
+  // The structured-op application seam (Rust → chrome): the shell pushes live
+  // tab-list and current-URL state here so the tab strip + omnibox reflect
+  // reality. A payload is parsed DATA, never markup.
   window.mote = window.mote || {};
   window.mote.applyOp = function (op, payload) {
     switch (op) {
@@ -100,6 +160,15 @@
         var input = document.getElementById("omnibox-input");
         if (input && payload && typeof payload.url === "string") {
           input.value = payload.url;
+        }
+        break;
+      case "set_tabs":
+        if (payload && Array.isArray(payload.tabs)) {
+          renderTabs(payload.tabs);
+          var meta = document.querySelector(".sidepanel-meta");
+          if (meta) {
+            meta.textContent = payload.tabs.length + " open";
+          }
         }
         break;
       default:
@@ -111,6 +180,7 @@
   function boot() {
     installInvoke();
     wireOmnibox();
+    wireNewTab();
   }
 
   if (document.readyState === "loading") {

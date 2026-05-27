@@ -212,6 +212,24 @@ impl Page {
         }
     }
 
+    /// Execute `code` as JavaScript in this page's main frame.
+    ///
+    /// This is the **Rust→page push** primitive: the host runs trusted script in
+    /// the frame (e.g. the chrome bootstrap's `window.mote.applyOp(...)` to push
+    /// live tab-list / URL state into the privileged chrome document). The host
+    /// layer is responsible for the trust boundary — `mote-shell` only ever calls
+    /// this on the **chrome** page, never on untrusted content (the chrome
+    /// document is the privileged origin, the only one with `window.mote`).
+    ///
+    /// No-op if the browser is closing/closed or has no main frame. The script
+    /// runs asynchronously on the next message-loop pump.
+    pub fn eval_js(&self, code: &str) {
+        if let Some(frame) = self.browser.main_frame() {
+            // start_line 0; script_url empty (anonymous host-injected script).
+            frame.execute_java_script(Some(&CefString::from(code)), None, 0);
+        }
+    }
+
     /// Whether a load is currently in progress.
     #[must_use]
     pub fn is_loading(&self) -> bool {

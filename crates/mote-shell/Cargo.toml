@@ -22,3 +22,8 @@ raw-window-handle.workspace = true
 mote-cef = { path = "../mote-cef" }
 # The compositor + chrome assets (slot/element/theme model + materialized CSS).
 mote-ui = { path = "../mote-ui" }
+# Session/tab state (the three-axis model) + per-identity SQLite persistence.
+# The shell owns lifecycle + flush/restore timing; these crates own the state.
+mote-session = { path = "../mote-session" }
+mote-storage = { path = "../mote-storage" }
+mote-types = { path = "../mote-types" }
