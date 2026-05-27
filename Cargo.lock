@@ -2883,6 +2883,7 @@ name = "mote-app"
 version = "0.0.0"
 dependencies = [
  "mote-cef",
+ "mote-cli",
  "mote-shell",
 ]
 
@@ -2911,6 +2912,15 @@ dependencies = [
 [[package]]
 name = "mote-cli"
 version = "0.0.0"
+dependencies = [
+ "clap",
+ "mote-lua",
+ "mote-pluginmgr",
+ "mote-storage",
+ "mote-types",
+ "tempfile",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "mote-dispatch"

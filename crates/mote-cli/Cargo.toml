@@ -13,3 +13,12 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-pluginmgr = { path = "../mote-pluginmgr" }
+mote-storage = { path = "../mote-storage" }
+mote-types = { path = "../mote-types" }
+clap = { version = "4", features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mote-lua = { path = "../mote-lua" }
+tempfile = "3"

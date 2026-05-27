@@ -22,3 +22,5 @@ path = "src/main.rs"
 mote-cef = { path = "../mote-cef" }
 # The browser composition root the browser process boots.
 mote-shell = { path = "../mote-shell" }
+# The management CLI surface (plugin/secrets subcommands).
+mote-cli = { path = "../mote-cli" }
