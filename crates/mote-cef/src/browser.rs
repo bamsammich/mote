@@ -24,7 +24,7 @@ use cef::{
 
 use crate::bridge;
 use crate::error::{CefError, Result};
-use crate::ffi::{self, FrameSlot, NavState, ViewSize};
+use crate::ffi::{self, FrameSlot, NavState, TitleSlot, ViewSize};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
@@ -81,6 +81,8 @@ pub struct Page {
     browser: Browser,
     frame: FrameSlot,
     nav: NavState,
+    /// The latest document title CEF reported via `DisplayHandler::on_title_change`.
+    title: TitleSlot,
     /// The shared OSR viewport size CEF reads via `view_rect`. Updated by
     /// [`Page::notify_resized`], which then asks CEF to re-query and re-paint.
     size: ViewSize,
@@ -170,7 +172,7 @@ impl Page {
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
-        let (client, frame, nav, size) = ffi::build_client(size, interceptor);
+        let (client, frame, nav, title, size) = ffi::build_client(size, interceptor);
         // Chrome pages are transparent so the composited page shows through;
         // content pages are opaque.
         let transparent = options.role == PageRole::Chrome;
@@ -180,6 +182,7 @@ impl Page {
             browser,
             frame,
             nav,
+            title,
             size,
             role: options.role,
             closed: AtomicBool::new(false),
@@ -203,6 +206,17 @@ impl Page {
     #[must_use]
     pub fn paint_count(&self) -> u64 {
         self.frame.paint_count()
+    }
+
+    /// The page's current document title, as reported by CEF's
+    /// `DisplayHandler::on_title_change`.
+    ///
+    /// `None` until the document sets a non-empty `<title>` (the host layer
+    /// falls back to the URL until then). Updated asynchronously as the page
+    /// navigates / mutates its title; read it on each pump to track changes.
+    #[must_use]
+    pub fn title(&self) -> Option<String> {
+        self.title.get()
     }
 
     /// Navigate this page to `url`.
@@ -489,7 +503,7 @@ impl ChromePageRequest {
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav, size) = ffi::build_client(size, Arc::new(AllowAll));
+        let (inner, frame, nav, title, size) = ffi::build_client(size, Arc::new(AllowAll));
         let client = bridge::chrome_client(inner, router);
         // The chrome browser is always transparent (the page composites through
         // its `<main>` region).
@@ -504,6 +518,7 @@ impl ChromePageRequest {
             browser,
             frame,
             nav,
+            title,
             size,
             role: PageRole::Chrome,
             closed: AtomicBool::new(false),

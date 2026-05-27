@@ -476,6 +476,10 @@ wrap_client! {
             guard(None, || self.state.inner.request_handler())
         }
 
+        fn display_handler(&self) -> Option<cef::DisplayHandler> {
+            guard(None, || self.state.inner.display_handler())
+        }
+
         fn on_process_message_received(
             &self,
             browser: Option<&mut Browser>,

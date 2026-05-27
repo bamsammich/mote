@@ -37,12 +37,12 @@ use std::sync::{Arc, Mutex};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, Client, ImplClient, ImplLoadHandler, ImplRenderHandler, ImplRequest,
-    ImplRequestHandler, ImplResourceRequestHandler, LoadHandler, PaintElementType, Rect,
-    RenderHandler, Request, RequestHandler, ResourceRequestHandler, ReturnValue, WrapClient,
-    WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler,
-    wrap_client, wrap_load_handler, wrap_render_handler, wrap_request_handler,
-    wrap_resource_request_handler,
+    Browser, CefString, Client, DisplayHandler, ImplClient, ImplDisplayHandler, ImplLoadHandler,
+    ImplRenderHandler, ImplRequest, ImplRequestHandler, ImplResourceRequestHandler, LoadHandler,
+    PaintElementType, Rect, RenderHandler, Request, RequestHandler, ResourceRequestHandler,
+    ReturnValue, WrapClient, WrapDisplayHandler, WrapLoadHandler, WrapRenderHandler,
+    WrapRequestHandler, WrapResourceRequestHandler, wrap_client, wrap_display_handler,
+    wrap_load_handler, wrap_render_handler, wrap_request_handler, wrap_resource_request_handler,
 };
 
 use crate::interceptor::{RequestDecision, RequestInfo, ResourceInterceptor};
@@ -296,6 +296,64 @@ wrap_load_handler! {
 }
 
 // ---------------------------------------------------------------------------
+// DisplayHandler — surfaces the document title to the Page handle.
+// ---------------------------------------------------------------------------
+
+/// Thread-safe holder for the page's most recent document title, updated by the
+/// display handler's `on_title_change` and read by the owning [`crate::Page`].
+///
+/// CEF may invoke the display handler from a thread distinct from the reader, so
+/// the slot is `Arc<Mutex<_>>` (matching [`FrameSlot`]/[`NavState`]) and the
+/// handle is `Send`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TitleSlot {
+    inner: Arc<Mutex<Option<String>>>,
+}
+
+impl TitleSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The most recently observed document title, if CEF has reported one.
+    pub(crate) fn get(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, title: Option<String>) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = title;
+    }
+}
+
+#[derive(Clone)]
+struct DisplayState {
+    title: TitleSlot,
+}
+
+wrap_display_handler! {
+    struct DisplayHandlerImpl {
+        state: DisplayState,
+    }
+
+    impl DisplayHandler {
+        fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            guard((), || {
+                // An empty title (CEF reports `""` before the document sets one)
+                // is stored as `None` so the host can fall back to the URL.
+                let t = title.map(ToString::to_string).filter(|s| !s.is_empty());
+                self.state.title.set(t);
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ResourceRequestHandler / RequestHandler — the network interception seam.
 // ---------------------------------------------------------------------------
 
@@ -380,6 +438,7 @@ struct ClientState {
     render: RenderHandler,
     load: LoadHandler,
     request: RequestHandler,
+    display: DisplayHandler,
 }
 
 wrap_client! {
@@ -399,20 +458,25 @@ wrap_client! {
         fn request_handler(&self) -> Option<RequestHandler> {
             guard(None, || Some(self.state.request.clone()))
         }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            guard(None, || Some(self.state.display.clone()))
+        }
     }
 }
 
 /// Builds a fully-wired CEF [`Client`] for an off-screen browser.
 ///
-/// Returns the client plus the [`FrameSlot`] and [`NavState`] the owning `Page`
-/// reads from. Keeping construction here keeps every `cef::` handler type inside
-/// the FFI module.
+/// Returns the client plus the [`FrameSlot`], [`NavState`], and [`TitleSlot`]
+/// the owning `Page` reads from. Keeping construction here keeps every `cef::`
+/// handler type inside the FFI module.
 pub(crate) fn build_client(
     size: ViewSize,
     interceptor: Arc<dyn ResourceInterceptor>,
-) -> (Client, FrameSlot, NavState, ViewSize) {
+) -> (Client, FrameSlot, NavState, TitleSlot, ViewSize) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
+    let title = TitleSlot::new();
 
     let render = RenderHandlerImpl::new(RenderState {
         slot: slot.clone(),
@@ -420,14 +484,18 @@ pub(crate) fn build_client(
     });
     let load = LoadHandlerImpl::new(LoadState { nav: nav.clone() });
     let request = RequestHandlerImpl::new(InterceptState { interceptor });
+    let display = DisplayHandlerImpl::new(DisplayState {
+        title: title.clone(),
+    });
 
     let client = ClientImpl::new(ClientState {
         render,
         load,
         request,
+        display,
     });
 
-    (client, slot, nav, size)
+    (client, slot, nav, title, size)
 }
 
 // ---------------------------------------------------------------------------
