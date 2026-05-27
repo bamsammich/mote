@@ -1,6 +1,6 @@
 //! Sandboxed Lua runtime for Mote.
 //!
-//! Embeds `mlua` + `LuaJIT` and provides two things:
+//! Embeds `mlua` + `LuaJIT` and provides three facilities:
 //!
 //! 1. A **sandboxed Lua state factory** ([`new_sandbox`]) that constructs an
 //!    mlua state with a deliberately constrained standard library: no `io`,
@@ -32,16 +32,27 @@
 //!    and the `LuaJIT` findings (M3/M4/M5/N1, D1) — in particular the rule that
 //!    returned values MUST be read with raw accessors.
 //!
+//! 4. A **restricted config-Lua context** ([`eval_config`]) that evaluates a
+//!    user config chunk (e.g. `plugins.lua`) in a sandboxed state with the same
+//!    hardening as the plugin sandbox but exposing **only** config-capture
+//!    functions (`mote.plugins`, `mote.dev_mode`, `mote.updates.configure`) and
+//!    **no** plugin host API. Returns a typed [`ConfigSpec`] capturing the
+//!    declared plugin set, dev-mode config, and update policy.
+//!
 //! Registry validation of `permissions` / `capabilities` / `consumes`
 //! (Enforcement step 1) and contract conformance (step 3) live in
 //! `mote-registry`; this crate provides the sandbox and the static declarative
 //! surface those steps consume.
 
+mod config;
 mod error;
 mod invoke;
 mod load;
 mod sandbox;
 
+pub use config::{
+    ConfigError, ConfigSpec, DevModeConfig, PluginEntry, UpdateCadence, UpdatesConfig, eval_config,
+};
 pub use error::{HookInvokeError, LuaError};
 pub use invoke::{HookTable, call_function_with_deadline, call_hook_with_deadline};
 pub use load::{IdentityScope, LoadedPlugin, Manifest, load_plugin, load_plugin_in};

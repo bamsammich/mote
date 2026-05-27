@@ -80,7 +80,10 @@ use crate::error::LuaError;
 /// These ship with Lua's always-on base library, which is not individually
 /// gated by a [`StdLib`] flag, so they must be nil-ed out explicitly. See the
 /// module-level documentation for the rationale behind each entry.
-const DENIED_BASE_GLOBALS: &[&str] = &[
+///
+/// Exported so the config sandbox ([`crate::config`]) can apply the same
+/// nil-out pass and maintain consistent hardening without duplicating the list.
+pub(crate) const DENIED_BASE_GLOBALS: &[&str] = &[
     "load",
     "loadstring",
     "loadfile",
