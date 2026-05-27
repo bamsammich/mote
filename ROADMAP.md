@@ -60,7 +60,7 @@ The user-facing chrome that turns "plugin runtime + rendering engine" into "brow
 - [x] Session persistence with continuous SQLite flush, WAL mode, crash recovery
 - [x] Active-tab discarding after 30min idle
 - [x] Hidden-tab TTL (default 30 days)
-- [ ] Settings model — deferred; DESIGN says config is **Lua**, ROADMAP said **TOML** (inconsistency to resolve when built)
+- [ ] Settings model — config is **Lua** (resolved per DESIGN over the ROADMAP "TOML" wording). A restricted config-Lua context lands in Phase 3 (for `plugins.lua`) and grows into the full settings system
 - [x] Integrity panel: active plugins, permissions (requested→effective), audit log, storage, provenance, integrity status — live data. (revoke/update/rollback/reload **actions** wire with Phase-3 plugin management)
 - [~] Permission approval dialog — surface built (narrowing UI, dangerous-combo warnings); the install→approval **flow** pairs with Phase-3 plugin install
 
