@@ -29,3 +29,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [[example]]
 name = "osr_smoke"
 path = "examples/osr_smoke.rs"
+
+# Runtime proof that cookie stores are isolated across profiles (identities).
+# Sets a cookie in profile A's RequestContext and asserts it is absent in
+# profile B's RequestContext. Requires a live CEF runtime + subprocess split,
+# hence an example rather than a unit test.
+[[example]]
+name = "cookie_isolation"
+path = "examples/cookie_isolation.rs"

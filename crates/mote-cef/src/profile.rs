@@ -52,7 +52,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use cef::{CefString, RequestContext, RequestContextSettings, request_context_create_context};
+use cef::{
+    CefString, CookieManager, ImplRequestContext as _, RequestContext, RequestContextSettings,
+    request_context_create_context,
+};
 
 use crate::error::{CefError, Result};
 
@@ -190,6 +193,21 @@ impl ProfileHandle {
     /// `browser_host_create_browser_sync`.
     pub(crate) fn with_context<R>(&self, f: impl FnOnce(&mut RequestContext) -> R) -> R {
         f(&mut self.inner.context.borrow_mut())
+    }
+
+    /// Return the CEF cookie manager for this profile's request context.
+    ///
+    /// This is `pub` (not `pub(crate)`) so that `mote-cef`'s own examples can
+    /// drive cookie-isolation integration proofs without re-exporting the
+    /// `cef::CookieManager` type from `lib.rs`. External crates that depend on
+    /// `mote-cef` never import `cef` directly (DISCIPLINES.md §1), so they
+    /// cannot call this method in practice even though it is technically `pub`.
+    ///
+    /// Returns `None` when CEF has not yet initialised the cookie store for this
+    /// context (rare; pump the engine for a moment and retry if needed).
+    #[must_use]
+    pub fn cookie_manager(&self) -> Option<CookieManager> {
+        self.with_context(|ctx| ctx.cookie_manager(None))
     }
 }
 

@@ -21,7 +21,7 @@ These surfaces are partitioned per `RequestContext` / profile and do not leak be
 
 | Surface | Notes |
 |---|---|
-| **Cookies** | Each profile has an independent cookie store. A cookie set in identity A is invisible to identity B. This is the primary isolation mechanism for authentication state. |
+| **Cookies** | Each profile has an independent cookie store. A cookie set in identity A is invisible to identity B. This is the primary isolation mechanism for authentication state. **RUNTIME-VERIFIED** by `examples/cookie_isolation` (sets `mote-isolation-test=present` in profile A via `RequestContext::cookie_manager` / `CookieManager::set_cookie`; asserts it is ABSENT in profile B via `CookieManager::visit_url_cookies`; exit 0 is the evidence). |
 | **localStorage and sessionStorage** | Partitioned per profile. Web SQL (deprecated) follows the same partition. |
 | **IndexedDB** | Partitioned per profile. Each identity's databases are stored under the profile's data path and are not shared. |
 | **Browsing history** | Each profile maintains its own history database. History from identity A does not appear in identity B's history or urlbar suggestions. |
@@ -86,7 +86,7 @@ These surfaces are shared across profiles or have known partial leakage. Each en
 
 The following tests will be added as part of `mote-cef` `ProfileHandle` implementation (W-A2 in the Phase 2 work breakdown):
 
-1. **Cookie isolation test:** Set a cookie in identity A's profile; confirm it is not visible in identity B's profile.
+1. **Cookie isolation test:** ~~Set a cookie in identity A's profile; confirm it is not visible in identity B's profile.~~ **DONE** — `examples/cookie_isolation` is the live proof. Run with `DISPLAY=:1 mise exec -- cargo run -p mote-cef --example cookie_isolation -- --ozone-platform=x11`; exit 0 confirms isolation holds.
 2. **localStorage isolation test:** Write to localStorage under identity A; confirm identity B cannot read it.
 3. **History isolation test:** Navigate to a URL under identity A; confirm it does not appear in identity B's history.
 4. **Service worker isolation test:** Register a service worker under identity A's profile; confirm identity B does not see the registration (to verify the "to verify" entry above).
