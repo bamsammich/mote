@@ -1340,10 +1340,8 @@ impl ShellApp {
         }
         self.last_housekeeping = Instant::now();
         let discarded = self.discard_idle_renderers();
-        // Reap is detect-only until mote-session exposes a removal API (see
-        // `reap_hidden_tabs`); it changes no state, so it never forces a flush.
-        let _reap_candidates = self.reap_hidden_tabs();
-        if discarded > 0 {
+        let reaped = self.reap_hidden_tabs();
+        if discarded > 0 || reaped > 0 {
             self.persist_and_push();
         }
     }
@@ -1394,36 +1392,36 @@ impl ShellApp {
         dropped
     }
 
-    /// Identify hidden tabs past their TTL via [`HiddenTabReaper::should_reap`].
+    /// Reap hidden tabs past their TTL via [`HiddenTabReaper::should_reap`],
+    /// permanently removing them from the session (DESIGN §Memory cost:
+    /// "Aged out (>30 days hidden) → Deleted").
     ///
-    /// # BLOCKED — needs a mote-session removal API
-    ///
-    /// Reaping must *delete* the tab from the session (DESIGN §Memory cost:
-    /// "Aged out (>30 days hidden) → Deleted"; [`Session::flush`] rebuilds the
-    /// persisted `tab_ids` from `self.tabs.keys()`, so a tab survives unless it
-    /// leaves the session's own map). The session exposes **no** removal method
-    /// and **no** `&mut Vec<Tab>` accessor, so neither
-    /// [`HiddenTabReaper::reap_all`] (wants `&mut Vec<Tab>`) nor a per-tab delete
-    /// is reachable from the shell. `close_tab` only sets `TabState::Closed`; it
-    /// does not remove the entry, so it cannot stand in for reap.
-    ///
-    /// This method therefore only *detects* and logs reap candidates; actual
-    /// removal awaits a mote-session API — see the agent report. Returns the
-    /// number of tabs that *would* be reaped.
-    fn reap_hidden_tabs(&self) -> usize {
-        let candidates = self
+    /// For each reap candidate the tab is deleted from the session map via
+    /// [`Session::remove_tab`] so it does not survive the next
+    /// [`Session::flush`]. Because hidden tabs have no live CEF renderer, there
+    /// is no `ShellTab`/`Page` to drop — `self.tabs` only carries active-window
+    /// tabs. Returns the number of tabs actually deleted.
+    fn reap_hidden_tabs(&mut self) -> usize {
+        // Collect candidates first (immutable borrow of session), then remove
+        // (mutable borrow) — split to avoid overlapping borrows.
+        let to_reap: Vec<TabId> = self
             .session
             .tab_picker_ranked(self.workspace)
             .into_iter()
             .filter(|t| self.reaper.should_reap(t))
-            .count();
-        if candidates > 0 {
-            eprintln!(
-                "mote-shell: {candidates} hidden tab(s) past TTL detected (reap blocked: \
-                 mote-session exposes no tab-removal API)"
-            );
+            .map(|t| t.id)
+            .collect();
+
+        let mut reaped = 0;
+        for id in to_reap {
+            if self.session.remove_tab(id).is_some() {
+                reaped += 1;
+                eprintln!("mote-shell: reaped hidden tab {id} (TTL expired)");
+            }
+            // Hidden tabs have no live renderer; self.tabs holds only
+            // active-window tabs. Nothing further to drop.
         }
-        candidates
+        reaped
     }
 
     /// React to a DPI scale-factor change: recompute the (logical-pixel) chrome
@@ -2098,6 +2096,68 @@ mod tests {
         let mut recent = Tab::new(TabId::new(2), "https://b.com".into(), WorkspaceId::new(0));
         recent.hide(SystemTime::now());
         assert!(!reaper.should_reap(&recent));
+    }
+
+    /// Verifies the reap wiring end-to-end at the session level (without a live
+    /// CEF engine): a hidden tab past its TTL is removed from the session by
+    /// the reaper and does not survive a flush/restore cycle. This mirrors what
+    /// `ShellApp::reap_hidden_tabs` does — collect candidates via
+    /// `HiddenTabReaper::should_reap`, then call `Session::remove_tab` for each.
+    #[test]
+    fn reap_wiring_deletes_expired_hidden_tab_from_session() {
+        use mote_session::Session;
+        use mote_storage::Store;
+        use mote_types::{IdentityId, WorkspaceId};
+
+        let store = Store::open_in_memory().unwrap();
+        let identity = IdentityId::new(1);
+        let plugin = mote_types::PluginName::new("mote-session").unwrap();
+        let ns = store.namespace(&plugin, mote_storage::IdentityScope::PerIdentity(identity));
+        let workspace = WorkspaceId::new(0);
+
+        let mut session = Session::new(identity, workspace);
+        // An active tab that should survive.
+        let keep_id = session.add_tab("https://keep.com".to_owned(), workspace);
+        // A hidden tab released 5 seconds ago — past the 2s TTL we'll configure.
+        let reap_id = session.add_tab("https://reap-me.com".to_owned(), workspace);
+        session
+            .hide_tab(reap_id, SystemTime::now() - Duration::from_secs(5))
+            .unwrap();
+        // A recently-hidden tab that must NOT be reaped yet.
+        let young_id = session.add_tab("https://young.com".to_owned(), workspace);
+        session.hide_tab(young_id, SystemTime::now()).unwrap();
+
+        // Build a reaper with a 2s TTL (mirrors `hidden_tab_config_with`).
+        let reaper = HiddenTabReaper::new(hidden_tab_config_with(Some(Duration::from_secs(2))));
+
+        // Apply the same logic ShellApp::reap_hidden_tabs uses.
+        let to_reap: Vec<_> = session
+            .tab_picker_ranked(workspace)
+            .into_iter()
+            .filter(|t| reaper.should_reap(t))
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(to_reap, vec![reap_id], "only the stale tab is a candidate");
+
+        for id in &to_reap {
+            assert!(session.remove_tab(*id).is_some());
+        }
+
+        // Flush and restore: the reaped tab must be gone; others must survive.
+        session.flush(&ns).unwrap();
+        let restored = Session::restore(&ns, identity).unwrap();
+        assert!(
+            restored.tab(keep_id).is_some(),
+            "active tab must survive reap"
+        );
+        assert!(
+            restored.tab(young_id).is_some(),
+            "recently-hidden tab must survive reap"
+        );
+        assert!(
+            restored.tab(reap_id).is_none(),
+            "stale hidden tab must be deleted after reap + flush"
+        );
     }
 
     #[test]

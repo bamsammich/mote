@@ -133,6 +133,19 @@ impl Session {
         Ok(())
     }
 
+    /// Permanently removes the tab with `id` from the session, returning it.
+    ///
+    /// Removing a tab is the only way to prevent it from surviving
+    /// [`Session::flush`]: flush rebuilds `tab_ids` from `self.tabs.keys()`, so
+    /// a tab survives unless it is removed from this map. This is the deletion
+    /// path used by the hidden-tab TTL reaper (DESIGN §Hidden tab lifecycle:
+    /// "Aged out (>30 days hidden) → Deleted").
+    ///
+    /// Returns `None` if no tab with `id` exists (no-op, not an error).
+    pub fn remove_tab(&mut self, id: TabId) -> Option<Tab> {
+        self.tabs.remove(&id)
+    }
+
     /// Reveals a hidden tab into the active window.
     ///
     /// # Errors
@@ -442,6 +455,60 @@ mod tests {
         let mut s = make_session();
         let err = s.hide_tab(TabId::new(999), SystemTime::now()).unwrap_err();
         assert!(matches!(err, SessionError::TabNotFound(_)));
+    }
+
+    // ── remove_tab ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_tab_returns_tab_and_is_gone() {
+        let mut s = make_session();
+        let id = s.add_tab("https://remove-me.com".to_owned(), WorkspaceId::new(1));
+        let removed = s.remove_tab(id);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().url, "https://remove-me.com");
+        // Must not be reachable after removal.
+        assert!(s.tab(id).is_none());
+    }
+
+    #[test]
+    fn remove_unknown_tab_returns_none() {
+        let mut s = make_session();
+        assert!(s.remove_tab(TabId::new(999)).is_none());
+    }
+
+    #[test]
+    fn remove_tab_absent_from_picker_after_removal() {
+        let mut s = make_session();
+        let keep = s.add_tab("https://keep.com".to_owned(), WorkspaceId::new(1));
+        let gone = s.add_tab("https://gone.com".to_owned(), WorkspaceId::new(1));
+        s.remove_tab(gone);
+        let ids: Vec<_> = s
+            .tab_picker_ranked(WorkspaceId::new(1))
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(ids.contains(&keep));
+        assert!(!ids.contains(&gone));
+    }
+
+    #[test]
+    fn removed_tab_does_not_survive_flush_restore() {
+        let store = mote_storage::Store::open_in_memory().unwrap();
+        let identity = IdentityId::new(1);
+        let ns = session_ns(&store, identity);
+
+        let mut session = Session::new(identity, WorkspaceId::new(1));
+        let keep = session.add_tab("https://keep.com".to_owned(), WorkspaceId::new(1));
+        let removed = session.add_tab("https://removed.com".to_owned(), WorkspaceId::new(1));
+        session.remove_tab(removed);
+        session.flush(&ns).unwrap();
+
+        let restored = Session::restore(&ns, identity).unwrap();
+        assert!(restored.tab(keep).is_some(), "kept tab must survive");
+        assert!(
+            restored.tab(removed).is_none(),
+            "removed tab must not survive flush/restore"
+        );
     }
 
     #[test]
