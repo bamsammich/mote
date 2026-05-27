@@ -39,9 +39,12 @@ Smallest, mechanical, additive. No shell, no CEF.
 - Step: add `#[must_use] pub fn registry(&self) -> &Registry { &self.registry }`.
 - Test: a `Runtime` built with a registry returns it (assert `version()` matches). Run `cargo test -p mote-runtime`. Commit.
 
-**1b. `approval_html(req)`.**
-- Mirror the existing `render_panel_html` pattern in `mote-shell` (read it for HTML-string conventions + js_string escaping) but produce the **approval dialog** body from live data: plugin name/version/source, one row per `NarrowablePermission` using `effective_string()` + `high_risk` styling, the `dangerous_combinations` list, and the update banner when `is_update` (list `new_permissions`). Each permission row carries a `data-domain`/`data-action` and narrow controls; the grant/deny buttons call `window.mote.invoke("approve_plugin", {...})` (the op lands in Task 5). HTML-escape all interpolated text.
-- TDD: `approval_html(&ApprovalRequest::sample())` contains the plugin name, each permission's `effective_string()`, every `dangerous_combinations` entry, and (for an `is_update` request) each `new_permissions` entry. A request with a `high_risk` permission includes the risk marker. Run `cargo test -p mote-ui`. Commit.
+**1b. Structured approval payload (NOT an HTML string) — ADR-0005 compliance.**
+- **ADR-0005 forbids HTML strings crossing into the privileged chrome world** ("text nodes / structured DOM construction, never innerHTML"; escaping is the rejected weaker mitigation). So we do **not** render an `approval_html() -> String`. Instead:
+  - Ensure `ApprovalRequest` (and its `NarrowablePermission`/`NarrowMode`) derive `serde::Serialize` (additive if missing). The shell sends the request to chrome as **JSON data**; trusted chrome-side JS (in the chrome bundle, authored by us — never plugin-derived) builds the DOM with `createElement`/`textContent`/`setAttribute`. No plugin string is ever interpolated into HTML or assigned to `innerHTML`.
+  - Add a small helper to compute the per-request fields the chrome side needs (each permission's `effective_string()`, `high_risk`, the `dangerous_combinations`, `is_update`, `new_permissions`) — exposed as serializable fields, not markup.
+- TDD: `serde_json::to_string(&ApprovalRequest::sample())` round-trips back to an equal request; the serialized JSON contains the plugin name, each permission's domain + `effective_string()`, every `dangerous_combinations` entry, and (for `is_update`) each `new_permissions` entry. Run `cargo test -p mote-ui`. Commit.
+- (The chrome-side typed DOM builder + a script-injection boundary test land in Task 4.)
 
 ---
 
@@ -136,13 +139,17 @@ CEF integration. Verified by running (logic where possible unit-tested).
 - Modify: `crates/mote-shell/src/lib.rs` (panel/overlay creation ~1086-1127; `push_state_to_chrome` ~897-912; `build_op_registry` ~562-608).
 - Possibly: `crates/mote-cef/src/bridge.rs` if a chrome-page render helper is missing.
 
+**ADR-0005 discipline for this whole task:** data crosses the bridge as **JSON only**; the chrome page's trusted JS builds DOM via `createElement`/`textContent`/`setAttribute` — **never `innerHTML`** with any plugin-derived string. Add/keep a chrome-document **CSP** that blocks inline script and `unsafe-eval`. Authored chrome JS (static, in the chrome bundle) is the only code that touches the DOM.
+
 **4a. Render the integrity panel inside the chrome page (not the `mote://overlay` page).**
-- Instead of a separate `mote://overlay/integrity.html` `Page`, push the panel HTML into the privileged chrome page via `eval_js` (a `mote.renderIntegrityPanel(html)` hook in the chrome JS) so its buttons can `window.mote.invoke(...)`. Toggle visibility on `Ctrl+Shift+I` as today, but the DOM lives in the bridged chrome page.
-- Verify by running: `Ctrl+Shift+I` shows the panel; buttons are present (wired in 4b/5).
+- The shell pushes the panel **as structured JSON** (`IntegrityPanel` derives `serde::Serialize`; additive if missing) to a chrome hook `mote.renderIntegrityPanel(data)`; the chrome JS builds the panel DOM structurally from `data`. Toggle visibility on `Ctrl+Shift+I`; the DOM lives in the bridged chrome page so its buttons can `window.mote.invoke(...)`.
+- Verify by running: `Ctrl+Shift+I` shows the panel; buttons present (wired in 4b/5).
 
 **4b. Render the approval dialog inside the chrome page.**
-- Add a `mote.showApprovalDialog(html)` chrome hook; the shell pushes `approval_html(req)` via `eval_js` when there is a pending approval. The dialog's buttons invoke `approve_plugin`.
+- A `mote.showApprovalDialog(data)` chrome hook receives the **JSON** `ApprovalRequest`; the chrome JS builds the dialog DOM structurally. The dialog's buttons invoke `approve_plugin`.
 - Verify by running (after Task 5 wires the op): pending plugin → dialog appears.
+
+**4c. Boundary test (ADR-0005 required).** Add a test (headless where possible, else a documented manual check) that a plugin whose name/permission/source contains `<script>`, an `onerror=` attribute, and a quote **cannot** inject script or markup into the chrome DOM — i.e. the structured builder renders them as inert text. This is the test ADR-0005 mandates at the chrome boundary.
 
 **Note:** keep `mote://overlay` for web-adjacent overlays; only these two trust-critical surfaces move to chrome (ADR-0007).
 
@@ -160,7 +167,7 @@ The load-bearing integration. Live-verified.
 - Verify by running: bundled plugins load on launch (auto-grant), window comes up.
 
 **5b. `approve_plugin` op.**
-- Register `approve_plugin` in `build_op_registry`. Payload: `{ plugin, decision: "grant"|"deny", permissions: [{domain, action, mode, origins?}] }`. Handler: find the pending `(ResolvedPlugin, _)`; `approval_from_dialog` → `Approval`; `Runtime::load(source, identity, &DecidedPolicy::new(approval))`; on success `store.put(name, hash)`, remove from pending, re-render panel + dismiss dialog. On `Deny` → drop pending, audit.
+- Register `approve_plugin` in `build_op_registry`. Payload: `{ plugin, decision: "grant"|"deny", permissions: [{domain, action, mode, origins?}] }`. **Validate the payload at the op boundary (ADR-0005 "closed structured operations"):** `plugin` must match a pending entry; `domain`/`action` must match the request's permissions; each `origins` glob must pass a format + length check (bounded character set, max length, max count) before it becomes a `Narrowing` — reject malformed input with `OpResponse::err` rather than storing arbitrary strings. Handler: `approval_from_dialog` → `Approval`; `Runtime::load(source, identity, &DecidedPolicy::new(approval))`; on success `store.put(name, hash)`, remove from pending, re-render panel + dismiss dialog. On `Deny` → drop pending, audit.
 - The op handler runs on the pump thread (where runtime/bridge live) — no cross-thread issues.
 - Verify by running: a never-approved `path:` plugin → dialog → approve → plugin loads → appears in panel as Verified.
 
