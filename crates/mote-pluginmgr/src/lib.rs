@@ -28,6 +28,7 @@ pub mod cache;
 pub mod dirhash;
 pub mod fetch;
 pub mod lock;
+pub mod managed;
 pub mod source;
 
 pub use bundle::{BundleError, bundled_names, bundled_version, is_bundled, unpack_into_cache};
@@ -35,4 +36,5 @@ pub use cache::{Cache, CacheError, CacheKey};
 pub use dirhash::{DirHashError, hash_dir};
 pub use fetch::{FetchError, Fetched, fetch};
 pub use lock::{LockEntry, LockError, LockFile};
+pub use managed::{ManagedEntry, ManagedError, ManagedFile};
 pub use source::{Source, SourceParseError};

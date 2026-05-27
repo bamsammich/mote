@@ -2951,6 +2951,7 @@ dependencies = [
  "blake3",
  "gix",
  "include_dir",
+ "mote-lua",
  "mote-types",
  "serde",
  "tempfile",
