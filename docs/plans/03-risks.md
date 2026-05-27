@@ -24,12 +24,25 @@ The phase-level inconsistencies B1/B2/B4 from `risks-and-inconsistencies.md` are
 - **Why it blocks.** Two questions must be answered before building the evaluator: (1) Where does the config-Lua evaluator live, and (2) how much of the surface does Phase 3 implement? Building it wrong means either over-building (the whole settings system, out of scope) or building a throwaway evaluator the deferred system will replace.
 - **Recommendation.** Add a `config` module to **`mote-lua`** (the only crate allowed to touch `mlua`) exposing `eval_config(source) -> ConfigCapture`. Phase 3 implements **only** `mote.plugins`, `mote.dev_mode`, `mote.updates.configure`. Design the capture so new `mote.*` config functions register additively — the deferred settings system *grows into* this module rather than replacing it. `mote-pluginmgr` owns interpreting `plugins`/`dev_mode`/`updates`; the future `mote-shell` config loader (`init.lua`) will own the rest, sharing `mote-lua::config`. **Needs sign-off:** confirm (a) `eval_config` lives in `mote-lua`, (b) Phase 3 scope is exactly those three functions, (c) the config-Lua context is a *separate* restricted sandbox from the plugin host sandbox (no `io`/`os`/`require`, no plugin `mote.*` host API). The plan assumes all three.
 
-### R3. `[DECISION]` How `mote plugin add` rewrites the `plugins.lua` call
+### R3. `[DECISION]` How `mote plugin add` rewrites the `plugins.lua` call — ✅ RESOLVED (ADR-0006)
+> **RESOLVED 2026-05-27 by ADR-0006:** the CLI **never** rewrites `plugins.lua`.
+> Both candidate approaches below are obsolete — `plugins.lua` is a program, not
+> data, and cannot be reliably rewritten. `add`/`remove`/`source` write a
+> Mote-owned, committable `managed.lua` (generated wholesale, atomic write,
+> loaded last to compose over user config). `import` migrates an entry into the
+> user's own config by printing (default) or opt-in append-only `--write`. See
+> `docs/plans/2026-05-27-config-mutation-model-design.md`. Original analysis kept
+> below for history.
 - **Where.** Plan §5.1. DESIGN: "the CLI can mutate it programmatically by rewriting the call." `plugins.lua` is Lua, so the rewrite is non-trivial.
 - **Why it risks.** (A) Evaluate-then-regenerate is robust but **loses user comments/formatting** inside the `mote.plugins({...})` call — a real cost for a hand-edited, Git-tracked dotfile. (B) Targeted source-span edit preserves comments but needs light Lua-table-literal parsing and is brittle for unusual formatting / dynamically-built tables.
 - **Recommendation.** **(B) with a documented (A) fallback:** span-edit the affected key for the common literal case (preserves comments/order); regenerate the whole call only when the call can't be span-located (e.g. dynamically constructed table). **Needs sign-off** because it trades comment-preservation against implementation complexity; if the maintainer values simplicity over comment-preservation, choose (A) outright.
 
-### R4. `[INCONSISTENCY]` `plugins.lua` Lua keys (underscores) vs `PluginName` (hyphens)
+### R4. `[INCONSISTENCY]` `plugins.lua` Lua keys (underscores) vs `PluginName` (hyphens) — ✅ RESOLVED (ADR-0006)
+> **RESOLVED 2026-05-27 by ADR-0006 → Option 2:** `plugins.lua` keys **must be
+> valid `PluginName`s**, written quoted (`["vim-mode"] = {...}`), validated
+> against the resolved manifest name at sync. DESIGN's underscore examples were
+> corrected. (The maintainer chose Option 2 over the plan's Option-1 recommendation
+> — the key is authoritative, not cosmetic, so no key→name resolution step.)
 - **Where.** DESIGN §Manifest and lock file writes `vim_mode`, `my_local_plugin`, `cool_plugin` as the `plugins.lua` keys, but `plugins.lock` uses `cool-plugin` (hyphen), and `mote_types::PluginName` **requires** lowercase + hyphens, **no underscores** (validated; `_` is `PluginNameError::InvalidChar`). The DESIGN example keys are not valid `PluginName`s.
 - **Why it blocks.** The lock + cache + storage namespaces are keyed by `PluginName` (hyphenated). The `plugins.lua` key is a Lua identifier (underscores are idiomatic, hyphens are illegal in bare Lua keys). So the `plugins.lua` key and the `PluginName` **cannot be the same string**. Three options:
   1. The `plugins.lua` key is *cosmetic* (a label); the real `PluginName` comes from the plugin's **manifest** (`M.manifest.name`, which is a validated `PluginName`). The key→name link is established at first resolve.
@@ -90,14 +103,14 @@ The phase-level inconsistencies B1/B2/B4 from `risks-and-inconsistencies.md` are
 
 ## Summary: what needs the maintainer/user before coding
 
-| # | Item | Severity | Gates |
-|---|---|---|---|
-| R1 | gix fetch-at-commit confirmation (+ system-git fallback only if spike fails) | DECISION | 3.1c, then 3.3/update/sync |
-| R2 | `eval_config` lives in `mote-lua`; Phase-3 scope = `plugins`/`dev_mode`/`updates`; separate restricted sandbox | DECISION | 3.1d, all `plugins.lua` work |
-| R3 | `mote plugin add` rewrite strategy (span-edit B vs regenerate A) | DECISION | 3.3 |
-| R4 | `plugins.lua` key (underscore) vs `PluginName` (hyphen) → key is a cosmetic label, manifest name is authoritative | INCONSISTENCY | 3.2, 3.3 |
-| R7 | Approval-dialog threading: modal first-install / async update | DECISION | 3.6 |
-| R8 | Approval state global vs per-identity (recommend global) | DECISION | 3.4, 3.6 |
-| R5 | Offline/network failure posture (recommend: cache self-contained, recoverable errors) | DECISION (posture) | 3.1c, 3.3 |
+| # | Item | Severity | Gates | Status |
+|---|---|---|---|---|
+| R1 | gix fetch-at-commit confirmation (+ system-git fallback only if spike fails) | DECISION | 3.1c | ✅ resolved (Wave 1: gix fetch-at-commit verified) |
+| R2 | `eval_config` lives in `mote-lua`; Phase-3 scope = `plugins`/`dev_mode`/`updates`; separate restricted sandbox | DECISION | 3.1d | ✅ resolved (Wave 1: `eval_config` built) |
+| R3 | `mote plugin add` config mutation | DECISION | 3.3 | ✅ resolved (ADR-0006: no rewrite; `managed.lua`) |
+| R4 | `plugins.lua` key vs `PluginName` | INCONSISTENCY | 3.2, 3.3 | ✅ resolved (ADR-0006: quoted hyphenated `PluginName` keys) |
+| R7 | Approval-dialog threading: modal first-install / async update | DECISION | 3.6 | ⏳ open — maintainer leans modal-install/async-update (confirm before 3.6) |
+| R8 | Approval state global vs per-identity (recommend global) | DECISION | 3.4, 3.6 | ⏳ open — maintainer leans global per plugin+hash (confirm before 3.4) |
+| R5 | Offline/network failure posture (recommend: cache self-contained, recoverable errors) | DECISION (posture) | 3.1c, 3.3 | ⏳ open (posture confirm) |
 
-R6, R9–R13 are engineer-resolvable with the proposed defaults; confirm where convenient. The four that, if guessed wrong, cause the most rework are **R1 (gix), R2 (config-Lua ownership/scope), R4 (key↔name), and R7 (approval threading)** — surface these first.
+R6, R9–R13 are engineer-resolvable with the proposed defaults; confirm where convenient. **R1–R4 are now resolved.** The remaining decisions before the integrator units are **R7 (approval threading, gates 3.6), R8 (approval scope, gates 3.4), and R5 (offline posture)** — confirm these before building the flow/approval-store units.

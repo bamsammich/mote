@@ -93,12 +93,17 @@ Thin argument layer. Parses `mote plugin <subcommand>`, builds a `PluginManager`
 ```lua
 -- ~/.config/mote/plugins.lua
 mote.plugins({
-  adblock         = { source = "github:mote-browser/adblock" },
-  vim_mode        = { source = "github:mote-browser/vim-mode" },
-  cool_plugin     = { source = "github:them/cool-plugin", version = "v1.2.3" },
-  my_local_plugin = { source = "path:~/code/my-plugin" },
+  ["adblock"]         = { source = "github:mote-browser/adblock" },
+  ["vim-mode"]        = { source = "github:mote-browser/vim-mode" },
+  ["cool-plugin"]     = { source = "github:them/cool-plugin", version = "v1.2.3" },
+  ["my-local-plugin"] = { source = "path:~/code/my-plugin" },
 })
 ```
+
+> **Keys are quoted hyphenated `PluginName`s (ADR-0006 / R4).** A `plugins.lua`
+> key is the plugin's canonical `PluginName` (lowercase, hyphenated), written
+> quoted because hyphens are illegal in bare Lua identifiers. The key is
+> validated against the resolved manifest name at sync.
 
 This requires evaluating Lua, but in a context **distinct from the plugin sandbox**. The plugin sandbox (`mote_lua::new_sandbox`) strips `io`/`os`/`require` and exposes the `mote.*` plugin host API. The config context needs a *different* surface: it exposes exactly `mote.plugins` (and, because the same file family carries `mote.dev_mode`, `mote.updates.configure`, and per-DESIGN config calls, those too) and nothing the plugin host API exposes. It is read-only with respect to the browser: calling `mote.plugins(t)` records a table; it does not mutate runtime state.
 
@@ -226,26 +231,44 @@ Each `mote plugin <cmd>`, what it does, and what it mutates. (M = mutates.)
 
 | Command | Behavior | Mutates |
 |---|---|---|
-| `add <source> [--version <v>]` | Parse source, fetch (Git) / resolve (path), compute dir hash, write a `plugins.lua` entry (call-rewriting, §5.1) + a `plugins.lock` entry, cache + symlink. Does **not** auto-approve — approval happens at next load / `review`. | M: plugins.lua, plugins.lock, cache, symlink |
-| `remove <name>` | Remove the `plugins.lua` entry + lock entry; **cache entry retained** (DESIGN: enables re-add/rollback; `gc` reclaims later). Drop the symlink. | M: plugins.lua, plugins.lock, symlink |
+| `add <source> [--version <v>]` | Parse source, fetch (Git) / resolve (path), compute dir hash, write a `managed.lua` entry (§5.1) + a `plugins.lock` entry, cache + symlink. Does **not** auto-approve — approval happens at next load / `review`. | M: managed.lua, plugins.lock, cache, symlink |
+| `remove <name>` | Remove the `managed.lua` entry + lock entry; **cache entry retained** (DESIGN: enables re-add/rollback; `gc` reclaims later). Drop the symlink. (A plugin declared in the user's own `plugins.lua` is not in `managed.lua`; `remove` reports it must be removed from `plugins.lua` by hand.) | M: managed.lua, plugins.lock, symlink |
 | `update [<name>]` | Fetch latest matching the version constraint; compute new hash; diff manifests (§6.3). If `{permissions,capabilities,consumes,identity_scope}` expanded → mark **needs re-approval**, do not relink until approved; else relink + update lock. For a `bundled` plugin → prompt to switch source to Git (DESIGN §First-party). | M: plugins.lock, cache, (symlink iff non-expanding) |
-| `source <name> <new-source>` | Change a plugin's source (e.g. `bundled` → `github:…`). Sticky thereafter (DESIGN §User-chosen sources are sticky). Re-fetch + re-hash + re-link. | M: plugins.lua, plugins.lock, cache, symlink |
+| `source <name> <new-source>` | Change a plugin's source (e.g. `bundled` → `github:…`). Sticky thereafter (DESIGN §User-chosen sources are sticky). Re-fetch + re-hash + re-link. | M: managed.lua, plugins.lock, cache, symlink |
 | `sync` | Reconcile cache + plugins dir with the lock: for each lock entry, ensure the pinned commit is cached (fetch if absent) and the symlink points at it; verify dir hashes. The fresh-machine command. | M: cache, symlinks (NOT the lock — sync obeys it) |
 | `rollback <name>` | Relink to the previous cached commit (no fetch, no copy). | M: symlink, (lock's active commit pointer) |
 | `diff <name>` | Show what an update *would* change, including the permission delta — the same diff the approval dialog renders, **headless** (DISCIPLINES §9 mechanism). Read-only. | none |
-| `import <name>` | Promote an implicit-local plugin into `plugins.lua` (write the `path:` entry + lock entry) for reproducibility. | M: plugins.lua, plugins.lock |
+| `import <name>` | Take ownership of an implicit-local or `managed.lua` entry: **print** the `plugins.lua` snippet to paste (default; clipboard if available) or, with `--write`, **append** it to `plugins.lua` (append-only, the single exception in ADR-0006); then drop it from `managed.lua`. | M: managed.lua (removal); plugins.lua only via `--write` (append-only) |
 | `gc` | Remove unreferenced cache entries (commits no lock entry and no rollback-window points at). | M: cache |
 | `review <name>` | Show pending permission changes and approve them (drives the approval flow headlessly or marks approved for next launch). | M: approval-state store; (triggers reload if engine running) |
 | `pin <name>` | Checksum-pin + approve a manually-written / edited plugin: compute current dir hash, write it to the lock, record the current `ApprovalHash` as approved. Resolves a `Mismatch`. | M: plugins.lock, approval-state store |
 | `link <secret-name>` | CLI helper mapping a secret to a vault item — **Phase 4** (`mote-secrets`). v0.1 Phase-3 stub: parse + delegate to `mote-secrets` if present, else a clear "secrets backend lands in Phase 4" message. | M: secrets.lua (Phase 4) |
 
-### 5.1 How `mote plugin add` rewrites the `plugins.lua` call
+### 5.1 How `mote plugin add` records a plugin (ADR-0006 — RESOLVED)
 
-DESIGN: "the CLI can mutate it programmatically by rewriting the call." `plugins.lua` is Lua, so a naïve regex rewrite is fragile. Two candidate approaches (decision in `03-risks.md` R3):
-- **(A) Evaluate-then-regenerate.** `eval_config` already captures the `mote.plugins({...})` table. `add`/`remove`/`source` mutate the captured `PluginSpecSet` and **regenerate** the `mote.plugins({...})` call from the typed model, replacing the original call's source span. Pro: robust, no Lua-string surgery. Con: loses user comments/formatting inside the call (a real cost for a hand-edited dotfile).
-- **(B) Targeted source-span edit.** Locate the `mote.plugins({ … })` call span and edit only the affected key's line, preserving the rest verbatim. Pro: preserves comments/order. Con: needs light Lua-table-literal parsing (not full Lua), brittle for unusual formatting.
+**R3 is closed by ADR-0006: the CLI never rewrites `plugins.lua`.** The earlier
+span-edit-vs-regenerate debate is obsolete — `plugins.lua` is a program, and Mote
+cannot reliably rewrite a program without destroying its structure and comments.
 
-**Recommendation:** (B) with a documented fallback to (A) when the call can't be span-located (e.g. the user built the table dynamically). The common case — a literal `mote.plugins({ key = { source = "…" } })` — is span-editable while preserving comments; the dynamic case regenerates. **Maintainer decision required** because it trades comment-preservation against implementation complexity.
+Instead, `add`/`remove`/`source` mutate a **Mote-owned, committable** file,
+`~/.config/mote/managed.lua`:
+
+- **Generated wholesale** from a structured in-memory `PluginSpecSet` on every
+  mutation, written via **atomic temp-write + `rename()`** (no in-place editing).
+- Carries a `-- DO NOT EDIT — managed by Mote (mote plugin ...)` header; human
+  edits to it are not preserved.
+- **Loaded last** by the config loader (after the user's `plugins.lua` and any
+  per-identity overlay). `mote.plugins({...})` is additive and config setters are
+  last-writer-wins, so load-order-last makes `managed.lua` compose with and
+  override the user's own declarations with no separate merge engine.
+- One file, not a `conf.d` directory (one labeled artifact, one git-diff line).
+
+The user's full plugin set is therefore portable (`managed.lua` + `plugins.lock`
+travel with the dotfiles) with **no paste step** for `add`. Migration out of the
+managed layer is `mote plugin import` (print by default; opt-in append-only
+`--write`). See `docs/plans/2026-05-27-config-mutation-model-design.md` and
+ADR-0006 for the full model. R4 (key↔name) is likewise resolved: `plugins.lua`
+keys are quoted hyphenated `PluginName`s, validated against the manifest at sync.
 
 ---
 
@@ -361,7 +384,9 @@ The phase splits into a **foundation layer** (`mote-pluginmgr` pure logic, no ru
 | **3.1d** | `eval_config` config-Lua context (`mote.plugins`/`dev_mode`/`updates`) | `mote-lua` (`config.rs`) | — | ‖ (separate crate, separate file) |
 | **3.1e** | `plugins.lock` serde+toml model + round-trip | `mote-pluginmgr` (`lock.rs`) | `mote-types` | ‖ (leaf) |
 | **3.2** | `PluginSpecSet` from `eval_config`; consumes-graph ordering + dangling pre-flight | `mote-pluginmgr` (`resolve.rs`) | 3.1d, 3.1e, `mote-runtime` types | → after 3.1d/3.1e |
-| **3.3** | CLI surface (`add/remove/update/source/sync/rollback/diff/import/gc/review/pin/link`) + `add` call-rewriting | `mote-cli` (whole), `mote-pluginmgr` (`manager.rs` façade), `mote-app` dispatch branch | 3.1a–e, 3.2 | → (the integrator) |
+| **3.1f** | `managed.lua` writer: generate from `PluginSpecSet` + atomic temp-write/rename + DO-NOT-EDIT header (ADR-0006) | `mote-pluginmgr` (`managed.rs`) | 3.1d (`eval_config` round-trips it) | ‖ (leaf) |
+| **3.2b** | Config loader composes multiple captures (user `plugins.lua` + `managed.lua` + per-identity overlay): additive plugins, last-writer-wins settings | `mote-pluginmgr` (`resolve.rs`) or `mote-lua` | 3.1d, 3.1f | → after 3.1f |
+| **3.3** | CLI surface (`add/remove/update/source/sync/rollback/diff/import/gc/review/pin/link`); `add`/`remove`/`source` drive the `managed.lua` writer (3.1f); `import` print/`--write`-append | `mote-cli` (whole), `mote-pluginmgr` (`manager.rs` façade), `mote-app` dispatch branch | 3.1a–f, 3.2 | → (the integrator) |
 | **3.4** | `ApprovalStore` + update-flow diff + re-approval-hash compare | `mote-pluginmgr` (`approval_store.rs`, `diff.rs`) | 3.1e, `mote-runtime::ApprovalHash`, `mote-storage` | ‖ with 3.3 (own files) |
 | **3.5** | Bundled distribution (embed + unpack) + first-party upstream poll | `mote-pluginmgr` (`bundle.rs`), `plugins/` tree | 3.1a/b | ‖ |
 | **3.6** | `DialogApprovalPolicy` + install→approval flow + implicit-local detection + per-identity overlay | `mote-shell` (`approval.rs`, rewire `runtime.rs`/`PluginHost`) | 3.2, 3.4, `mote-ui` view-models, bridge | → (last; needs the engine) |
