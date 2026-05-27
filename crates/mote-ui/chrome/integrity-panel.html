@@ -1,0 +1,342 @@
+<!doctype html>
+<!--
+  integrity-panel.html — "About → Browser Integrity" chrome surface.
+
+  Runtime-owned, not a plugin. Populated from IntegrityPanel sample data.
+  Both themes: toggle data-theme="dusk" | data-theme="vellum" on <html>.
+
+  Component composition:
+    .lockup         base.css — [integrity] heading
+    .card / .badge  card.css, badge.css — plugin cards + integrity badges
+    .btn            button.css — keycap action buttons
+    kbd             kbd.css — keyboard shortcut hints
+    .field          field.css — scope-editor inputs (in place, not used here)
+
+  No shadows on plugin cards (inline). No emoji. No AI surfaces. Lowercase labels.
+-->
+<html lang="en" data-theme="dusk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>[integrity] — mote</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="components/kbd.css" />
+    <link rel="stylesheet" href="components/button.css" />
+    <link rel="stylesheet" href="components/field.css" />
+    <link rel="stylesheet" href="components/card.css" />
+    <link rel="stylesheet" href="components/badge.css" />
+    <link rel="stylesheet" href="components/integrity-panel.css" />
+    <style>
+      body {
+        background: var(--bg);
+        padding: var(--space-4);
+      }
+    </style>
+  </head>
+  <body>
+
+    <div class="integrity-panel" role="main" aria-label="browser integrity">
+
+      <!-- ── Header ── -->
+      <header class="integrity-header">
+        <div class="heading">
+          <span class="lockup" aria-label="integrity panel">
+            <span class="br">[</span><span class="name">integrity</span><span class="br">]</span>
+          </span>
+        </div>
+        <p class="subhead">
+          active plugins · network audit · storage · permission denials
+        </p>
+      </header>
+
+      <!-- ══════════════════════════════════════════════════════════════
+           Section 1: Active plugins
+      ══════════════════════════════════════════════════════════════════ -->
+      <section class="integrity-section" aria-label="active plugins">
+        <div class="integrity-section-head">
+          <span class="section-label">
+            <span class="br">[</span>active plugins<span class="br">]</span>
+          </span>
+          <span class="section-count" aria-label="3 plugins">3</span>
+        </div>
+
+        <!-- ── Plugin card 1: password-manager-1password ── -->
+        <article class="plugin-card" aria-label="password-manager-1password">
+          <header class="plugin-card-head">
+            <div class="plugin-card-name">
+              <span aria-hidden="true" class="prov-glyph" title="declared git">○</span>
+              password-manager-1password
+            </div>
+            <span class="plugin-card-version">v1.0.0</span>
+            <div class="plugin-card-badges">
+              <span class="badge success">
+                <span class="dot" aria-hidden="true"></span>verified
+              </span>
+            </div>
+          </header>
+
+          <div class="plugin-provenance">
+            <span class="prov-label">source</span>
+            <span class="prov-value">github:1password/mote-plugin @ abc123def456</span>
+          </div>
+
+          <div class="plugin-meta-row">
+            <span class="meta-label">fulfills</span>
+            <span class="capability-tag">password-manager:provider</span>
+            <span class="capability-tag">secret:provider</span>
+          </div>
+
+          <div class="plugin-meta-row">
+            <span class="meta-label">consumes</span>
+            <span class="capability-tag">password-manager-form-services</span>
+          </div>
+
+          <!-- Permissions requested → effective -->
+          <div aria-label="permissions">
+            <ul class="permission-list" role="list" aria-label="permission list">
+              <li class="permission-row" role="listitem">
+                <span class="perm-dot" aria-hidden="true">•</span>
+                <span class="perm-requested">http:fetch:https://*.1password.com/*</span>
+              </li>
+              <li class="permission-row" role="listitem">
+                <span class="perm-dot" aria-hidden="true">•</span>
+                <span class="perm-requested">storage:persistent</span>
+              </li>
+              <li class="permission-row" role="listitem">
+                <span class="perm-dot" aria-hidden="true">•</span>
+                <span class="perm-requested">page:inject_script:*</span>
+                <span class="perm-arrow" aria-label="narrowed to">→</span>
+                <span class="perm-effective" aria-label="effective scope">page:inject_script:https://github.com/*</span>
+              </li>
+              <li class="permission-row" role="listitem">
+                <span class="perm-dot" aria-hidden="true">•</span>
+                <span class="perm-requested">crypto:seal_to_plugin</span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="plugin-last-used">
+            <span class="last-used-label">last used</span>
+            <span class="last-used-value">2 minutes ago</span>
+          </div>
+
+          <footer class="plugin-actions" aria-label="plugin actions">
+            <button class="btn btn-ghost" aria-label="revoke all permissions for password-manager-1password" type="button">
+              revoke
+            </button>
+            <button class="btn btn-ghost" aria-label="adjust permission scope for password-manager-1password" type="button">
+              adjust scope
+            </button>
+            <button class="btn btn-ghost" aria-label="update password-manager-1password" type="button">
+              update
+            </button>
+            <button class="btn btn-ghost" aria-label="rollback password-manager-1password to previous version" type="button">
+              rollback
+            </button>
+            <button class="btn btn-ghost" aria-label="open settings for password-manager-1password" type="button">
+              settings
+            </button>
+          </footer>
+        </article>
+
+        <!-- ── Plugin card 2: vim-mode ── -->
+        <article class="plugin-card" aria-label="vim-mode">
+          <header class="plugin-card-head">
+            <div class="plugin-card-name">
+              <span aria-hidden="true" class="prov-glyph" title="declared git">○</span>
+              vim-mode
+            </div>
+            <span class="plugin-card-version">v0.5.0</span>
+            <div class="plugin-card-badges">
+              <span class="badge success">
+                <span class="dot" aria-hidden="true"></span>verified
+              </span>
+            </div>
+          </header>
+
+          <div class="plugin-provenance">
+            <span class="prov-label">source</span>
+            <span class="prov-value">github:mote-browser/vim-mode @ def456abc789</span>
+          </div>
+
+          <ul class="permission-list" role="list" aria-label="permission list">
+            <li class="permission-row" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">keys:bind</span>
+            </li>
+            <li class="permission-row" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">keys:intercept_input</span>
+            </li>
+            <li class="permission-row is-high-risk" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">page:inject_script:*</span>
+            </li>
+            <li class="permission-row" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">storage:memory</span>
+            </li>
+          </ul>
+
+          <div class="plugin-last-used">
+            <span class="last-used-label">last used</span>
+            <span class="last-used-value">now</span>
+          </div>
+
+          <footer class="plugin-actions" aria-label="plugin actions">
+            <button class="btn btn-ghost" aria-label="revoke all permissions for vim-mode" type="button">
+              revoke
+            </button>
+            <button class="btn btn-ghost" aria-label="update vim-mode" type="button">
+              update
+            </button>
+            <button class="btn btn-ghost" aria-label="rollback vim-mode to previous version" type="button">
+              rollback
+            </button>
+            <button class="btn btn-ghost" aria-label="open settings for vim-mode" type="button">
+              settings
+            </button>
+          </footer>
+        </article>
+
+        <!-- ── Plugin card 3: my-experiment (dev mode) ── -->
+        <article class="plugin-card is-dev" aria-label="my-experiment (dev mode)">
+          <header class="plugin-card-head">
+            <div class="plugin-card-name">
+              <span aria-hidden="true" class="prov-glyph" title="dev mode">⊙</span>
+              <span class="dev-marker" aria-label="dev mode">[dev]</span>
+              my-experiment
+            </div>
+            <span class="plugin-card-version">local</span>
+            <div class="plugin-card-badges">
+              <span class="badge accent">
+                <span class="dot" aria-hidden="true"></span>dev mode
+              </span>
+            </div>
+          </header>
+
+          <div class="plugin-provenance">
+            <span class="prov-label">source</span>
+            <span class="prov-value">dev  ~/code/experiment</span>
+          </div>
+
+          <ul class="permission-list" role="list" aria-label="permission list">
+            <li class="permission-row" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">page:read_dom</span>
+            </li>
+            <li class="permission-row" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">storage:memory</span>
+            </li>
+            <li class="permission-row" role="listitem">
+              <span class="perm-dot" aria-hidden="true">•</span>
+              <span class="perm-requested">events:emit</span>
+            </li>
+          </ul>
+
+          <div class="plugin-last-used">
+            <span class="last-used-label">last used</span>
+            <span class="last-used-value">just now</span>
+          </div>
+
+          <footer class="plugin-actions" aria-label="plugin actions">
+            <button class="btn btn-ghost" aria-label="revoke all permissions for my-experiment" type="button">
+              revoke
+            </button>
+            <button class="btn btn-ghost" aria-label="reload my-experiment from disk" type="button">
+              reload
+            </button>
+            <button class="btn btn-ghost" aria-label="open settings for my-experiment" type="button">
+              settings
+            </button>
+          </footer>
+        </article>
+
+      </section>
+
+      <!-- ══════════════════════════════════════════════════════════════
+           Section 2: Network audit log (last 24 h)
+      ══════════════════════════════════════════════════════════════════ -->
+      <section class="integrity-section" aria-label="network audit log">
+        <div class="integrity-section-head">
+          <span class="section-label">
+            <span class="br">[</span>network audit log<span class="br">]</span>
+          </span>
+          <span class="section-count" aria-label="last 24 hours">last 24 h</span>
+        </div>
+
+        <div class="audit-summary" role="table" aria-label="network audit summary">
+          <div class="audit-row" role="row">
+            <span class="audit-actor" role="cell">adblock</span>
+            <span class="audit-count" role="cell">3,247</span>
+            <span class="audit-decision blocked" role="cell">blocked</span>
+            <span class="audit-detail" role="cell">easylist + uBlock origin filters</span>
+          </div>
+          <div class="audit-row" role="row">
+            <span class="audit-actor" role="cell">browser</span>
+            <span class="audit-count" role="cell">142</span>
+            <span class="audit-decision allowed" role="cell">allowed</span>
+            <span class="audit-detail" role="cell">
+              telemetry.example.com
+              (<a class="audit-action" href="#" aria-label="explain this request">explain</a>
+              |
+              <a class="audit-action" href="#" aria-label="block telemetry.example.com">block</a>)
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════════════════════════════════════════════════════
+           Section 3: Storage audit
+      ══════════════════════════════════════════════════════════════════ -->
+      <section class="integrity-section" aria-label="storage audit">
+        <div class="integrity-section-head">
+          <span class="section-label">
+            <span class="br">[</span>storage audit<span class="br">]</span>
+          </span>
+        </div>
+
+        <div class="storage-summary" role="table" aria-label="plugin storage usage">
+          <div class="storage-row" role="row">
+            <span class="storage-plugin" role="cell">adblock</span>
+            <span class="storage-size" role="cell">2.3 MB</span>
+            <div class="storage-bar-wrap" role="presentation" aria-hidden="true">
+              <div class="storage-bar" style="width: 92%"></div>
+            </div>
+            <span class="storage-label" role="cell">filter lists</span>
+          </div>
+          <div class="storage-row" role="row">
+            <span class="storage-plugin" role="cell">vim-mode</span>
+            <span class="storage-size" role="cell">12 KB</span>
+            <div class="storage-bar-wrap" role="presentation" aria-hidden="true">
+              <div class="storage-bar" style="width: 0.5%"></div>
+            </div>
+            <span class="storage-label" role="cell">config</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════════════════════════════════════════════════════
+           Section 4: Permission denials (last 7 d)
+      ══════════════════════════════════════════════════════════════════ -->
+      <section class="integrity-section" aria-label="permission denials">
+        <div class="integrity-section-head">
+          <span class="section-label">
+            <span class="br">[</span>permission denials<span class="br">]</span>
+          </span>
+          <span class="section-count" aria-label="last 7 days">last 7 d</span>
+        </div>
+
+        <div class="denial-list" role="table" aria-label="permission denial log">
+          <div class="denial-empty" role="row" aria-label="no denials recorded">
+            none
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /.integrity-panel -->
+
+  </body>
+</html>

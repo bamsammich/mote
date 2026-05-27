@@ -1,0 +1,440 @@
+/*
+ * approval-dialog.css — the permission-approval floating dialog.
+ *
+ * Rendered at plugin install time and on permission-expanding updates.
+ * Floating surface → shadow-2 per spec. Token-only. Both themes covered by
+ * semantic tokens. Composes button, badge, field, kbd from the component lib.
+ *
+ * Layout:
+ *   .approval-backdrop        full-screen dimming layer
+ *   .approval-dialog          the floating surface (centered, max-width)
+ *   .approval-header          plugin name + source + version badge
+ *   .danger-warning-list      dangerous-combination warnings (ABOVE permission list, DISCIPLINES §4)
+ *   .approval-permissions     the per-permission narrowing list
+ *   .perm-entry               one narrowable permission
+ *   .narrow-modes             radio group: grant fully / grant on origins / deny
+ *   .origin-editor            inline glob-pattern editor (grant-on-origins mode)
+ *   .approval-footer          install + decline keycaps
+ */
+
+/* ---- Backdrop ---- */
+
+.approval-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Semi-transparent ink wash for dusk; vellum uses a lighter tint via tokens */
+  background: rgba(14, 12, 10, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 900;
+}
+
+[data-theme="vellum"] .approval-backdrop {
+  background: rgba(20, 17, 15, 0.35);
+}
+
+/* ---- Dialog surface ---- */
+
+.approval-dialog {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3);
+  box-shadow: var(--shadow-2);
+  width: min(640px, calc(100vw - var(--space-7)));
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- Header ---- */
+
+.approval-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.approval-header-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.approval-plugin-name {
+  font: var(--text-h3);
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+}
+
+.approval-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.approval-source {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  word-break: break-all;
+}
+
+/* Update badge — "update" or "install" */
+.approval-install-label {
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+  text-transform: lowercase;
+}
+
+/* ---- Scrollable body ---- */
+
+.approval-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+}
+
+/* ---- Dangerous-combination warnings (DISCIPLINES §4, above permission list) ---- */
+
+.danger-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.danger-warning-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--text-mono-sm);
+  font-weight: 500;
+  color: var(--danger);
+  text-transform: lowercase;
+}
+
+.danger-warning-head .warn-icon {
+  /* Lucide triangle-alert 16px stroke-only inline SVG */
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.danger-warning-entry {
+  background: var(--surface-sunk);
+  border: 1px solid rgba(200, 74, 44, 0.3);
+  border-left-width: 2px;
+  border-left-color: var(--danger);
+  border-radius: var(--radius-1);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-small);
+  color: var(--fg-1);
+  line-height: 1.5;
+}
+
+/* ---- Permission list section header ---- */
+
+.permissions-head {
+  font: var(--text-mono-sm);
+  font-weight: 500;
+  color: var(--fg-2);
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+}
+
+/* ---- Per-permission entry ---- */
+
+.approval-permissions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.perm-entry {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  overflow: hidden;
+}
+
+/* High-risk permissions get a left-edge danger tint */
+.perm-entry.is-high-risk {
+  border-left: 2px solid rgba(200, 74, 44, 0.5);
+}
+
+/* New permissions in an update get an accent left edge */
+.perm-entry.is-new {
+  border-left: 2px solid var(--accent);
+}
+
+/* ---- Permission entry header ---- */
+
+.perm-entry-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-sunk);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.perm-domain {
+  font: var(--text-mono-sm);
+  font-weight: 500;
+  color: var(--fg-1);
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.perm-scope-tag {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  padding: 1px 5px;
+  flex: none;
+}
+
+/* High-risk warning badge on the permission header */
+.perm-risk-badge {
+  flex: none;
+}
+
+/* "new" marker for update dialogs */
+.perm-new-marker {
+  font: var(--text-mono-sm);
+  color: var(--accent);
+  flex: none;
+}
+
+/* ---- Description ---- */
+
+.perm-desc {
+  font: var(--text-small);
+  color: var(--fg-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  line-height: 1.5;
+}
+
+/* ---- Narrowing modes radio group ---- */
+
+.narrow-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.narrow-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--dur-micro) var(--ease-out);
+}
+
+.narrow-mode-option:last-child {
+  border-bottom: none;
+}
+
+.narrow-mode-option:hover {
+  background: var(--surface-2);
+}
+
+/* Custom radio button: circle, accent-filled when selected */
+.narrow-mode-radio {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-sunk);
+  flex: none;
+  margin-top: 2px;
+  position: relative;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition:
+    border-color var(--dur-micro) var(--ease-out),
+    background var(--dur-micro) var(--ease-out);
+}
+
+.narrow-mode-radio:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* Inner dot via ::after */
+.narrow-mode-radio:checked::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-on);
+}
+
+.narrow-mode-radio:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.narrow-mode-label {
+  flex: 1;
+  font: var(--text-small);
+  color: var(--fg);
+  line-height: 1.4;
+}
+
+.narrow-mode-label .mode-hint {
+  color: var(--fg-2);
+  font: var(--text-mono-sm);
+  display: block;
+  margin-top: 1px;
+}
+
+/* Deny mode label gets a danger tint */
+.narrow-mode-option.is-deny .narrow-mode-label {
+  color: var(--danger);
+}
+
+/* ---- Origin glob editor (grant-on-origins mode) ---- */
+
+.origin-editor {
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--surface-sunk);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Hidden when the parent mode is not GrantOrigins */
+.origin-editor[hidden] {
+  display: none;
+}
+
+.origin-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.origin-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.origin-entry input {
+  flex: 1;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: var(--radius-1);
+  padding: 4px 8px;
+  font: var(--text-mono-sm);
+  min-width: 0;
+}
+
+.origin-entry input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+/* Remove-origin button: [×] */
+.origin-remove {
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-1);
+  padding: 2px 5px;
+  cursor: pointer;
+  line-height: 1;
+  flex: none;
+  transition:
+    color var(--dur-micro) var(--ease-out),
+    border-color var(--dur-micro) var(--ease-out),
+    border-bottom-width var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+}
+
+.origin-remove:hover {
+  color: var(--danger);
+  border-color: rgba(200, 74, 44, 0.4);
+}
+
+.origin-remove:active {
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+
+/* [+ add another origin] button */
+.origin-add {
+  align-self: flex-start;
+  font: var(--text-mono-sm);
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid rgba(224, 164, 88, 0.35);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-1);
+  padding: 3px 8px;
+  cursor: pointer;
+  transition:
+    background var(--dur-micro) var(--ease-out),
+    border-bottom-width var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+}
+
+.origin-add:hover {
+  background: rgba(224, 164, 88, 0.06);
+}
+
+.origin-add:active {
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+
+.origin-add:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---- Footer: install / decline ---- */
+
+.approval-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Keyboard shortcut hint next to the buttons */
+.approval-footer .kbd-hint {
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+}

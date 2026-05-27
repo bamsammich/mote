@@ -30,6 +30,7 @@
 mod compositor;
 mod element;
 mod host;
+pub mod integrity;
 mod layout;
 mod slot;
 mod token;
@@ -37,6 +38,11 @@ mod token;
 pub use compositor::{Compositor, CompositorError, PixelFormat, ViewportRect};
 pub use element::{Element, ElementKind, ElementRef, RefSelector};
 pub use host::{Node, UiHost};
+pub use integrity::{
+    ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
+    NarrowMode, NarrowablePermission, PermissionRow, PluginAction, PluginKind, PluginRow,
+    StorageRow,
+};
 pub use layout::Layout;
 pub use slot::{Edge, Slot};
 pub use token::{
@@ -56,6 +62,16 @@ pub const CHROME_HTML: &str = include_str!("../chrome/chrome.html");
 /// structured `window.mote.invoke` API and wires the omnibox `navigate` op.
 pub const HOST_JS: &str = include_str!("../chrome/host.js");
 
+/// The integrity panel HTML (About → Browser Integrity), pre-rendered with
+/// sample data. The shell replaces the sample content with live data at runtime
+/// via the host bridge.
+pub const INTEGRITY_PANEL_HTML: &str = include_str!("../chrome/integrity-panel.html");
+
+/// The permission-approval dialog HTML, pre-rendered with sample data. The
+/// shell replaces the sample content with the real [`ApprovalRequest`] at
+/// runtime via the host bridge.
+pub const APPROVAL_DIALOG_HTML: &str = include_str!("../chrome/approval-dialog.html");
+
 /// Per-component stylesheets, paired `(name, css)`, in load order.
 pub const COMPONENT_CSS: &[(&str, &str)] = &[
     ("kbd", include_str!("../chrome/components/kbd.css")),
@@ -74,6 +90,14 @@ pub const COMPONENT_CSS: &[(&str, &str)] = &[
     (
         "empty-slot",
         include_str!("../chrome/components/empty-slot.css"),
+    ),
+    (
+        "integrity-panel",
+        include_str!("../chrome/components/integrity-panel.css"),
+    ),
+    (
+        "approval-dialog",
+        include_str!("../chrome/components/approval-dialog.css"),
     ),
 ];
 
@@ -369,9 +393,161 @@ mod tests {
             "palette",
             "sidebar",
             "empty-slot",
+            "integrity-panel",
+            "approval-dialog",
         ] {
             assert!(names.contains(&want), "missing component css: {want}");
         }
+    }
+
+    // ---- Integrity panel + approval dialog chrome surfaces ----
+
+    #[test]
+    fn integrity_panel_html_declares_both_themes_via_tokens() {
+        // The panel HTML links tokens.css (which has both themes).
+        assert!(INTEGRITY_PANEL_HTML.contains("tokens.css"));
+        // Root data-theme is dusk (default boot theme).
+        assert!(INTEGRITY_PANEL_HTML.contains("data-theme=\"dusk\""));
+        // Both themes are covered by tokens.css — assert the link is present.
+        assert!(TOKENS_CSS.contains("[data-theme=\"vellum\"]"));
+    }
+
+    #[test]
+    fn integrity_panel_html_has_all_four_sections() {
+        for section in [
+            "active plugins",
+            "network audit log",
+            "storage audit",
+            "permission denials",
+        ] {
+            assert!(
+                INTEGRITY_PANEL_HTML.contains(section),
+                "integrity-panel.html missing section: {section}"
+            );
+        }
+    }
+
+    #[test]
+    fn integrity_panel_html_uses_lockup_pattern() {
+        // The [integrity] lockup and section lockups must be present.
+        assert!(
+            INTEGRITY_PANEL_HTML.contains("[integrity]")
+                || INTEGRITY_PANEL_HTML.contains("integrity-header")
+        );
+        // Lockup bracket spans use the class pattern from base.css.
+        assert!(INTEGRITY_PANEL_HTML.contains("class=\"br\""));
+        assert!(INTEGRITY_PANEL_HTML.contains("class=\"name\""));
+    }
+
+    #[test]
+    fn integrity_panel_html_has_no_ai_surfaces() {
+        // ADR-0002: no built-in AI surfaces.
+        assert!(!INTEGRITY_PANEL_HTML.contains("[ask]"));
+        assert!(!INTEGRITY_PANEL_HTML.contains("aria-label=\"assistant\""));
+        assert!(!INTEGRITY_PANEL_HTML.contains("✨"));
+    }
+
+    #[test]
+    fn integrity_panel_html_uses_token_only_css() {
+        // The panel CSS must not contain raw hex literals.
+        // (The CSS file is included in COMPONENT_CSS; check via the bundle.)
+        let integrity_css = COMPONENT_CSS
+            .iter()
+            .find(|(n, _)| *n == "integrity-panel")
+            .map(|(_, css)| *css)
+            .expect("integrity-panel css missing from COMPONENT_CSS");
+        // No raw hex colors — only var(--…).
+        let hex_re = integrity_css
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("/*") && !l.trim_start().starts_with('*'))
+            .any(|l| {
+                // Allow rgba() with numeric literals (they reference the palette
+                // scale values, which are in rgba() wrappers matching the
+                // existing pattern from badge.css / card.css — accepted by design).
+                // Flag bare #xxxxxx hex values only.
+                let without_comments = l.split("/*").next().unwrap_or(l);
+                without_comments.contains('#') && !without_comments.contains("var(--")
+            });
+        assert!(
+            !hex_re,
+            "integrity-panel.css contains raw hex values outside var(--…)"
+        );
+    }
+
+    #[test]
+    fn approval_dialog_html_declares_danger_warnings_above_permissions() {
+        // DISCIPLINES §4: dangerous combinations surfaced ABOVE per-permission list.
+        let danger_pos = APPROVAL_DIALOG_HTML
+            .find("danger-warning-list")
+            .expect("approval-dialog.html missing danger-warning-list");
+        let perms_pos = APPROVAL_DIALOG_HTML
+            .find("approval-permissions")
+            .expect("approval-dialog.html missing approval-permissions");
+        assert!(
+            danger_pos < perms_pos,
+            "danger-warning-list must appear before approval-permissions in the DOM"
+        );
+    }
+
+    #[test]
+    fn approval_dialog_html_has_three_narrowing_modes() {
+        // The dialog must render grant-fully, grant-on-origins, deny modes.
+        assert!(APPROVAL_DIALOG_HTML.contains("grant fully"));
+        assert!(APPROVAL_DIALOG_HTML.contains("grant on specific origins"));
+        assert!(APPROVAL_DIALOG_HTML.contains("deny"));
+        // Origin editor for the narrowable permission.
+        assert!(APPROVAL_DIALOG_HTML.contains("origin-editor"));
+        assert!(APPROVAL_DIALOG_HTML.contains("add another origin"));
+    }
+
+    #[test]
+    fn approval_dialog_html_has_keycap_footer() {
+        // install + decline keycap buttons.
+        assert!(APPROVAL_DIALOG_HTML.contains("install plugin"));
+        assert!(APPROVAL_DIALOG_HTML.contains("decline"));
+        // Keyboard shortcut hints.
+        assert!(APPROVAL_DIALOG_HTML.contains("<kbd>"));
+    }
+
+    #[test]
+    fn approval_dialog_html_has_no_ai_surfaces() {
+        assert!(!APPROVAL_DIALOG_HTML.contains("[ask]"));
+        assert!(!APPROVAL_DIALOG_HTML.contains("aria-label=\"assistant\""));
+    }
+
+    #[test]
+    fn approval_dialog_css_uses_shadow_2_on_dialog() {
+        let css = COMPONENT_CSS
+            .iter()
+            .find(|(n, _)| *n == "approval-dialog")
+            .map(|(_, css)| *css)
+            .expect("approval-dialog css missing");
+        // Floating surface must use shadow-2 (spec: shadows only on floating surfaces).
+        assert!(
+            css.contains("var(--shadow-2)"),
+            "approval-dialog.css must use var(--shadow-2) on the floating surface"
+        );
+        // Inline elements must NOT have shadows (enforced by absence of
+        // shadow on perm-entry).
+        assert!(
+            !css.contains(".perm-entry {")
+                || !css
+                    .split(".perm-entry {")
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('}')
+                    .next()
+                    .unwrap_or("")
+                    .contains("box-shadow"),
+            "perm-entry (inline) must not have box-shadow"
+        );
+    }
+
+    #[test]
+    fn integrity_and_approval_assets_are_exposed_as_constants() {
+        // Both HTML surfaces must be reachable as &'static str constants.
+        assert!(!INTEGRITY_PANEL_HTML.is_empty());
+        assert!(!APPROVAL_DIALOG_HTML.is_empty());
     }
 
     // ---- UiHost seam (in-memory implementor) ----

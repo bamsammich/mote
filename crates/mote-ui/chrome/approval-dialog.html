@@ -1,0 +1,417 @@
+<!doctype html>
+<!--
+  approval-dialog.html — permission-approval dialog chrome surface.
+
+  Rendered at plugin install time and on permission-expanding updates.
+  Populated from ApprovalRequest::sample() data.
+
+  Component composition:
+    .approval-backdrop      overlay dimming
+    .approval-dialog        floating surface: shadow-2, radius-3
+    .danger-warning-list    dangerous-combination warnings (DISCIPLINES §4, ABOVE permission list)
+    .perm-entry             per-permission card with narrowing radio group
+    .narrow-modes           grant-fully / grant-on-origins / deny
+    .origin-editor          inline glob-pattern editor
+    .btn                    keycap install / decline buttons
+    kbd                     keyboard shortcut hints in footer
+
+  No shadows on permission-entry rows (inline). Dialog surface uses shadow-2.
+  Lowercase labels. No emoji. No AI surfaces.
+-->
+<html lang="en" data-theme="dusk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>install plugin — mote</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="components/kbd.css" />
+    <link rel="stylesheet" href="components/button.css" />
+    <link rel="stylesheet" href="components/field.css" />
+    <link rel="stylesheet" href="components/badge.css" />
+    <link rel="stylesheet" href="components/approval-dialog.css" />
+    <style>
+      body {
+        background: var(--bg);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--space-4);
+      }
+    </style>
+  </head>
+  <body>
+
+    <!--
+      The backdrop is normally `position: fixed; inset: 0` inside the chrome
+      document. Here it is shown inline so the standalone HTML is reviewable.
+    -->
+    <div
+      class="approval-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="approval-dialog-title"
+      style="position: relative; inset: auto; background: none;"
+    >
+      <div class="approval-dialog">
+
+        <!-- ── Header ── -->
+        <header class="approval-header">
+          <div class="approval-header-top">
+            <h2 class="approval-plugin-name" id="approval-dialog-title">
+              frontend-introspection-mcp
+            </h2>
+            <span class="badge" aria-label="install">install</span>
+          </div>
+          <div class="approval-header-meta">
+            <span class="approval-source">
+              github:mote-browser/frontend-introspection-mcp @ a1b2c3d4e5f6
+            </span>
+            <span class="badge">v0.3.0</span>
+          </div>
+        </header>
+
+        <!-- ── Body ── -->
+        <div class="approval-body">
+
+          <!-- ════════════════════════════════════════════════════════
+               Dangerous-combination warnings — ABOVE the permission list
+               (DISCIPLINES §4: "surfaces dangerous combinations explicitly,
+               above the per-permission list")
+          ════════════════════════════════════════════════════════════ -->
+          <div class="danger-warning-list" aria-label="dangerous permission combinations">
+            <div class="danger-warning-head">
+              <!-- Lucide triangle-alert 16px inline SVG, stroke-only -->
+              <svg
+                class="warn-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+                <path d="M12 9v4"/>
+                <path d="M12 17h.01"/>
+              </svg>
+              dangerous combinations detected
+            </div>
+
+            <div class="danger-warning-entry" role="alert">
+              page:read_dom + mcp:server — external agents can read page content
+              from any tab via mcp
+            </div>
+            <div class="danger-warning-entry" role="alert">
+              introspect:network_history + mcp:server — full network history
+              (including auth tokens in headers) is reachable from external mcp clients
+            </div>
+          </div>
+
+          <!-- ════════════════════════════════════════════════════════
+               Per-permission narrowing list
+          ════════════════════════════════════════════════════════════ -->
+          <div class="permissions-head">permissions requested</div>
+
+          <div class="approval-permissions" role="list" aria-label="permissions to approve">
+
+            <!-- ── Permission 1: mcp:server:bind_loopback ── -->
+            <div class="perm-entry" role="listitem" aria-label="mcp:server:bind_loopback">
+              <div class="perm-entry-head">
+                <span class="perm-domain">mcp:server:bind_loopback</span>
+              </div>
+              <p class="perm-desc">
+                exposes an mcp endpoint on localhost only
+              </p>
+              <div class="narrow-modes" role="radiogroup" aria-label="grant mode for mcp:server:bind_loopback">
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-0"
+                    value="full"
+                    checked
+                    aria-label="grant fully"
+                  />
+                  <span class="narrow-mode-label">
+                    grant fully
+                    <span class="mode-hint">as declared in the manifest</span>
+                  </span>
+                </label>
+                <label class="narrow-mode-option is-deny">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-0"
+                    value="deny"
+                    aria-label="deny"
+                  />
+                  <span class="narrow-mode-label">deny</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ── Permission 2: tabs:list ── -->
+            <div class="perm-entry" role="listitem" aria-label="tabs:list">
+              <div class="perm-entry-head">
+                <span class="perm-domain">tabs:list</span>
+              </div>
+              <p class="perm-desc">
+                read the list of open tabs in the current workspace
+              </p>
+              <div class="narrow-modes" role="radiogroup" aria-label="grant mode for tabs:list">
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-1"
+                    value="full"
+                    checked
+                    aria-label="grant fully"
+                  />
+                  <span class="narrow-mode-label">
+                    grant fully
+                  </span>
+                </label>
+                <label class="narrow-mode-option is-deny">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-1"
+                    value="deny"
+                    aria-label="deny"
+                  />
+                  <span class="narrow-mode-label">deny</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ── Permission 3: page:read_dom (high risk) ── -->
+            <div class="perm-entry is-high-risk" role="listitem" aria-label="page:read_dom — high risk">
+              <div class="perm-entry-head">
+                <span class="perm-domain">page:read_dom</span>
+                <span class="perm-risk-badge">
+                  <span class="badge danger">high risk</span>
+                </span>
+              </div>
+              <p class="perm-desc">
+                read the dom tree of any open page
+              </p>
+              <div class="narrow-modes" role="radiogroup" aria-label="grant mode for page:read_dom">
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-2"
+                    value="full"
+                    checked
+                    aria-label="grant fully"
+                  />
+                  <span class="narrow-mode-label">grant fully</span>
+                </label>
+                <label class="narrow-mode-option is-deny">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-2"
+                    value="deny"
+                    aria-label="deny"
+                  />
+                  <span class="narrow-mode-label">deny</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ── Permission 4: page:inject_script:* (narrowable + high risk) ── -->
+            <div class="perm-entry is-high-risk" role="listitem" aria-label="page:inject_script — narrowable">
+              <div class="perm-entry-head">
+                <span class="perm-domain">page:inject_script</span>
+                <span class="perm-scope-tag">requested: *</span>
+                <span class="perm-risk-badge">
+                  <span class="badge danger">high risk</span>
+                </span>
+              </div>
+              <p class="perm-desc">
+                run scripts in web pages — grant on specific origins to narrow
+              </p>
+              <div class="narrow-modes" role="radiogroup" aria-label="grant mode for page:inject_script">
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-3"
+                    value="full"
+                    aria-label="grant fully — any page"
+                  />
+                  <span class="narrow-mode-label">
+                    grant fully
+                    <span class="mode-hint">any page (*)</span>
+                  </span>
+                </label>
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-3"
+                    value="origins"
+                    checked
+                    aria-label="grant on specific origins"
+                    aria-controls="origin-editor-3"
+                    aria-expanded="true"
+                  />
+                  <span class="narrow-mode-label">
+                    grant on specific origins
+                  </span>
+                </label>
+                <label class="narrow-mode-option is-deny">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-3"
+                    value="deny"
+                    aria-label="deny"
+                  />
+                  <span class="narrow-mode-label">deny</span>
+                </label>
+              </div>
+
+              <!-- Inline origin editor — visible when "grant on specific origins" is selected -->
+              <div
+                class="origin-editor"
+                id="origin-editor-3"
+                aria-label="origin patterns for page:inject_script"
+              >
+                <div class="origin-list" role="list" aria-label="allowed origins">
+                  <div class="origin-entry" role="listitem">
+                    <input
+                      type="text"
+                      value="https://localhost/*"
+                      aria-label="origin pattern 1"
+                      placeholder="https://example.com/*"
+                    />
+                    <button
+                      class="origin-remove"
+                      type="button"
+                      aria-label="remove https://localhost/*"
+                    >×</button>
+                  </div>
+                  <div class="origin-entry" role="listitem">
+                    <input
+                      type="text"
+                      value="https://staging.example.com/*"
+                      aria-label="origin pattern 2"
+                      placeholder="https://example.com/*"
+                    />
+                    <button
+                      class="origin-remove"
+                      type="button"
+                      aria-label="remove https://staging.example.com/*"
+                    >×</button>
+                  </div>
+                </div>
+                <button class="origin-add" type="button" aria-label="add another origin pattern">
+                  + add another origin
+                </button>
+              </div>
+            </div>
+
+            <!-- ── Permission 5: introspect:accessibility_tree (high risk) ── -->
+            <div class="perm-entry is-high-risk" role="listitem" aria-label="introspect:accessibility_tree — high risk">
+              <div class="perm-entry-head">
+                <span class="perm-domain">introspect:accessibility_tree</span>
+                <span class="perm-risk-badge">
+                  <span class="badge danger">high risk</span>
+                </span>
+              </div>
+              <p class="perm-desc">
+                read the full accessibility tree of any page
+              </p>
+              <div class="narrow-modes" role="radiogroup" aria-label="grant mode for introspect:accessibility_tree">
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-4"
+                    value="full"
+                    checked
+                    aria-label="grant fully"
+                  />
+                  <span class="narrow-mode-label">grant fully</span>
+                </label>
+                <label class="narrow-mode-option is-deny">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-4"
+                    value="deny"
+                    aria-label="deny"
+                  />
+                  <span class="narrow-mode-label">deny</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ── Permission 6: introspect:network_history (high risk) ── -->
+            <div class="perm-entry is-high-risk" role="listitem" aria-label="introspect:network_history — high risk">
+              <div class="perm-entry-head">
+                <span class="perm-domain">introspect:network_history</span>
+                <span class="perm-risk-badge">
+                  <span class="badge danger">high risk</span>
+                </span>
+              </div>
+              <p class="perm-desc">
+                read full network request/response history including bodies
+              </p>
+              <div class="narrow-modes" role="radiogroup" aria-label="grant mode for introspect:network_history">
+                <label class="narrow-mode-option">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-5"
+                    value="full"
+                    checked
+                    aria-label="grant fully"
+                  />
+                  <span class="narrow-mode-label">grant fully</span>
+                </label>
+                <label class="narrow-mode-option is-deny">
+                  <input
+                    class="narrow-mode-radio"
+                    type="radio"
+                    name="perm-5"
+                    value="deny"
+                    aria-label="deny"
+                  />
+                  <span class="narrow-mode-label">deny</span>
+                </label>
+              </div>
+            </div>
+
+          </div><!-- /.approval-permissions -->
+
+        </div><!-- /.approval-body -->
+
+        <!-- ── Footer: install / decline keycaps ── -->
+        <footer class="approval-footer">
+          <div class="kbd-hint" aria-label="keyboard shortcuts">
+            <kbd>⎋</kbd>
+            <span>decline</span>
+            <span style="margin-left: var(--space-2); margin-right: var(--space-2); color: var(--fg-3)">·</span>
+            <kbd>⏎</kbd>
+            <span>install</span>
+          </div>
+          <button class="btn btn-ghost" type="button" aria-label="decline installation">
+            decline
+          </button>
+          <button class="btn btn-primary" type="button" aria-label="install plugin with approved permissions">
+            install plugin
+          </button>
+        </footer>
+
+      </div><!-- /.approval-dialog -->
+    </div><!-- /.approval-backdrop -->
+
+  </body>
+</html>

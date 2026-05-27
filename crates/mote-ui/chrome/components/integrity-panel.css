@@ -1,0 +1,476 @@
+/*
+ * integrity-panel.css — the [integrity] chrome surface.
+ *
+ * Runtime-owned (not a plugin). Composes card, badge, button, kbd, field from
+ * the component library. Token-only; both themes (dusk + vellum) are covered
+ * by the semantic tokens. No shadows on inline cards. Floating surfaces (scope
+ * editor) use --shadow-2 per spec.
+ *
+ * Layout:
+ *   .integrity-panel          full-panel scroll container
+ *   .integrity-header         [integrity] lockup + subhead
+ *   .integrity-section        named section (plugins / network / storage / denials)
+ *   .plugin-card              extends .card; adds provenance + actions row
+ *   .permission-list          permissions requested→effective within a card
+ *   .audit-summary            network audit table
+ *   .storage-summary          storage accounting rows
+ *   .denial-list              permission-denial entries
+ */
+
+/* ---- Panel container ---- */
+
+.integrity-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-7);
+  max-width: 780px;
+  margin: 0 auto;
+  overflow-y: auto;
+}
+
+/* ---- Header: [integrity] lockup ---- */
+
+.integrity-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.integrity-header .heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+/* [integrity] uses the standard lockup pattern: mono brackets in --accent */
+.integrity-header .lockup {
+  font: var(--text-h2);
+  font-family: var(--font-mono);
+}
+
+.integrity-header .subhead {
+  font: var(--text-small);
+  color: var(--fg-2);
+}
+
+/* ---- Section: named group (plugins / network / storage / denials) ---- */
+
+.integrity-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.integrity-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Section label uses lockup pattern: [plugins] [network audit] etc. */
+.integrity-section-head .section-label {
+  font: var(--text-mono-sm);
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: var(--tracking-mono);
+  color: var(--fg-1);
+}
+
+.integrity-section-head .section-label .br {
+  color: var(--accent);
+}
+
+.integrity-section-head .section-count {
+  margin-left: auto;
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+}
+
+/* ---- Plugin card: extends .card ---- */
+
+.plugin-card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Dev-mode plugins get an accent-tinted border */
+.plugin-card.is-dev {
+  border-color: rgba(224, 164, 88, 0.4);
+}
+
+/* Checksum-mismatch: danger border */
+.plugin-card.is-mismatch {
+  border-color: var(--danger);
+}
+
+/* ---- Plugin card: header row ---- */
+
+.plugin-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.plugin-card-name {
+  font: var(--text-h3);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* [dev] prefix for dev-mode plugins */
+.plugin-card-name .dev-marker {
+  font: var(--text-mono-sm);
+  color: var(--accent);
+}
+
+.plugin-card-version {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+}
+
+.plugin-card-badges {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* ---- Provenance row ---- */
+
+.plugin-provenance {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+}
+
+.plugin-provenance .prov-label {
+  color: var(--fg-3);
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+}
+
+.plugin-provenance .prov-value {
+  color: var(--fg-1);
+  word-break: break-all;
+}
+
+/* ---- Fulfills / consumes rows ---- */
+
+.plugin-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font: var(--text-small);
+  color: var(--fg-2);
+  align-items: center;
+}
+
+.plugin-meta-row .meta-label {
+  color: var(--fg-3);
+  font: var(--text-mono-sm);
+  text-transform: lowercase;
+  min-width: 56px;
+}
+
+.plugin-meta-row .capability-tag {
+  font: var(--text-mono-sm);
+  color: var(--fg-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  padding: 1px 6px;
+}
+
+/* ---- Permission list ---- */
+
+.permission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+}
+
+.permission-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-mono-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.permission-row:last-child {
+  border-bottom: none;
+}
+
+.permission-row:nth-child(even) {
+  background: var(--surface-sunk);
+}
+
+/* Bullet glyph */
+.permission-row .perm-dot {
+  color: var(--fg-3);
+  flex: none;
+}
+
+.permission-row .perm-requested {
+  color: var(--fg-1);
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* Arrow + narrowed effective scope */
+.permission-row .perm-arrow {
+  color: var(--fg-3);
+  flex: none;
+}
+
+.permission-row .perm-effective {
+  color: var(--accent);
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* High-risk permissions get a danger tint on the dot */
+.permission-row.is-high-risk .perm-dot {
+  color: var(--danger);
+}
+
+/* Denied permissions */
+.permission-row.is-denied .perm-requested {
+  color: var(--fg-3);
+  text-decoration: line-through;
+}
+
+/* ---- Last-used timestamp ---- */
+
+.plugin-last-used {
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+}
+
+.plugin-last-used .last-used-label {
+  color: var(--fg-3);
+}
+
+.plugin-last-used .last-used-value {
+  color: var(--fg-2);
+}
+
+/* ---- Plugin actions row: keycap buttons ---- */
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: var(--space-1);
+}
+
+/* Compact button variant for inline action rows */
+.plugin-actions .btn {
+  height: 26px;
+  padding: 0 10px;
+  font: var(--text-micro);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* ---- Network audit summary ---- */
+
+.audit-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+}
+
+.audit-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-mono-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.audit-row:last-child {
+  border-bottom: none;
+}
+
+.audit-row:nth-child(even) {
+  background: var(--surface-sunk);
+}
+
+.audit-actor {
+  color: var(--fg-1);
+  font-weight: 500;
+  min-width: 140px;
+}
+
+.audit-count {
+  color: var(--fg);
+  font-weight: 600;
+  min-width: 60px;
+}
+
+.audit-decision {
+  min-width: 60px;
+}
+
+.audit-decision.blocked {
+  color: var(--danger);
+}
+
+.audit-decision.allowed {
+  color: var(--fg-2);
+}
+
+.audit-decision.modified {
+  color: var(--accent);
+}
+
+.audit-detail {
+  color: var(--fg-3);
+  flex: 1;
+}
+
+/* Inline action links in audit detail (explain | block) */
+.audit-detail .audit-action {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.audit-detail .audit-action:hover {
+  text-decoration: underline;
+}
+
+/* ---- Storage summary ---- */
+
+.storage-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+}
+
+.storage-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-mono-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.storage-row:last-child {
+  border-bottom: none;
+}
+
+.storage-row:nth-child(even) {
+  background: var(--surface-sunk);
+}
+
+.storage-plugin {
+  color: var(--fg-1);
+  font-weight: 500;
+  min-width: 160px;
+}
+
+.storage-size {
+  color: var(--fg);
+  font-weight: 600;
+  min-width: 64px;
+}
+
+.storage-bar-wrap {
+  flex: 1;
+  height: 4px;
+  background: var(--surface-3);
+  border-radius: var(--radius-dot);
+  overflow: hidden;
+}
+
+.storage-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-dot);
+  transition: width var(--dur-base) var(--ease-out);
+}
+
+.storage-label {
+  color: var(--fg-3);
+  min-width: 80px;
+}
+
+/* ---- Permission denials ---- */
+
+.denial-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+}
+
+.denial-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-mono-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.denial-row:last-child {
+  border-bottom: none;
+}
+
+.denial-plugin {
+  color: var(--danger);
+  font-weight: 500;
+  min-width: 140px;
+}
+
+.denial-permission {
+  color: var(--fg-1);
+  flex: 1;
+}
+
+.denial-when {
+  color: var(--fg-3);
+}
+
+/* Empty state for denial list */
+.denial-empty {
+  padding: var(--space-3);
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+  text-align: center;
+}
