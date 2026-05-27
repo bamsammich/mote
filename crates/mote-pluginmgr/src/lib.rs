@@ -31,6 +31,7 @@ pub mod dirhash;
 pub mod fetch;
 pub mod lock;
 pub mod managed;
+pub mod resolve;
 pub mod source;
 
 pub use approval_store::{ApprovalStore, ApprovalStoreError};
@@ -41,4 +42,5 @@ pub use dirhash::{DirHashError, hash_dir};
 pub use fetch::{FetchError, Fetched, fetch};
 pub use lock::{LockEntry, LockError, LockFile};
 pub use managed::{ManagedEntry, ManagedError, ManagedFile};
+pub use resolve::{PluginSpec, PluginSpecSet, ResolveError, compose, load_order};
 pub use source::{Source, SourceParseError};

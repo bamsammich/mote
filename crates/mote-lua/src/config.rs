@@ -77,20 +77,24 @@ impl UpdateCadence {
     }
 }
 
-/// A single plugin declared in `plugins.lua`.
+/// A single plugin declared in `plugins.lua` or `managed.lua`.
 ///
-/// The `key` is the Lua identifier the user chose (verbatim, with underscores
-/// if the user wrote them). Per R4 (03-risks.md), the key is cosmetic; the
-/// authoritative `PluginName` comes from the plugin's `M.manifest.name` and is
-/// resolved later by `mote-pluginmgr`.
+/// The `key` **is** the plugin's canonical `PluginName` (ADR-0006 / R4 —
+/// resolved Option 2): `plugins.lua` keys must be valid quoted hyphenated
+/// `PluginName`s (e.g. `["vim-mode"] = {…}`). The key is the authoritative
+/// identity; it is validated into a [`mote_types::PluginName`] by
+/// `mote-pluginmgr::compose` so this crate remains free of the validation
+/// dependency. At sync, `mote-pluginmgr` confirms the key matches the resolved
+/// manifest name (DESIGN §Manifest and lock file).
 ///
 /// `source` is the **raw, unparsed** source string exactly as written by the
 /// user. Parsing into a `Source` enum (e.g. `github:`, `path:`, `bundled`) is
 /// the responsibility of `mote-pluginmgr::Source::parse`, not this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginEntry {
-    /// The Lua key the user used in `mote.plugins({ <key> = … })`. Cosmetic;
-    /// the manifest name is authoritative for all downstream operations.
+    /// The quoted `plugins.lua` key — a valid `PluginName` (lowercase
+    /// hyphenated identifier). Validated by `mote-pluginmgr::compose`
+    /// (ADR-0006 / R4: the key is the canonical plugin identity, not cosmetic).
     pub key: String,
     /// The raw source string, e.g. `"github:mote-browser/adblock"`,
     /// `"path:~/code/my-plugin"`, `"bundled"`.
