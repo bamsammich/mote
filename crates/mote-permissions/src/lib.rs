@@ -11,6 +11,11 @@
 //! - **Narrowing** — [`GrantSet::narrow`] turns a requested `*`-scope into the
 //!   user-approved union of narrower patterns (DESIGN §User narrowing at install
 //!   time).
+//! - **Resource normalization** — [`normalize_resource`] converts a raw
+//!   operation resource (typically a full URL) into the **canonical form** the
+//!   gatekeeper matches against, per domain.  The runtime MUST call this before
+//!   every [`Gatekeeper::check`] to prevent substring-evasion attacks (e.g.
+//!   `https://attacker.com/x.bank.com/y` must NOT satisfy `!*.bank.com`).
 //! - **Gatekeeper** — the [`Gatekeeper`] trait is the enforcement seam the
 //!   runtime queries: "does this plugin's grant set permit
 //!   `domain:action:resource`?"
@@ -44,9 +49,11 @@
 mod error;
 mod gatekeeper;
 mod grant;
+mod normalize;
 mod permission;
 
 pub use error::PermissionParseError;
 pub use gatekeeper::{Decision, Gatekeeper, GrantSetGatekeeper};
 pub use grant::{EffectiveGrants, GrantSet, GrantSetBuilder};
+pub use normalize::{NormalizeError, normalize_resource};
 pub use permission::Permission;

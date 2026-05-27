@@ -2017,6 +2017,7 @@ version = "0.0.0"
 dependencies = [
  "mote-types",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -2070,6 +2071,9 @@ name = "mote-shell"
 version = "0.0.0"
 dependencies = [
  "mote-cef",
+ "mote-session",
+ "mote-storage",
+ "mote-types",
  "mote-ui",
  "raw-window-handle",
  "winit",

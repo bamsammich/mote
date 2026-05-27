@@ -15,3 +15,6 @@ workspace = true
 [dependencies]
 mote-types = { path = "../mote-types" }
 thiserror = { workspace = true }
+# URL parsing for resource normalization (normalize_resource). Only used in
+# mote-permissions; not a workspace dep because no other crate requires it.
+url = "2"
