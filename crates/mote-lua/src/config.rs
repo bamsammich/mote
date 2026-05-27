@@ -24,10 +24,20 @@
 //!
 //! ## Calling `mote.plugins()` more than once
 //!
-//! Calling `mote.plugins` more than once is allowed; the **last call wins**
-//! (the previous plugin set is discarded entirely). This is intentional:
-//! per-identity overlay configs may call `mote.plugins` to completely replace
-//! the global plugin set.
+//! Calling `mote.plugins` more than once is allowed; entries are **accumulated**
+//! across calls, with same-key-later-wins semantics:
+//!
+//! - Keys introduced by a later call that did not appear in an earlier call are
+//!   **added** to the captured list.
+//! - If a later call re-declares a key that was already captured, the later
+//!   entry **replaces** that key's entry in place (preserving the key's original
+//!   position in the list).
+//!
+//! This is required by the `import --write` flow (ADR-0006): that operation
+//! appends a second `mote.plugins({…})` call to the user's existing
+//! `plugins.lua`. Replacing the whole list would silently discard all
+//! previously-declared plugins. Per-identity overlay replacement across
+//! separate config *files* happens at the loader/compose level, not here.
 //!
 //! ## Extensibility
 //!
@@ -310,8 +320,21 @@ fn make_plugins_fn(lua: &Lua, capture: &Rc<RefCell<Capture>>) -> Result<Function
                 version,
             });
         }
-        // Last-wins: replace the captured list entirely.
-        cap.borrow_mut().plugins = entries;
+        // Accumulate with same-key-later-wins: merge `entries` into the
+        // captured list. For each incoming entry, if its key already exists
+        // in the list it is updated in place (preserving position); new keys
+        // are appended. This is required by `import --write` (ADR-0006), which
+        // appends a second `mote.plugins({…})` call rather than rewriting the
+        // file. Per-identity overlay replacement across separate files happens
+        // at the loader/compose level, not here.
+        let mut cap_mut = cap.borrow_mut();
+        for entry in entries {
+            if let Some(existing) = cap_mut.plugins.iter_mut().find(|e| e.key == entry.key) {
+                *existing = entry;
+            } else {
+                cap_mut.plugins.push(entry);
+            }
+        }
         Ok(())
     })
     .map_err(ConfigError::Lua)
@@ -564,7 +587,7 @@ fn string_array_field(t: &Table, field: &'static str) -> Result<Vec<String>, mlu
 /// `package`/`require`, `debug`, `ffi`, dynamic code loading) and exposes only
 /// three config-capture functions via a `mote` global:
 ///
-/// - `mote.plugins({…})` — captures plugin declarations (last-wins on repeated calls).
+/// - `mote.plugins({…})` — captures plugin declarations (accumulated across calls; same-key-later-wins).
 /// - `mote.dev_mode({…})` — captures dev-mode dirs/plugins.
 /// - `mote.updates.configure({…})` — captures update cadence.
 ///

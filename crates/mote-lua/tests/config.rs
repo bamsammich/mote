@@ -138,20 +138,85 @@ fn empty_config_gives_empty_spec() {
 }
 
 // ---------------------------------------------------------------------------
-// Last-wins merge for repeated mote.plugins() calls
+// Accumulate-with-same-key-later-wins for repeated mote.plugins() calls
 // ---------------------------------------------------------------------------
 
 #[test]
-fn repeated_mote_plugins_call_last_wins() {
-    // Calling mote.plugins twice: the second call replaces the first (last-wins).
+fn repeated_mote_plugins_call_accumulates_with_later_key_wins() {
+    // Calling mote.plugins twice: the second call's new keys are added; a
+    // repeated key is overridden; unrelated keys from the first call survive.
     let source = r#"
-mote.plugins({ adblock = { source = "github:mote-browser/adblock" } })
-mote.plugins({ vim_mode = { source = "github:mote-browser/vim-mode" } })
+mote.plugins({
+  adblock  = { source = "github:mote-browser/adblock" },
+  vim_mode = { source = "github:mote-browser/vim-mode" },
+})
+mote.plugins({
+  vim_mode  = { source = "github:mote-browser/vim-mode-v2" },
+  dark_mode = { source = "github:mote-browser/dark-mode" },
+})
 "#;
     let spec = eval_config(source, "plugins.lua").expect("parses");
-    // Last call wins: only vim_mode is present.
-    assert_eq!(spec.plugins.len(), 1);
-    assert_eq!(spec.plugins[0].key, "vim_mode");
+
+    // All three distinct keys must be present.
+    assert_eq!(spec.plugins.len(), 3, "union of both calls");
+
+    // adblock survives from the first call.
+    let adblock = spec.plugins.iter().find(|p| p.key == "adblock");
+    assert!(adblock.is_some(), "adblock must survive from first call");
+    assert_eq!(
+        adblock.unwrap().source,
+        "github:mote-browser/adblock",
+        "adblock source unchanged"
+    );
+
+    // vim_mode is overridden by the second call.
+    let vim = spec.plugins.iter().find(|p| p.key == "vim_mode");
+    assert!(vim.is_some(), "vim_mode must be present");
+    assert_eq!(
+        vim.unwrap().source,
+        "github:mote-browser/vim-mode-v2",
+        "vim_mode updated to second-call value"
+    );
+
+    // dark_mode is new from the second call.
+    let dark = spec.plugins.iter().find(|p| p.key == "dark_mode");
+    assert!(dark.is_some(), "dark_mode must be added from second call");
+    assert_eq!(
+        dark.unwrap().source,
+        "github:mote-browser/dark-mode",
+        "dark_mode source correct"
+    );
+}
+
+#[test]
+fn two_plugins_calls_overlapping_and_disjoint_keys_union() {
+    // Focused regression: two mote.plugins calls with overlapping + disjoint
+    // keys produce the union, with the repeated key taking the second call's value.
+    let source = r#"
+mote.plugins({
+  ["plugin-a"] = { source = "github:owner/plugin-a" },
+  ["plugin-b"] = { source = "github:owner/plugin-b" },
+})
+mote.plugins({
+  ["plugin-b"] = { source = "github:owner/plugin-b-v2" },
+  ["plugin-c"] = { source = "github:owner/plugin-c" },
+})
+"#;
+    let spec = eval_config(source, "plugins.lua").expect("parses");
+
+    assert_eq!(spec.plugins.len(), 3, "union must have 3 entries");
+
+    let a = spec.plugins.iter().find(|p| p.key == "plugin-a").unwrap();
+    assert_eq!(a.source, "github:owner/plugin-a");
+
+    let b = spec.plugins.iter().find(|p| p.key == "plugin-b").unwrap();
+    assert_eq!(
+        b.source, "github:owner/plugin-b-v2",
+        "second call's value wins for plugin-b"
+    );
+
+    let c = spec.plugins.iter().find(|p| p.key == "plugin-c").unwrap();
+    assert_eq!(c.source, "github:owner/plugin-c");
 }
 
 // ---------------------------------------------------------------------------
