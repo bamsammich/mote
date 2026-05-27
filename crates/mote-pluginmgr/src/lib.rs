@@ -31,6 +31,7 @@ pub mod dirhash;
 pub mod fetch;
 pub mod lock;
 pub mod managed;
+pub mod manager;
 pub mod resolve;
 pub mod source;
 
@@ -42,5 +43,9 @@ pub use dirhash::{DirHashError, hash_dir};
 pub use fetch::{FetchError, Fetched, fetch};
 pub use lock::{LockEntry, LockError, LockFile};
 pub use managed::{ManagedEntry, ManagedError, ManagedFile};
+pub use manager::{
+    GcReport, ImportOutcome, IntegrityStatus, ManagerError, PluginManager, RemoveOutcome,
+    SyncOutcome, SyncReport, UpdateOutcome,
+};
 pub use resolve::{PluginSpec, PluginSpecSet, ResolveError, compose, load_order};
 pub use source::{Source, SourceParseError};
