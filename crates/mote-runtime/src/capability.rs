@@ -7,9 +7,8 @@
 //!   plugin fails to load (the user enables exactly one fulfiller).
 //! - **Non-exclusive composition** — multiple plugins may fulfill a
 //!   non-exclusive capability; the map records all of them. For synchronous
-//!   `capabilities.invoke`, the runtime routes to a chosen fulfiller (the
-//!   first-registered one in this minimum-viable implementation; the
-//!   per-capability dispatch shape governs richer composition in later phases).
+//!   `capabilities.invoke`, the runtime routes according to the registry's
+//!   declared dispatch shape (see [`CapabilityMap::fulfillers_for`]).
 //! - **Dangling consumer** — a plugin that consumes a capability no loaded
 //!   plugin fulfills fails to load with the dangling-consumer error.
 
@@ -85,15 +84,30 @@ impl CapabilityMap {
             .is_some_and(|v| !v.is_empty())
     }
 
-    /// The plugin the runtime routes a synchronous `capabilities.invoke` to.
+    /// The single fulfiller for an **exclusive** capability invocation, or
+    /// `None` if the capability is unfulfilled.
     ///
-    /// For an exclusive capability this is the single fulfiller; for a
-    /// non-exclusive one it is the first-registered fulfiller (Phase 1
-    /// minimum-viable routing — the per-capability dispatch shape governs richer
-    /// composition later).
+    /// For non-exclusive capabilities, use [`fulfillers_for`](Self::fulfillers_for)
+    /// instead — calling this on a non-exclusive capability silently ignores all
+    /// fulfillers beyond the first, which is the silent-first-wins anti-pattern
+    /// the security review flagged.
     #[must_use]
-    pub fn current_fulfiller(&self, capability: &str) -> Option<&PluginName> {
+    pub fn exclusive_fulfiller(&self, capability: &str) -> Option<&PluginName> {
         self.fulfillers.get(capability).and_then(|v| v.first())
+    }
+
+    /// Returns the ordered list of fulfillers for `capability` (in registration
+    /// order, which reflects priority for `stack` dispatch).
+    ///
+    /// - An **empty** slice means the capability is unfulfilled.
+    /// - A **single-element** slice means one fulfiller (covers both exclusive
+    ///   and single-fulfiller non-exclusive cases).
+    /// - A **multi-element** slice means multiple fulfillers for a non-exclusive
+    ///   capability; the runtime dispatches according to the registry's declared
+    ///   [`Dispatch`](mote_registry::Dispatch) shape.
+    #[must_use]
+    pub fn fulfillers_for(&self, capability: &str) -> &[PluginName] {
+        self.fulfillers.get(capability).map_or(&[], Vec::as_slice)
     }
 
     /// Removes `plugin` from every capability it fulfilled (on unload/reload).
@@ -157,7 +171,12 @@ mod tests {
             .unwrap();
         map.claim(r.capabilities(), "theme:provider", &name("b"))
             .unwrap();
-        assert_eq!(map.current_fulfiller("theme:provider"), Some(&name("a")));
+        // Both fulfillers are recorded; the dispatch shape decides what to do
+        // with them (not a silent first-wins pick).
+        assert_eq!(
+            map.fulfillers_for("theme:provider"),
+            &[name("a"), name("b")]
+        );
     }
 
     #[test]

@@ -222,6 +222,39 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
                     };
                     match core.invoke_capability(&g.plugin, &capability, &function, &hv, &audit) {
                         InvokeOutcome::Ok(ret) => Ok(ret.to_lua(lua).unwrap_or(Value::Nil)),
+                        // Non-exclusive capability: return the collected results
+                        // as a Lua table `{ dispatch = "<shape>", results = { … } }`
+                        // so the caller knows both the dispatch shape and the
+                        // per-fulfiller return values (in registration order).
+                        // `nil` entries in the results list mark fulfillers that
+                        // timed out or errored (see InvokeOutcome::Multi).
+                        // If the table cannot be created (OOM), fall through to `nil`.
+                        InvokeOutcome::Multi { dispatch, results } => {
+                            // dispatch shape string so the consumer knows how to
+                            // interpret the results array.
+                            let shape: &str = match dispatch {
+                                mote_registry::Dispatch::Stack => "stack",
+                                mote_registry::Dispatch::Aggregate => "aggregate",
+                                mote_registry::Dispatch::FanOut => "fan-out",
+                                // #[non_exhaustive] — future variants
+                                _ => "unknown",
+                            };
+                            // Build the outer envelope; fall back to nil on OOM.
+                            let Ok(outer) = lua.create_table() else {
+                                return Ok(Value::Nil);
+                            };
+                            let _ = outer.raw_set("dispatch", shape);
+                            // Build the results array; fall back to envelope
+                            // without results on OOM.
+                            if let Ok(arr) = lua.create_table() {
+                                for (i, v) in results.iter().enumerate() {
+                                    let lv = v.to_lua(lua).unwrap_or(Value::Nil);
+                                    let _ = arr.raw_set(i + 1, lv);
+                                }
+                                let _ = outer.raw_set("results", arr);
+                            }
+                            Ok(Value::Table(outer))
+                        }
                         // Every failure mode (no fulfiller, function outside the
                         // capability contract, missing function, deadline
                         // timeout, or a Lua error in the fulfiller) surfaces to
