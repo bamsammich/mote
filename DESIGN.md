@@ -1331,25 +1331,27 @@ Two files in the user's dotfile path:
 ```lua
 -- ~/.config/mote/plugins.lua — user-authored, checked into dotfiles
 mote.plugins({
-  adblock         = { source = "github:mote-browser/adblock" },
-  vim_mode        = { source = "github:mote-browser/vim-mode" },
-  cool_plugin     = { source = "github:them/cool-plugin", version = "v1.2.3" },
-  my_local_plugin = { source = "path:~/code/my-plugin" },
+  ["adblock"]         = { source = "github:mote-browser/adblock" },
+  ["vim-mode"]        = { source = "github:mote-browser/vim-mode" },
+  ["cool-plugin"]     = { source = "github:them/cool-plugin", version = "v1.2.3" },
+  ["my-local-plugin"] = { source = "path:~/code/my-plugin" },
 })
 ```
+
+Keys are the plugin's canonical name (a `PluginName`: lowercase, hyphenated), written quoted because hyphens are not legal in bare Lua identifiers.
 
 ```toml
 # ~/.config/mote/plugins.lock — machine-managed, checked into dotfiles
 [plugins.adblock]
 commit = "abc123def456..."
-checksum = "sha256:..."
+checksum = "blake3:..."
 
 [plugins.cool-plugin]
 commit = "def456abc789..."
-checksum = "sha256:..."
+checksum = "blake3:..."
 ```
 
-`plugins.lua` declares what plugins the user wants and where they come from; the CLI (`mote plugin add` etc.) can mutate it programmatically by rewriting the call. `plugins.lock` pins the exact resolved versions and content checksums; it's machine-managed and opaque to users — its TOML format is an implementation detail. Clone your dotfiles to a fresh machine, run `mote plugin sync`, get exactly the same plugin set you had elsewhere. Same role as `lazy-lock.json` in lazy.nvim — user spec is Lua, lock file is generated.
+`plugins.lua` declares what plugins the user wants and where they come from. **It is user-authored and Mote never modifies it** — `plugins.lua` is Lua (a program, not data), and Mote cannot reliably rewrite a program without destroying its structure and comments. Instead, the CLI writes to `~/.config/mote/managed.lua` — a Mote-owned, committable file regenerated wholesale (so generation, unlike rewriting, is always reliable). `mote plugin add` records its declaration there; the config loader loads `managed.lua` last, so it composes additively with (and overrides) the user's own `plugins.lua`. To take ownership of a managed entry, `mote plugin import <name>` prints the snippet to paste into your own `plugins.lua` (or, with `--write`, appends it — the one append-only exception to "Mote never touches your file"). `plugins.lock` pins the exact resolved versions and content checksums; it's machine-managed and opaque to users — its TOML format is an implementation detail. Clone your dotfiles to a fresh machine, run `mote plugin sync`, get exactly the same plugin set you had elsewhere. Same role as `lazy-lock.json` in lazy.nvim — user spec is Lua, lock and managed layer are generated. See ADR-0006.
 
 ### Supported sources (v0.1)
 
@@ -1386,14 +1388,14 @@ The cache holds every fetched commit; the plugins directory has symlinks for Git
 ### CLI surface
 
 ```
-mote plugin add <source> [--version <v>]   # add to plugins.lua, fetch, write lock entry
-mote plugin remove <name>                  # remove from plugins.lua + lock; cache entry retained
+mote plugin add <source> [--version <v>]   # fetch, write managed.lua + lock entry, install
+mote plugin remove <name>                  # remove from managed.lua + lock; cache entry retained
 mote plugin update [<name>]                # fetch latest matching version constraint, update lock
 mote plugin source <name> <new-source>     # change a plugin's source (e.g., bundled → github:...)
 mote plugin sync                           # reconcile cache and plugins directory with lock
 mote plugin rollback <name>                # relink to previous cached commit
 mote plugin diff <name>                    # show what an update would change (incl. permissions)
-mote plugin import <name>                  # promote an implicit local plugin into plugins.lua
+mote plugin import <name> [--write]        # take ownership: print (or --write append) into plugins.lua
 mote plugin gc                             # remove unreferenced cache entries
 mote plugin review <name>                  # show/approve pending permission changes
 mote plugin pin <name>                     # checksum-pin and approve a manually-written plugin

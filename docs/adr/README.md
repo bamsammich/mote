@@ -2,7 +2,7 @@
 
 This directory contains Architectural Decision Records (ADRs) for the Mote project, written in [MADR](https://adr.github.io/madr/) format.
 
-ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26).
+ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADR 0006 is **Accepted** (approved by the maintainer 2026-05-27).
 
 ## Index
 
@@ -13,6 +13,7 @@ ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 
 | [0003](0003-chrome-ui-html-css-in-cef-with-wgpu-compositor.md) | Chrome UI as HTML/CSS in CEF (OSR) with a Thin wgpu Compositor | Accepted |
 | [0004](0004-windowing-library-winit.md) | Windowing Library: winit | Accepted |
 | [0005](0005-host-bridge-cef-message-router-two-layer-isolation.md) | Chrome↔Content Host Bridge: CEF Message Router with Two-Layer Isolation | Accepted |
+| [0006](0006-user-config-read-only-to-mote.md) | User Config is Read-Only to Mote; Mutations Go to a Managed Layer | Accepted |
 
 ## Numbering convention
 
