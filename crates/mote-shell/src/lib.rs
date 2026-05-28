@@ -1771,8 +1771,23 @@ impl ShellApp {
         }
     }
 
-    /// Route a mouse click to the active content page (if inside the viewport) or
-    /// the chrome page (otherwise), in the correct coordinate space (plan §1.3).
+    /// Returns `true` when a chrome-rendered overlay (approval dialog or
+    /// integrity panel) is currently capturing input.
+    ///
+    /// While an overlay is active every mouse event must go to the chrome
+    /// page — the overlays render full-window inside `mote://chrome` over the
+    /// content viewport, so content must not receive pointer events.
+    const fn chrome_overlay_capturing_input(&self) -> bool {
+        self.integrity_chrome_open || !self.host.pending_approvals.is_empty()
+    }
+
+    /// Route a mouse click to the active content page (if inside the viewport)
+    /// or the chrome page (otherwise), in the correct coordinate space
+    /// (plan §1.3).
+    ///
+    /// When a chrome overlay is capturing input (approval dialog or integrity
+    /// panel), the cursor position is irrelevant — all clicks go to the chrome
+    /// page so the overlay can receive them (ADR-0007/ADR-0008).
     fn route_click(&mut self, button: WinitMouseButton, state: ElementState) {
         let Some(mb) = map_mouse_button(button) else {
             return;
@@ -1782,34 +1797,46 @@ impl ShellApp {
             ElementState::Released => ButtonAction::Up,
         };
         let (x, y) = self.cursor;
-        if let Some(pos) = self.page_local(x, y) {
-            self.set_focus_owner(FocusOwner::Page);
-            if let Some(page) = self.active_page() {
-                page.send_mouse_button(pos, mb, action, 1, self.modifiers);
+        let page_local = self.page_local(x, y);
+        match click_target(self.chrome_overlay_capturing_input(), page_local) {
+            ClickTarget::Chrome => {
+                self.set_focus_owner(FocusOwner::Chrome);
+                self.bridge.page().send_mouse_button(
+                    MousePosition { x, y },
+                    mb,
+                    action,
+                    1,
+                    self.modifiers,
+                );
             }
-        } else {
-            self.set_focus_owner(FocusOwner::Chrome);
-            self.bridge.page().send_mouse_button(
-                MousePosition { x, y },
-                mb,
-                action,
-                1,
-                self.modifiers,
-            );
+            ClickTarget::ContentPage => {
+                self.set_focus_owner(FocusOwner::Page);
+                // page_local is Some(_) when ClickTarget::ContentPage is returned.
+                if let (Some(pos), Some(page)) = (page_local, self.active_page()) {
+                    page.send_mouse_button(pos, mb, action, 1, self.modifiers);
+                }
+            }
         }
     }
 
     /// Route a mouse move to whichever surface the cursor is over.
+    ///
+    /// When a chrome overlay is capturing input, moves are directed to the
+    /// chrome page regardless of cursor geometry (same gate as [`Self::route_click`]).
     fn route_mouse_move(&self) {
         let (x, y) = self.cursor;
-        if let Some(pos) = self.page_local(x, y) {
-            if let Some(page) = self.active_page() {
-                page.send_mouse_move(pos, self.modifiers, false);
+        let page_local = self.page_local(x, y);
+        match click_target(self.chrome_overlay_capturing_input(), page_local) {
+            ClickTarget::Chrome => {
+                self.bridge
+                    .page()
+                    .send_mouse_move(MousePosition { x, y }, self.modifiers, false);
             }
-        } else {
-            self.bridge
-                .page()
-                .send_mouse_move(MousePosition { x, y }, self.modifiers, false);
+            ClickTarget::ContentPage => {
+                if let (Some(pos), Some(page)) = (page_local, self.active_page()) {
+                    page.send_mouse_move(pos, self.modifiers, false);
+                }
+            }
         }
     }
 
@@ -2233,6 +2260,45 @@ const fn page_local_coords(
     }
 }
 
+/// Which surface should receive a mouse event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickTarget {
+    /// The privileged chrome page (`mote://chrome`).
+    Chrome,
+    /// The active content page.
+    ContentPage,
+}
+
+/// Decide where a mouse event (click or move) should be routed.
+///
+/// When a chrome-rendered overlay is capturing input (an approval dialog is
+/// showing or the integrity panel is open), **all** mouse events go to the
+/// chrome page regardless of viewport geometry — the overlay renders
+/// full-window on top of the content and must receive every click.  Otherwise
+/// the geometry rules apply: a cursor inside the page viewport goes to the
+/// content page; a cursor in the chrome insets goes to the chrome page.
+///
+/// The `overlay_capturing` flag is computed by
+/// [`ShellApp::chrome_overlay_capturing_input`].  `page_local` is the result
+/// of the viewport hit-test ([`page_local_coords`]) — `Some` means the cursor
+/// is inside the content viewport, `None` means it is in the chrome insets.
+pub(crate) const fn click_target(
+    overlay_capturing: bool,
+    page_local: Option<MousePosition>,
+) -> ClickTarget {
+    if overlay_capturing {
+        // A chrome overlay (approval dialog or integrity panel) is capturing
+        // input: all mouse events go to the chrome page regardless of where
+        // the cursor sits geometrically.  The overlay is rendered full-window
+        // inside the chrome page and content must not receive these events.
+        ClickTarget::Chrome
+    } else if page_local.is_some() {
+        ClickTarget::ContentPage
+    } else {
+        ClickTarget::Chrome
+    }
+}
+
 /// Map a winit mouse button to the Mote vocabulary (other buttons unrouted).
 const fn map_mouse_button(button: WinitMouseButton) -> Option<MouseButton> {
     match button {
@@ -2622,5 +2688,60 @@ mod tests {
     fn approve_payload_malformed_json_is_an_error() {
         // The op handler maps a parse failure to a 400; mirror that boundary.
         assert!(serde_json::from_str::<approval::DialogResult>("not json").is_err());
+    }
+
+    // ── click_target: overlay-aware mouse routing ─────────────────────────
+    //
+    // When a chrome overlay (approval dialog or integrity panel) is capturing
+    // input every mouse event must go to the chrome page — the overlay renders
+    // full-window in the chrome page and content must not see those events.
+    //
+    // Inline helpers used in tests below:
+    //   inside  = Some(MousePosition { x: 100, y: 100 })  — cursor in viewport
+    //   outside = None                                      — cursor in chrome insets
+
+    /// THE BUG: overlay capturing + cursor inside viewport → chrome (not content).
+    ///
+    /// With the old geometry-only logic this returns `ContentPage`; the fix
+    /// makes it return `Chrome`.  The test MUST fail before the fix is applied
+    /// and MUST pass afterwards.
+    #[test]
+    fn overlay_capturing_inside_viewport_routes_to_chrome() {
+        assert_eq!(
+            click_target(true, Some(MousePosition { x: 100, y: 100 })),
+            ClickTarget::Chrome,
+            "an overlay capturing input must redirect viewport clicks to chrome"
+        );
+    }
+
+    /// Overlay capturing + cursor outside viewport → chrome (no change needed,
+    /// already correct by the geometry rule, but must remain correct).
+    #[test]
+    fn overlay_capturing_outside_viewport_routes_to_chrome() {
+        assert_eq!(
+            click_target(true, None),
+            ClickTarget::Chrome,
+            "an overlay capturing input routes chrome-inset clicks to chrome"
+        );
+    }
+
+    /// No overlay, cursor inside viewport → content (the normal happy path).
+    #[test]
+    fn no_overlay_inside_viewport_routes_to_content() {
+        assert_eq!(
+            click_target(false, Some(MousePosition { x: 100, y: 100 })),
+            ClickTarget::ContentPage,
+            "without an overlay a viewport click goes to the content page"
+        );
+    }
+
+    /// No overlay, cursor outside viewport (in chrome insets) → chrome.
+    #[test]
+    fn no_overlay_outside_viewport_routes_to_chrome() {
+        assert_eq!(
+            click_target(false, None),
+            ClickTarget::Chrome,
+            "without an overlay a chrome-inset click goes to the chrome page"
+        );
     }
 }
