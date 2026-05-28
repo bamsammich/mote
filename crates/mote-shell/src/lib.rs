@@ -1110,8 +1110,9 @@ impl ShellApp {
     /// it focus, and force a content re-upload (so the compositor swaps to it).
     fn on_active_changed(&mut self) {
         let (vw, vh) = self.viewport_dims();
+        let scale = self.scale_factor;
         if let Some(page) = self.active_page() {
-            page.notify_resized(vw, vh);
+            page.notify_resized(vw, vh, scale);
         }
         // Reset the content dirty counter so the next upload_frames re-uploads
         // the new active page's frame (texture swap).
@@ -1405,7 +1406,11 @@ impl ShellApp {
                 };
                 match Page::new(&url, &opts) {
                     Ok(page) => {
-                        page.notify_resized(self.width.max(1), self.height.max(1));
+                        page.notify_resized(
+                            self.width.max(1),
+                            self.height.max(1),
+                            self.scale_factor,
+                        );
                         self.integrity_page = Some(page);
                     }
                     Err(e) => {
@@ -1415,7 +1420,7 @@ impl ShellApp {
                     }
                 }
             } else if let Some(page) = self.integrity_page.as_ref() {
-                page.notify_resized(self.width.max(1), self.height.max(1));
+                page.notify_resized(self.width.max(1), self.height.max(1), self.scale_factor);
             }
             self.integrity_paints = 0;
             eprintln!(
@@ -1461,7 +1466,11 @@ impl ShellApp {
                 };
                 match Page::new(&url, &opts) {
                     Ok(page) => {
-                        page.notify_resized(self.width.max(1), self.height.max(1));
+                        page.notify_resized(
+                            self.width.max(1),
+                            self.height.max(1),
+                            self.scale_factor,
+                        );
                         self.picker_page = Some(page);
                     }
                     Err(e) => {
@@ -1471,7 +1480,7 @@ impl ShellApp {
                     }
                 }
             } else if let Some(page) = self.picker_page.as_ref() {
-                page.notify_resized(self.width.max(1), self.height.max(1));
+                page.notify_resized(self.width.max(1), self.height.max(1), self.scale_factor);
             }
             self.picker_paints = 0;
             eprintln!("mote-shell: tab picker opened");
@@ -1738,7 +1747,7 @@ impl ShellApp {
         self.content_opts.width = vw;
         self.content_opts.height = vh;
         if let Some(page) = self.active_page() {
-            page.notify_resized(vw, vh);
+            page.notify_resized(vw, vh, scale);
         }
         self.content_paints = 0;
     }
@@ -1751,23 +1760,26 @@ impl ShellApp {
         }
         self.width = size.width;
         self.height = size.height;
+        let scale = self.scale_factor;
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.resize(size.width, size.height);
         }
-        self.bridge.page().notify_resized(size.width, size.height);
+        self.bridge
+            .page()
+            .notify_resized(size.width, size.height, scale);
         // The integrity overlay (if live) is full-window like the chrome.
         if let Some(page) = self.integrity_page.as_ref() {
-            page.notify_resized(size.width, size.height);
+            page.notify_resized(size.width, size.height, scale);
         }
         // The picker overlay (if live) is full-window like the chrome too.
         if let Some(page) = self.picker_page.as_ref() {
-            page.notify_resized(size.width, size.height);
+            page.notify_resized(size.width, size.height, scale);
         }
         let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
         if let Some(page) = self.active_page() {
-            page.notify_resized(vw, vh);
+            page.notify_resized(vw, vh, scale);
         }
     }
 
@@ -2063,10 +2075,13 @@ impl ApplicationHandler for ShellApp {
         let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
+        let scale = self.scale_factor;
         if let Some(page) = self.active_page() {
-            page.notify_resized(vw, vh);
+            page.notify_resized(vw, vh, scale);
         }
-        self.bridge.page().notify_resized(self.width, self.height);
+        self.bridge
+            .page()
+            .notify_resized(self.width, self.height, scale);
         self.window = Some(window);
         eprintln!(
             "mote-shell: window {}x{} (scale {:.2}) up; chrome + {} tab(s) live",
