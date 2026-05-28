@@ -232,10 +232,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // runtime's per-plugin storage, and the audit sink (one database, namespaced).
     let store = open_session_store()?;
 
-    // Stand up the Phase-1 plugin runtime and load the bundled first-party
-    // plugins through the four-step pipeline (urlbar + workspace-manager). Their
-    // behaviour is still stubbed; the point is they are LOADED and visible in the
-    // integrity panel. A plugin that fails to load is logged and skipped.
+    // Stand up the plugin runtime (runtime + manager + audit + approval store).
+    // Per ADR-0007 this constructs but loads NOTHING: the resolve + classify +
+    // load pass runs in `run_initial_load_pass`, fired once from `about_to_wait`
+    // after the chrome's first paint so the window is live before any plugin
+    // (or git fetch) work, and a fatal resolution error leaves the window alive.
     let host = runtime::PluginHost::boot(store.clone())?;
 
     // Render the integrity panel from LIVE loaded-plugin / audit / storage data,
