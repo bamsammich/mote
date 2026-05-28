@@ -1249,6 +1249,33 @@ mod tests {
     }
 
     #[test]
+    fn implicit_local_loaded_row_kind_and_actions() {
+        // Task 6a: an ImplicitLocal-provenance resolved plugin renders with the
+        // ImplicitLocal kind (◇ glyph) and the revoke / adjust-scope action set
+        // (no update/rollback source). The shell needs no extra wiring — the
+        // existing provenance->kind / actions mapping covers it.
+        let rp = resolved(
+            "dropped-in",
+            Provenance::ImplicitLocal,
+            MgrIntegrity::Unknown,
+        );
+        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        assert!(
+            matches!(kind, PluginKind::ImplicitLocal { .. }),
+            "ImplicitLocal provenance -> PluginKind::ImplicitLocal"
+        );
+        assert_eq!(
+            kind.glyph(),
+            "◇",
+            "implicit-local glyph renders via PluginKind"
+        );
+        assert_eq!(
+            actions_for_kind(&kind),
+            vec![PluginAction::Revoke, PluginAction::AdjustScope]
+        );
+    }
+
+    #[test]
     fn dev_mode_build_panel_row_shows_dev_mode() {
         // End-to-end through the live panel builder: a DevMode plugin pushed
         // into `loaded` renders a row with DevMode kind + DevMode integrity.

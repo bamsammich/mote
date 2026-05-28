@@ -863,6 +863,15 @@ impl PluginManager {
             }
         }
 
+        // Implicit-local detection (6a): plugin dirs the user dropped straight
+        // into <config>/plugins/<name>/ that are NOT cache-managed (cache slots
+        // are symlinks; an implicit dir is a REAL directory) and NOT already a
+        // declared/seeded entry. Each flows through `classify` shell-side, so a
+        // first detection prompts the dialog and a prior-approved one is silent.
+        let already: std::collections::BTreeSet<PluginName> =
+            entries.iter().map(|(n, _)| n.clone()).collect();
+        entries.extend(self.detect_implicit_local(&already));
+
         // Resolve each entry to a ResolvedPlugin (applying the dev-mode override
         // + integrity), then order by capability-contract dependency order
         // (fulfillers first).
@@ -945,6 +954,60 @@ impl PluginManager {
             });
         }
         (resolved, manifests)
+    }
+
+    /// Scans `<config>/plugins/` for implicitly-local plugins (6a): real
+    /// directories the user dropped in by hand, not declared anywhere.
+    ///
+    /// A slot is implicit-local iff it is a **real directory** (distinguished
+    /// from a cache-managed slot via [`fs::symlink_metadata`] — every
+    /// Mote-managed slot for a `path:`/git/bundled plugin is a *symlink*, so a
+    /// symlink is skipped), its directory name is a valid [`PluginName`] not in
+    /// `already` (the declared + seeded set, so a declared plugin is never
+    /// double-counted), and it contains a readable `init.lua`.
+    ///
+    /// Returns `(name, Provenance::ImplicitLocal)` for each detected plugin, in
+    /// lexicographic name order (a [`BTreeSet`](std::collections::BTreeSet) read
+    /// of the directory). The caller appends these to the resolve set; a
+    /// dev-mode override may still upgrade an implicit dir to
+    /// [`Provenance::DevMode`] in [`resolve_entries`](Self::resolve_entries).
+    fn detect_implicit_local(
+        &self,
+        already: &std::collections::BTreeSet<PluginName>,
+    ) -> Vec<(PluginName, Provenance)> {
+        let plugins_dir = self.config_dir.join("plugins");
+        // No plugins/ dir yet (fresh profile) → nothing to detect.
+        let Ok(read) = fs::read_dir(&plugins_dir) else {
+            return Vec::new();
+        };
+
+        let mut detected: std::collections::BTreeMap<PluginName, Provenance> =
+            std::collections::BTreeMap::new();
+        for entry in read.flatten() {
+            // symlink_metadata does NOT follow the link: a cache-managed slot is
+            // a symlink and must be skipped; only a REAL directory is implicit.
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !meta.is_dir() || meta.file_type().is_symlink() {
+                continue;
+            }
+            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(name) = PluginName::new(file_name) else {
+                continue;
+            };
+            if already.contains(&name) {
+                continue;
+            }
+            // Must contain a readable init.lua to be a loadable plugin.
+            if !entry.path().join("init.lua").is_file() {
+                continue;
+            }
+            detected.insert(name, Provenance::ImplicitLocal);
+        }
+        detected.into_iter().collect()
     }
 
     /// # Errors
@@ -2279,6 +2342,98 @@ return M
             plain.provenance,
             Provenance::Path,
             "a path plugin not covered by dev_mode must stay Path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6a: implicit-local detection — real dir in plugins/, not declared
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn real_dir_in_plugins_is_detected_as_implicit_local() {
+        let f = fixture();
+        // No plugins.lua at all — but the user dropped a real plugin dir into
+        // <config>/plugins/dropped-in/ with a valid init.lua.
+        let dropped = f.config_dir.join("plugins").join("dropped-in");
+        write_plugin(&dropped, "dropped-in", &[]);
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let dropped_in = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "dropped-in")
+            .expect("dropped-in detected");
+        assert_eq!(
+            dropped_in.provenance,
+            Provenance::ImplicitLocal,
+            "a real dir under plugins/ that isn't declared is ImplicitLocal"
+        );
+        assert_eq!(dropped_in.manifest.name.as_str(), "dropped-in");
+    }
+
+    #[test]
+    fn cache_symlink_in_plugins_is_not_implicit_local() {
+        let f = fixture();
+        // A declared path: plugin produces a SYMLINK at plugins/<name>; the
+        // implicit scan must skip symlinks (they are cache-managed, not dropped
+        // in), so it does not double-count the declared plugin as implicit.
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_plugin(plugin_dir.path(), "declared", &[]);
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(&f.config_dir, &[("declared", &src)]);
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let declared: Vec<&ResolvedPlugin> = resolved
+            .iter()
+            .filter(|r| r.name.as_str() == "declared")
+            .collect();
+        assert_eq!(
+            declared.len(),
+            1,
+            "declared plugin must not be double-counted"
+        );
+        assert_eq!(
+            declared[0].provenance,
+            Provenance::Path,
+            "a declared path plugin stays Path — its slot is a symlink, not implicit"
+        );
+
+        // Sanity: the slot really is a symlink (so the scan correctly skipped it).
+        let slot = f.config_dir.join("plugins").join("declared");
+        let meta = fs::symlink_metadata(&slot).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "declared path plugin slot must be a symlink"
+        );
+    }
+
+    #[test]
+    fn implicit_local_under_dev_mode_directory_is_dev_mode() {
+        let f = fixture();
+        // An implicit dir that ALSO falls under a dev_mode directory resolves as
+        // DevMode (dev-mode precedence over implicit-local).
+        let plugins_dir = f.config_dir.join("plugins");
+        let dropped = plugins_dir.join("dev-dropped");
+        write_plugin(&dropped, "dev-dropped", &[]);
+
+        // dev_mode covers the whole plugins/ dir.
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            format!(
+                "mote.dev_mode({{ directories = {{ \"{}\" }} }})\n",
+                plugins_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let dev_dropped = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "dev-dropped")
+            .expect("dev-dropped detected");
+        assert_eq!(
+            dev_dropped.provenance,
+            Provenance::DevMode,
+            "an implicit dir under a dev_mode directory becomes DevMode"
         );
     }
 
