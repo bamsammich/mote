@@ -39,9 +39,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mote_lua::DevModeConfig;
 use mote_runtime::ApprovalHash;
 use mote_storage::Store;
-use mote_types::{Checksum, PluginName};
+use mote_types::{Checksum, IdentityId, PluginName};
 use thiserror::Error;
 
 use crate::approval_store::{ApprovalStore, ApprovalStoreError};
@@ -432,11 +433,65 @@ impl PluginManager {
         Ok(ManagedFile::load(&p)?)
     }
 
+    /// Path of a per-identity plugin overlay, `<config>/identities/<id>/plugins.lua`.
+    ///
+    /// The directory component is the identity's raw `u64` rendered as a decimal
+    /// string (`IdentityId`'s `Display`), matching the DESIGN.md convention
+    /// `~/.config/mote/identities/<identity>/plugins.lua`. The shell's session
+    /// identity is `0`, so its overlay lives at `identities/0/plugins.lua`.
+    fn identity_plugins_lua_path(&self, identity: IdentityId) -> PathBuf {
+        self.config_dir
+            .join("identities")
+            .join(identity.to_string())
+            .join("plugins.lua")
+    }
+
     /// Builds the composed [`crate::resolve::PluginSpecSet`] from whichever
     /// config files exist (`plugins.lua`, then `managed.lua`).
+    ///
+    /// Identity-agnostic: used by [`sync`](Self::sync) and other reconciling
+    /// operations that do not vary by identity. Delegates to
+    /// [`composed_config`](Self::composed_config) with `identity = None`,
+    /// discarding the merged [`DevModeConfig`] (only the specs matter here).
     fn composed_spec_set(&self) -> Result<crate::resolve::PluginSpecSet, ManagerError> {
+        Ok(self.composed_config(None)?.0)
+    }
+
+    /// Evaluates and composes the config layers for `identity`, returning both
+    /// the merged [`crate::resolve::PluginSpecSet`] and the unioned
+    /// [`DevModeConfig`].
+    ///
+    /// ## Layers (applied in order)
+    ///
+    /// 1. global `<config>/plugins.lua` (user-authored)
+    /// 2. global `<config>/managed.lua` (Mote-owned)
+    /// 3. per-identity `<config>/identities/<id>/plugins.lua` — **only** when
+    ///    `identity` is `Some` and the file exists.
+    ///
+    /// Specs are composed via [`compose`], which applies **last-writer-wins per
+    /// key**: the identity overlay (last layer) overrides the global layers for
+    /// any plugin it re-declares, while disjoint keys from earlier layers are
+    /// preserved.
+    ///
+    /// ## Dev-mode merge
+    ///
+    /// [`compose`] only merges plugin specs, not the per-layer [`DevModeConfig`].
+    /// This method **unions** the `directories` and `plugins` lists across every
+    /// present layer (deduplicated, order-preserving) so a `mote.dev_mode {…}`
+    /// block in any of `plugins.lua` / `managed.lua` / the identity overlay
+    /// contributes. The merged config feeds dev-mode marking in
+    /// [`resolved_set`](Self::resolved_set).
+    ///
+    /// (The sibling `updates` config is **not** merged here — only the global
+    /// `plugins.lua` value would win today; cross-layer `updates` merge is a
+    /// tracked follow-up, not required by the dev-mode marking path.)
+    fn composed_config(
+        &self,
+        identity: Option<&IdentityId>,
+    ) -> Result<(crate::resolve::PluginSpecSet, DevModeConfig), ManagerError> {
         let user_path = self.plugins_lua_path();
         let managed_path = self.managed_lua_path();
+        let identity_path = identity.map(|id| self.identity_plugins_lua_path(*id));
 
         let user_spec = if user_path.exists() {
             let src =
@@ -454,15 +509,54 @@ impl PluginManager {
             None
         };
 
-        // Build the layers slice from what is available.
-        let empty = mote_lua::ConfigSpec::default();
-        let layers: Vec<&mote_lua::ConfigSpec> = match (&user_spec, &managed_spec) {
-            (Some(u), Some(m)) => vec![u, m],
-            (Some(u), None) => vec![u],
-            (None, Some(m)) => vec![m],
-            (None, None) => vec![&empty],
+        // Per-identity overlay: only when an identity is supplied AND its
+        // overlay file exists. Absent overlay → no extra layer (identity-less
+        // resolution is the global set).
+        let identity_spec = if let Some(p) = identity_path.as_ref().filter(|p| p.exists()) {
+            let src = fs::read_to_string(p).map_err(|e| ManagerError::io(p, e))?;
+            Some(mote_lua::eval_config(&src, "identities/<id>/plugins.lua")?)
+        } else {
+            None
         };
-        Ok(compose(&layers)?)
+
+        // Build the layers in precedence order (overlay last → overlay wins).
+        let mut layers: Vec<&mote_lua::ConfigSpec> = Vec::with_capacity(3);
+        if let Some(u) = &user_spec {
+            layers.push(u);
+        }
+        if let Some(m) = &managed_spec {
+            layers.push(m);
+        }
+        if let Some(i) = &identity_spec {
+            layers.push(i);
+        }
+        let empty = mote_lua::ConfigSpec::default();
+        if layers.is_empty() {
+            layers.push(&empty);
+        }
+
+        let spec_set = compose(&layers)?;
+
+        // Union dev_mode across every present layer (compose ignores it). Dedup
+        // while preserving first-seen order.
+        let mut dev_mode = DevModeConfig::default();
+        for spec in [&user_spec, &managed_spec, &identity_spec]
+            .into_iter()
+            .flatten()
+        {
+            for dir in &spec.dev_mode.directories {
+                if !dev_mode.directories.contains(dir) {
+                    dev_mode.directories.push(dir.clone());
+                }
+            }
+            for plugin in &spec.dev_mode.plugins {
+                if !dev_mode.plugins.contains(plugin) {
+                    dev_mode.plugins.push(plugin.clone());
+                }
+            }
+        }
+
+        Ok((spec_set, dev_mode))
     }
 
     /// Expands a `~`-prefixed path to an absolute path.
@@ -637,18 +731,37 @@ impl PluginManager {
     /// - a bundled seed entry that fails to unpack or link;
     /// - an entry whose active-link dir / `init.lua` cannot be read (typically
     ///   a git plugin in `sync.failed` with no prior cache to fall back on).
-    pub fn resolved_set(&self) -> Result<Vec<ResolvedPlugin>, ManagerError> {
-        // Reconcile declared specs first: fetch/link/hash + integrity. This is
-        // the single resolution pass; resolved_set only reads the result.
-        let sync_report = self.sync()?;
+    ///
+    /// ## Identity overlay
+    ///
+    /// When `identity` is `Some`, a per-identity `plugins.lua` overlay
+    /// (`<config>/identities/<id>/plugins.lua`) is composed **last** so it
+    /// overrides the global layers for any plugin it re-declares
+    /// (see [`composed_config`](Self::composed_config)). The shell threads its
+    /// session identity here; identity-agnostic callers pass `None` (the global
+    /// set). The overlay also contributes to the merged dev-mode config that
+    /// drives dev-mode marking below.
+    pub fn resolved_set(
+        &self,
+        identity: Option<&IdentityId>,
+    ) -> Result<Vec<ResolvedPlugin>, ManagerError> {
+        // Compose the identity-aware spec set (global + overlay) and the merged
+        // dev_mode FIRST, then reconcile *that* set so overlay-added or
+        // overlay-overridden plugins are fetched/linked/hashed before we read
+        // their active-link dirs. The public `sync()` reconciles only the global
+        // set; resolved_set must reconcile the identity set it actually loads.
+        //
+        // `dev_mode` is consumed by the dev-mode marking pass (sub-task 6c);
+        // 6b only wires the identity overlay + the merge that produces it.
+        let (spec_set, _dev_mode) = self.composed_config(identity)?;
+
+        let sync_report = self.sync_specs(&spec_set)?;
         let integrity_by_name: std::collections::BTreeMap<PluginName, IntegrityStatus> =
             sync_report
                 .ok
                 .into_iter()
                 .map(|o| (o.name, o.integrity))
                 .collect();
-
-        let spec_set = self.composed_spec_set()?;
 
         // Bundled-defaults seeding: if NONE of the embedded first-party plugins
         // is declared, seed them so a fresh profile still gets urlbar +
@@ -769,7 +882,25 @@ impl PluginManager {
     /// Returns [`ManagerError`] only for fatal errors (lock parse/write, config
     /// parse). Per-plugin failures go into [`SyncReport::failed`].
     pub fn sync(&self) -> Result<SyncReport, ManagerError> {
+        // Public sync is identity-agnostic: it reconciles the *global* composed
+        // set (plugins.lua + managed.lua). Per-identity overlay plugins are
+        // reconciled by `resolved_set` (which syncs the identity-composed set),
+        // not here — the CLI and other callers operate on the shared global set.
         let spec_set = self.composed_spec_set()?;
+        self.sync_specs(&spec_set)
+    }
+
+    /// Reconciles every spec in `spec_set` (fetch/link/hash + integrity),
+    /// writing the lock once at the end if anything changed.
+    ///
+    /// Shared by [`sync`](Self::sync) (global set) and
+    /// [`resolved_set`](Self::resolved_set) (identity-composed set), so an
+    /// overlay-added or overlay-overridden plugin is linked before
+    /// `resolved_set` reads its active-link dir.
+    fn sync_specs(
+        &self,
+        spec_set: &crate::resolve::PluginSpecSet,
+    ) -> Result<SyncReport, ManagerError> {
         let mut lock = self.load_lock()?;
         let mut report = SyncReport::default();
         let mut lock_dirty = false;
@@ -1667,6 +1798,19 @@ return M
         fs::write(config_dir.join("plugins.lua"), lua).unwrap();
     }
 
+    /// Writes a per-identity overlay at `<config>/identities/<id>/plugins.lua`.
+    fn write_identity_plugins_lua(config_dir: &Path, identity: u64, entries: &[(&str, &str)]) {
+        let dir = config_dir.join("identities").join(identity.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        let body = entries
+            .iter()
+            .map(|(k, src)| format!(r#"  ["{k}"] = {{ source = "{src}" }},"#))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lua = format!("mote.plugins({{\n{body}\n}})\n");
+        fs::write(dir.join("plugins.lua"), lua).unwrap();
+    }
+
     // -----------------------------------------------------------------------
     // default_dirs / resolve_dirs_from: canonical XDG resolver
     // -----------------------------------------------------------------------
@@ -1727,7 +1871,7 @@ return M
         let src = format!("path:{}", plugin_dir.path().display());
         write_plugins_lua(&f.config_dir, &[("my-plugin", &src)]);
 
-        let resolved = f.mgr.resolved_set().unwrap();
+        let resolved = f.mgr.resolved_set(None).unwrap();
 
         let by_name: std::collections::BTreeMap<&str, &ResolvedPlugin> =
             resolved.iter().map(|r| (r.name.as_str(), r)).collect();
@@ -1764,7 +1908,7 @@ return M
         // Must NOT error — the bad plugin is skipped, the bundled defaults seed.
         let resolved = f
             .mgr
-            .resolved_set()
+            .resolved_set(None)
             .expect("resolved_set must not fail fatally");
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
 
@@ -1788,7 +1932,7 @@ return M
         // Declaring even one bundled default suppresses auto-seeding.
         write_plugins_lua(&f.config_dir, &[("urlbar", "bundled")]);
 
-        let resolved = f.mgr.resolved_set().unwrap();
+        let resolved = f.mgr.resolved_set(None).unwrap();
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
 
         assert!(names.contains(&"urlbar"), "declared urlbar present");
@@ -1801,6 +1945,174 @@ return M
             .find(|r| r.name.as_str() == "urlbar")
             .unwrap();
         assert_eq!(urlbar.provenance, Provenance::Bundled);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6b: per-identity overlay composes; dev_mode unions across layers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn identity_overlay_adds_plugin_only_for_that_identity() {
+        let f = fixture();
+
+        // Global plugins.lua declares plugin-a.
+        let p_a = tempfile::tempdir().unwrap();
+        write_plugin(p_a.path(), "plugin-a", &[]);
+        let src_a = format!("path:{}", p_a.path().display());
+        write_plugins_lua(&f.config_dir, &[("plugin-a", &src_a)]);
+
+        // Identity 0's overlay ADDS plugin-b.
+        let p_b = tempfile::tempdir().unwrap();
+        write_plugin(p_b.path(), "plugin-b", &[]);
+        let src_b = format!("path:{}", p_b.path().display());
+        write_identity_plugins_lua(&f.config_dir, 0, &[("plugin-b", &src_b)]);
+
+        // resolved_set(Some(0)) includes the overlay's plugin-b.
+        let id = IdentityId::new(0);
+        let with_overlay: Vec<String> = f
+            .mgr
+            .resolved_set(Some(&id))
+            .unwrap()
+            .iter()
+            .map(|r| r.name.to_string())
+            .collect();
+        assert!(
+            with_overlay.contains(&"plugin-a".to_owned()),
+            "global plugin-a present: {with_overlay:?}"
+        );
+        assert!(
+            with_overlay.contains(&"plugin-b".to_owned()),
+            "overlay plugin-b present for identity 0: {with_overlay:?}"
+        );
+
+        // resolved_set(None) does NOT include the overlay's plugin-b.
+        let without_overlay: Vec<String> = f
+            .mgr
+            .resolved_set(None)
+            .unwrap()
+            .iter()
+            .map(|r| r.name.to_string())
+            .collect();
+        assert!(
+            without_overlay.contains(&"plugin-a".to_owned()),
+            "global plugin-a present without overlay: {without_overlay:?}"
+        );
+        assert!(
+            !without_overlay.contains(&"plugin-b".to_owned()),
+            "overlay plugin-b must be absent without an identity: {without_overlay:?}"
+        );
+    }
+
+    #[test]
+    fn identity_overlay_overrides_global_plugin_source() {
+        let f = fixture();
+
+        // Global declares "shared" pointing at dir A (version "1").
+        let dir_a = tempfile::tempdir().unwrap();
+        write_plugin(dir_a.path(), "shared", &[]);
+        let src_a = format!("path:{}", dir_a.path().display());
+        write_plugins_lua(&f.config_dir, &[("shared", &src_a)]);
+
+        // Identity 0 overrides "shared" to point at dir B, whose init.lua is
+        // distinguishable (a unique marker permission) so we can prove the
+        // overlay's source — not the global one — was resolved.
+        let dir_b = tempfile::tempdir().unwrap();
+        write_plugin(dir_b.path(), "shared", &["events:emit"]);
+        let src_b = format!("path:{}", dir_b.path().display());
+        write_identity_plugins_lua(&f.config_dir, 0, &[("shared", &src_b)]);
+
+        // The overlay (last layer) wins: the resolved manifest is B's, so it
+        // carries B's distinguishing permission.
+        let id = IdentityId::new(0);
+        let resolved = f.mgr.resolved_set(Some(&id)).unwrap();
+        let shared = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "shared")
+            .expect("shared resolved");
+        assert!(
+            shared
+                .manifest
+                .permissions
+                .iter()
+                .any(|p| p == "events:emit"),
+            "overlay source (dir B) must override the global one (overlay wins); \
+             resolved perms: {:?}",
+            shared.manifest.permissions
+        );
+    }
+
+    #[test]
+    fn dev_mode_unions_across_plugins_lua_and_managed_lua() {
+        let f = fixture();
+
+        // plugins.lua contributes one dev_mode directory + one dev_mode plugin.
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            "mote.dev_mode({ directories = { \"/dev/from-user\" }, plugins = { \"user-dev\" } })\n",
+        )
+        .unwrap();
+
+        // managed.lua contributes a different dev_mode directory + plugin.
+        fs::write(
+            f.config_dir.join("managed.lua"),
+            "mote.dev_mode({ directories = { \"/dev/from-managed\" }, plugins = { \"managed-dev\" } })\n",
+        )
+        .unwrap();
+
+        let (_specs, dev_mode) = f.mgr.composed_config(None).unwrap();
+        assert!(
+            dev_mode.directories.iter().any(|d| d == "/dev/from-user"),
+            "user dev dir merged: {:?}",
+            dev_mode.directories
+        );
+        assert!(
+            dev_mode
+                .directories
+                .iter()
+                .any(|d| d == "/dev/from-managed"),
+            "managed dev dir merged: {:?}",
+            dev_mode.directories
+        );
+        assert!(dev_mode.plugins.iter().any(|p| p == "user-dev"));
+        assert!(dev_mode.plugins.iter().any(|p| p == "managed-dev"));
+    }
+
+    #[test]
+    fn dev_mode_unions_identity_overlay_and_dedups() {
+        let f = fixture();
+
+        // plugins.lua: one dir, shared between layers (must dedup).
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            "mote.dev_mode({ directories = { \"/dev/shared\" } })\n",
+        )
+        .unwrap();
+
+        // Identity overlay: the shared dir again + an identity-only one.
+        let dir = f.config_dir.join("identities").join("0");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugins.lua"),
+            "mote.dev_mode({ directories = { \"/dev/shared\", \"/dev/identity-only\" } })\n",
+        )
+        .unwrap();
+
+        let id = IdentityId::new(0);
+        let (_specs, dev_mode) = f.mgr.composed_config(Some(&id)).unwrap();
+        let shared_count = dev_mode
+            .directories
+            .iter()
+            .filter(|d| *d == "/dev/shared")
+            .count();
+        assert_eq!(shared_count, 1, "shared dir must be deduplicated");
+        assert!(
+            dev_mode
+                .directories
+                .iter()
+                .any(|d| d == "/dev/identity-only"),
+            "identity-overlay dev dir merged: {:?}",
+            dev_mode.directories
+        );
     }
 
     // -----------------------------------------------------------------------

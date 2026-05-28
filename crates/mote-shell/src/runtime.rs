@@ -189,7 +189,8 @@ impl PluginHost {
     /// short-circuits on already-loaded plugins via the runtime), but the shell
     /// guards it with a `did_initial_load` flag so it runs exactly once.
     pub(crate) fn run_initial_load_pass(&mut self) {
-        let resolved = match self.manager.resolved_set() {
+        let session_identity = IdentityId::new(super::SESSION_IDENTITY);
+        let resolved = match self.manager.resolved_set(Some(&session_identity)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
@@ -199,7 +200,7 @@ impl PluginHost {
                 return;
             }
         };
-        let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
+        let identity = IdentityContext::new(session_identity);
         let combos = self.combos.clone();
         self.load_resolved(resolved, identity, &combos);
     }
@@ -453,7 +454,8 @@ impl PluginHost {
     /// `dir` / `init_source` / `manifest` reflect the current on-disk state
     /// (after an update/rollback relink). Returns `None` (logging) on failure.
     fn reresolve(&self, plugin: &PluginName) -> Option<ResolvedPlugin> {
-        match self.manager.resolved_set() {
+        let session_identity = IdentityId::new(super::SESSION_IDENTITY);
+        match self.manager.resolved_set(Some(&session_identity)) {
             Ok(set) => set.into_iter().find(|rp| &rp.name == plugin),
             Err(e) => {
                 eprintln!("mote-shell: re-resolve of `{plugin}` failed: {e}");
