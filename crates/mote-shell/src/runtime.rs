@@ -8,13 +8,16 @@
 //!    so every gatekept `mote.*` call is audited), and the v1 [`Registry`].
 //! 2. **Resolves and loads the composed plugin set** via
 //!    [`PluginManager::resolved_set`] (`plugins.lua` + `managed.lua` + the
-//!    bundled first-party defaults). Each [`ResolvedPlugin`] is run through the
-//!    approval coordinator ([`classify`]): auto-grant plugins (bundled,
-//!    dev-mode, or unchanged/contracting since a prior approval) load
-//!    immediately through [`mote_runtime::Runtime::load`]'s four-step pipeline
-//!    with a [`DecidedPolicy`], and their approval is recorded; plugins that
-//!    need the install/update dialog are parked in
-//!    [`PluginHost::pending_approvals`] for Task 5 to resolve.
+//!    bundled first-party defaults) in [`PluginHost::run_initial_load_pass`],
+//!    which the shell runs *after* the window is live (so a slow/offline git
+//!    fetch never blocks startup and a fatal resolution error never prevents
+//!    the window opening). Each [`ResolvedPlugin`] is run through the approval
+//!    coordinator ([`classify`]): auto-grant plugins (bundled, dev-mode, or
+//!    unchanged/contracting since a prior approval) load immediately through
+//!    [`mote_runtime::Runtime::load`]'s four-step pipeline with a
+//!    [`DecidedPolicy`], and their approval is recorded; plugins that need the
+//!    install/update dialog are parked in [`PluginHost::pending_approvals`] and
+//!    the shell renders the dialog (Task 5).
 //! 3. **Builds the integrity-panel view-model from LIVE data** ([`build_panel`]):
 //!    the loaded plugins (name / version / provenance-derived kind /
 //!    requested→effective permissions / capabilities / integrity status), any
@@ -50,6 +53,10 @@ pub(crate) struct PluginHost {
     /// The plugin-management façade (cache, lock, approval store) resolving the
     /// composed spec set the shell loads from.
     pub(crate) manager: PluginManager,
+    /// The dangerous-combination registry, retained from boot so the deferred
+    /// load pass and the re-approval (update) path can re-classify manifests
+    /// without reloading the registry.
+    combos: CombinationRegistry,
     /// The plugins that loaded successfully, in dependency (load) order.
     pub(crate) loaded: Vec<ResolvedPlugin>,
     /// Plugins that resolved but require a user-facing approval dialog before
@@ -59,13 +66,11 @@ pub(crate) struct PluginHost {
 }
 
 impl PluginHost {
-    /// Stand up the runtime over `store`, then resolve and load every plugin
-    /// the composed spec set declares (plus the bundled first-party defaults).
-    ///
-    /// Loading is driven through the approval coordinator: each resolved plugin
-    /// is [`classify`]d against its provenance + the approval store. Auto-grant
-    /// plugins load immediately (and their approval is recorded); plugins that
-    /// need the dialog are parked in [`Self::pending_approvals`] for Task 5.
+    /// Stand up the runtime + manager + audit over `store`. **Does not load any
+    /// plugins** — the resolve/sync/load pass runs later in
+    /// [`run_initial_load_pass`](Self::run_initial_load_pass), once the window
+    /// is live (so a slow/offline git fetch never blocks startup and a fatal
+    /// resolution error never prevents the window from opening).
     ///
     /// Reuses the shell's shared `mote-storage` [`Store`] so plugin storage,
     /// the audit sink, the session, and the approval store all live in one
@@ -75,9 +80,7 @@ impl PluginHost {
     ///
     /// # Errors
     /// Returns a boxed error only if the registry, audit log, or the canonical
-    /// state directories cannot be resolved. A plugin that fails to load or
-    /// classify is logged and skipped (the window keeps running); it does not
-    /// abort startup.
+    /// state directories cannot be resolved.
     pub(crate) fn boot(store: Store) -> Result<Self, Box<dyn std::error::Error>> {
         // Canonical state dirs — shared with the CLI so approvals are mutual.
         let (config_dir, cache_dir) = PluginManager::default_dirs()
@@ -89,7 +92,14 @@ impl PluginHost {
     ///
     /// [`boot`](Self::boot) is the production entry-point (canonical dirs);
     /// this variant takes the dirs explicitly so headless tests can drive the
-    /// full resolve → classify → load pass with tempdirs and an in-memory store.
+    /// resolve → classify → load pass with tempdirs and an in-memory store.
+    ///
+    /// **No plugin loading happens here.** Construction only stands up the
+    /// runtime + manager + audit; the resolve/sync/load pass runs later in
+    /// [`run_initial_load_pass`](Self::run_initial_load_pass), which the shell
+    /// calls *after* the window is live. This keeps a slow or offline git fetch
+    /// (`resolved_set` → `sync`) off the startup path so the window always
+    /// opens, and keeps a fatal resolution error from aborting the app.
     ///
     /// # Errors
     /// See [`boot`](Self::boot).
@@ -114,21 +124,48 @@ impl PluginHost {
 
         let manager = PluginManager::new(config_dir, cache_dir, &store);
 
-        // Resolve the composed spec set (declared + seeded bundled defaults),
-        // reconciled (fetched/linked/hashed) by the manager.
-        let resolved = manager.resolved_set()?;
-
-        let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
-        let mut host = Self {
+        Ok(Self {
             runtime,
             audit,
             store,
             manager,
+            combos,
             loaded: Vec::new(),
             pending_approvals: Vec::new(),
+        })
+    }
+
+    /// Resolve, classify, and load every plugin the composed spec set declares
+    /// (plus the bundled first-party defaults).
+    ///
+    /// This is the deferred load pass: the shell calls it once on the first
+    /// post-paint tick, *after* the window and chrome are live. It runs the
+    /// reconciling [`PluginManager::resolved_set`] (which fetches/links/hashes
+    /// git plugins over the network), then walks the resolved set through
+    /// [`load_resolved`](Self::load_resolved).
+    ///
+    /// **This method never panics and never aborts the app.** A fatal
+    /// `resolved_set` error (e.g. a `plugins.lua` that does not parse) is logged
+    /// and swallowed, leaving [`loaded`](Self::loaded) and
+    /// [`pending_approvals`](Self::pending_approvals) empty — the window stays
+    /// alive. Per-plugin failures are logged and skipped inside `load_resolved`.
+    /// Calling it more than once is a no-op after the first pass (the load loop
+    /// short-circuits on already-loaded plugins via the runtime), but the shell
+    /// guards it with a `did_initial_load` flag so it runs exactly once.
+    pub(crate) fn run_initial_load_pass(&mut self) {
+        let resolved = match self.manager.resolved_set() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "mote-shell: plugin resolution failed; no plugins loaded \
+                     (window stays alive): {e}"
+                );
+                return;
+            }
         };
-        host.load_resolved(resolved, identity, &combos);
-        Ok(host)
+        let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
+        let combos = self.combos.clone();
+        self.load_resolved(resolved, identity, &combos);
     }
 
     /// Classifies and loads each resolved plugin (auto-grant path only here;
@@ -933,7 +970,8 @@ return M
             .put(&manifest.name, &ApprovalHash::of(&manifest))
             .unwrap();
 
-        let host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
 
         let loaded: Vec<&str> = host.loaded.iter().map(|r| r.name.as_str()).collect();
         assert!(
@@ -982,7 +1020,9 @@ return M
             .put(&manifest.name, &ApprovalHash::of(&manifest))
             .unwrap();
 
-        let _host = PluginHost::boot_in(store.clone(), config.path(), cache.path()).unwrap();
+        let mut host = PluginHost::boot_in(store.clone(), config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+        drop(host);
 
         let approval = mote_pluginmgr::ApprovalStore::new(&store);
         let names: Vec<String> = approval
@@ -1011,7 +1051,8 @@ return M
 
         // No approval pre-seeded: the path plugin is a first install → dialog.
         let store = Store::open_in_memory().unwrap();
-        let host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
 
         let loaded: Vec<&str> = host.loaded.iter().map(|r| r.name.as_str()).collect();
         let pending: Vec<&str> = host
@@ -1038,5 +1079,41 @@ return M
             loaded.contains(&"workspace-manager"),
             "bundled still loads: {loaded:?}"
         );
+    }
+
+    #[test]
+    fn run_initial_load_pass_with_broken_config_is_non_fatal() {
+        // Critical #2 regression guard: a fatal `resolved_set` error (here, a
+        // `plugins.lua` that does not parse — `composed_spec_set` returns Err)
+        // must NOT panic and must NOT abort. The host stays usable with empty
+        // loaded/pending so the window keeps running.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // A `plugins.lua` that is not valid config Lua → ManagerError::Config.
+        std::fs::write(
+            config.path().join("plugins.lua"),
+            "this is not ){ valid lua at all (((",
+        )
+        .unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        // The load pass must swallow the resolution error.
+        host.run_initial_load_pass();
+
+        assert!(
+            host.loaded.is_empty(),
+            "a fatal resolution error must leave no plugins loaded: {:?}",
+            host.loaded
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            host.pending_approvals.is_empty(),
+            "a fatal resolution error must leave nothing pending"
+        );
+        // The host is still usable: building the panel does not panic.
+        let _ = host.build_panel();
     }
 }

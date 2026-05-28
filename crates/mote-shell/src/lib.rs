@@ -326,6 +326,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         modifiers: Modifiers::NONE,
         focus: FocusOwner::Page,
         chrome_ready: false,
+        did_initial_load: false,
         first_frame_logged: false,
         started: Instant::now(),
     };
@@ -627,7 +628,7 @@ fn push(queue: &CommandQueue, command: ShellCommand) {
 /// thread.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "winit app state — each bool is an independent in-flight UI flag (integrity overlay open, chrome-side panel open, chrome-ready, first-frame-logged); a state machine would obscure them"
+    reason = "winit app state — each bool is an independent in-flight UI flag (integrity overlay open, chrome-side panel open, chrome-ready, did-initial-load, first-frame-logged); a state machine would obscure them"
 )]
 struct ShellApp {
     engine: Engine,
@@ -707,6 +708,11 @@ struct ShellApp {
     /// initial tab-list / URL push (an `applyOp` before the bootstrap runs is
     /// lost).
     chrome_ready: bool,
+    /// `true` once the deferred plugin load pass has run (exactly once, on the
+    /// first post-paint tick). Until then no plugin has been resolved/loaded —
+    /// the load is deferred past window creation so a slow/offline git fetch or
+    /// a fatal resolution error cannot block or abort startup (ADR T3 review).
+    did_initial_load: bool,
     /// CEF needs a brief warm-up before the chrome's first paint; we log once.
     first_frame_logged: bool,
     /// When the window opened (for the warm-up log only).
@@ -962,13 +968,9 @@ impl ShellApp {
 
     /// Push an approval-dialog view-model into the chrome document. The chrome
     /// page's `panels.js` builds the dialog DOM via `createElement` /
-    /// `textContent` (ADR-0005). The dialog's buttons invoke `approve_plugin`
-    /// per the T5 op shape — that op lands in Task 5; until then the registry
-    /// returns 404 for it, which is the documented expected behaviour for T4.
-    #[allow(
-        dead_code,
-        reason = "T4: wired here for the debug push path; T5 calls this from the load-pass"
-    )]
+    /// `textContent` (ADR-0005). The dialog's buttons invoke the `approve_plugin`
+    /// op; the pump thread finishes the load and re-renders the panel on the
+    /// user's answer (ADR-0007 async approval).
     fn push_approval_dialog(&self, req: &ApprovalRequest) -> bool {
         if !self.chrome_ready {
             return false;
@@ -1867,6 +1869,22 @@ impl ApplicationHandler for ShellApp {
         if !self.chrome_ready && self.bridge.page().paint_count() >= 1 {
             self.chrome_ready = true;
             self.push_state_to_chrome();
+        }
+
+        // The plugin load pass is deferred past window creation so a slow or
+        // offline git fetch (resolved_set → sync) cannot block startup and a
+        // fatal resolution error cannot abort the app (T3 review findings).
+        // Run it exactly once, on the first tick after the chrome is live, so
+        // any first-install approval dialog can render immediately.
+        if self.chrome_ready && !self.did_initial_load {
+            self.did_initial_load = true;
+            self.host.run_initial_load_pass();
+            // Render any first-install / update dialog now that chrome is live.
+            // The buttons call the `approve_plugin` op (registered below); the
+            // pump thread finishes the load and re-renders on the user's answer.
+            for (_, req) in &self.host.pending_approvals {
+                self.push_approval_dialog(req);
+            }
         }
 
         if !self.first_frame_logged
