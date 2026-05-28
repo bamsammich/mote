@@ -16,14 +16,14 @@
 //!
 //! # Dead-code suppression
 //!
-//! These items are `pub(crate)` and are tested directly, but not yet referenced
-//! from the non-test build graph — Task 3 wires the install/auto-grant path
-//! (`classify`, `DecidedPolicy`, …) into the shell coordinator, and Task 5 wires
-//! the dialog-result path (`approval_from_dialog`, `DialogResult`, …). Rather
-//! than a blanket module-level `#![allow]`, each currently-dead item carries its
-//! own `#[allow(dead_code)]` naming the task that wires it in. This is
-//! self-cleaning: whoever connects an item in T3/T5 sees the attribute on the
-//! item they're touching and removes it.
+//! The install/auto-grant path (`classify`, `DecidedPolicy`, …) is now wired
+//! into the shell's plugin host (Task 3). The dialog-result path
+//! (`approval_from_dialog`, `DialogResult`, …) is still tested directly but not
+//! yet referenced from the non-test build graph — Task 5 wires it once the
+//! approval dialog op handler exists. Rather than a blanket module-level
+//! `#![allow]`, each currently-dead item carries its own `#[allow(dead_code)]`
+//! naming the task that wires it in. This is self-cleaning: whoever connects an
+//! item in T5 sees the attribute on the item they're touching and removes it.
 
 use std::collections::BTreeSet;
 
@@ -42,7 +42,6 @@ use thiserror::Error;
 ///
 /// `decide()` never renders or blocks — per ADR-0007 the dialog/await happens
 /// in the shell, not inside synchronous `decide()`.
-#[allow(dead_code)] // wired in Task 3 (auto-grant + post-dialog replay)
 pub(crate) struct DecidedPolicy {
     decision: Approval,
 }
@@ -53,7 +52,6 @@ impl std::fmt::Debug for DecidedPolicy {
     }
 }
 
-#[allow(dead_code)] // wired in Task 3 (auto-grant + post-dialog replay)
 impl DecidedPolicy {
     /// Wraps a pre-made [`Approval`] decision.
     pub(crate) const fn new(decision: Approval) -> Self {
@@ -79,7 +77,6 @@ impl ApprovalPolicy for DecidedPolicy {
 
 /// Errors that can occur during [`classify`].
 #[derive(Debug, Error)]
-#[allow(dead_code)] // wired in Task 3
 pub(crate) enum ClassifyError {
     /// The approval store returned an error.
     #[error("approval store error: {0}")]
@@ -87,7 +84,6 @@ pub(crate) enum ClassifyError {
 }
 
 /// Whether a plugin can be auto-granted or needs the approval dialog.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) enum ApprovalOutcome {
     /// Auto-grant: the plugin is trusted by construction (bundled / dev-mode),
     /// or its manifest did not expand the previously approved permission set.
@@ -124,7 +120,6 @@ impl std::fmt::Debug for ApprovalOutcome {
 /// # Errors
 ///
 /// Returns [`ClassifyError::Store`] if the approval store cannot be read.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) fn classify(
     manifest: &Manifest,
     provenance: Provenance,
@@ -171,7 +166,6 @@ pub(crate) fn classify(
 /// `capability:<term>`, `consumes:<term>`, and `identity_scope: <old> → <new>`.
 /// Only `Added` deltas are included for the three list fields (removals do not
 /// expand the surface).
-#[allow(dead_code)] // wired in Task 3 (called by classify on the expansion path)
 fn collect_new_surface(report: &DiffReport) -> Vec<String> {
     let mut new_surface = Vec::new();
     let added = |deltas: &[mote_pluginmgr::Delta]| -> Vec<String> {
@@ -201,7 +195,6 @@ fn collect_new_surface(report: &DiffReport) -> Vec<String> {
 }
 
 /// Returns the short source label shown in the approval dialog.
-#[allow(dead_code)] // wired in Task 3 (only build_request uses it today)
 const fn provenance_label(provenance: Provenance) -> &'static str {
     match provenance {
         Provenance::Bundled => "bundled",
@@ -224,7 +217,6 @@ const fn provenance_label(provenance: Provenance) -> &'static str {
 ///
 /// The list is kept short by design: marking too many permissions as high-risk
 /// dilutes the signal. Additions require a documented reason.
-#[allow(dead_code)] // wired in Task 3 (only permission_to_narrowable uses it today)
 const HARDCODED_HIGH_RISK: &[&str] = &[
     "page:inject_script",
     "page:inject_unsafe_script",
@@ -233,7 +225,6 @@ const HARDCODED_HIGH_RISK: &[&str] = &[
 ];
 
 /// Builds the [`ApprovalRequest`] view-model for the approval dialog.
-#[allow(dead_code)] // wired in Task 3 (called by classify on the dialog path)
 fn build_request(
     manifest: &Manifest,
     provenance: Provenance,
@@ -319,7 +310,6 @@ fn build_request(
 /// For now, the description is the raw permission string itself. Rich
 /// human-readable descriptions for each permission are a future task (they
 /// require registry annotations not yet present in v1.toml).
-#[allow(dead_code)] // wired in Task 3 (called by build_request)
 fn permission_to_narrowable(raw: &str) -> NarrowablePermission {
     let (da_key, requested_scope, narrowable) = raw.parse::<Permission>().map_or_else(
         // Unparsable permission string — treat as non-narrowable with no scope.

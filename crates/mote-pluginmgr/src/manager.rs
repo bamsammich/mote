@@ -362,6 +362,17 @@ impl PluginManager {
         Some((config, cache))
     }
 
+    /// Borrows the manager's per-plugin [`ApprovalStore`].
+    ///
+    /// Exposed so the shell's load coordinator can read prior approvals (to
+    /// classify auto-grant vs. dialog) and record new ones, sharing the exact
+    /// same store the manager's own `approve`/`pin` operations write to — there
+    /// is one approval record per plugin regardless of who wrote it.
+    #[must_use]
+    pub const fn approval_store(&self) -> &ApprovalStore {
+        &self.approval
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------

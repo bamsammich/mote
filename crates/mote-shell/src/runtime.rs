@@ -1,22 +1,25 @@
-//! Phase-1 plugin runtime wiring + the live integrity-panel view-model.
+//! Plugin runtime wiring (driven by [`PluginManager`]) + the live
+//! integrity-panel view-model.
 //!
 //! This module is the shell's bridge to the plugin subsystem. It:
 //!
-//! 1. **Instantiates the runtime** ([`build_runtime`]) over the shared
-//!    `mote-storage` [`Store`], a `mote-audit` [`AuditLog`] (whose
-//!    [`EventProducer`] is fed into the runtime so every gatekept `mote.*` call
-//!    is audited), and the v1 [`Registry`].
-//! 2. **Loads the bundled first-party plugins** (`plugins/urlbar`,
-//!    `plugins/workspace-manager`, embedded at compile time) through
-//!    [`mote_runtime::Runtime::load`]'s four-step pipeline with a
-//!    [`GrantAsRequested`] approval policy — bundled/first-party code is granted
-//!    as requested (DESIGN: bundled plugins are trusted). Their behaviour is
-//!    still stubbed; the point is that they are **loaded and visible**.
+//! 1. **Instantiates the runtime** over the shared `mote-storage` [`Store`], a
+//!    `mote-audit` [`AuditLog`] (whose `EventProducer` is fed into the runtime
+//!    so every gatekept `mote.*` call is audited), and the v1 [`Registry`].
+//! 2. **Resolves and loads the composed plugin set** via
+//!    [`PluginManager::resolved_set`] (`plugins.lua` + `managed.lua` + the
+//!    bundled first-party defaults). Each [`ResolvedPlugin`] is run through the
+//!    approval coordinator ([`classify`]): auto-grant plugins (bundled,
+//!    dev-mode, or unchanged/contracting since a prior approval) load
+//!    immediately through [`mote_runtime::Runtime::load`]'s four-step pipeline
+//!    with a [`DecidedPolicy`], and their approval is recorded; plugins that
+//!    need the install/update dialog are parked in
+//!    [`PluginHost::pending_approvals`] for Task 5 to resolve.
 //! 3. **Builds the integrity-panel view-model from LIVE data** ([`build_panel`]):
-//!    the runtime's actually-loaded plugins (name / version / source=bundled /
-//!    permissions requested→effective / capabilities / integrity status), the
-//!    audit query (recent activity → denials), and per-plugin `mote-storage`
-//!    sizes.
+//!    the loaded plugins (name / version / provenance-derived kind /
+//!    requested→effective permissions / capabilities / integrity status), any
+//!    awaiting-approval plugins, the audit query (recent activity → denials),
+//!    and per-plugin `mote-storage` sizes.
 //!
 //! The rendered HTML is produced by [`render_panel_html`] and served as the
 //! `mote://overlay/integrity.html` overlay surface; the shell composites it
@@ -25,33 +28,17 @@
 use std::time::Duration;
 
 use mote_audit::{AuditLog, Config};
-use mote_registry::Registry;
-use mote_runtime::{GrantAsRequested, IdentityContext, Runtime};
+use mote_pluginmgr::{IntegrityStatus as MgrIntegrity, PluginManager, Provenance, ResolvedPlugin};
+use mote_registry::{CombinationRegistry, Registry};
+use mote_runtime::{ApprovalHash, IdentityContext, Runtime};
 use mote_storage::{IdentityScope, Store};
 use mote_types::{IdentityId, PluginName, SchemaVersion};
 use mote_ui::{
-    AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus, PermissionRow, PluginKind,
-    PluginRow, StorageRow,
+    AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus, PermissionRow,
+    PluginAction, PluginKind, PluginRow, StorageRow,
 };
 
-/// One bundled first-party plugin: its directory name and embedded `init.lua`.
-struct Bundled {
-    name: &'static str,
-    source: &'static str,
-}
-
-/// The bundled first-party plugins, embedded at compile time so the binary is
-/// self-contained (the `Bundled` provenance — DESIGN §Integrity).
-const BUNDLED: &[Bundled] = &[
-    Bundled {
-        name: "urlbar",
-        source: include_str!("../../../plugins/urlbar/init.lua"),
-    },
-    Bundled {
-        name: "workspace-manager",
-        source: include_str!("../../../plugins/workspace-manager/init.lua"),
-    },
-];
+use crate::approval::{ApprovalOutcome, DecidedPolicy, classify};
 
 /// The audit-log handle bundled with the runtime. The shell holds it so the
 /// background audit thread stays alive and so the integrity panel can query it.
@@ -60,22 +47,59 @@ pub(crate) struct PluginHost {
     pub(crate) runtime: Runtime,
     pub(crate) audit: AuditLog,
     pub(crate) store: Store,
-    /// Names of the plugins that loaded successfully, in load order.
-    pub(crate) loaded: Vec<PluginName>,
+    /// The plugin-management façade (cache, lock, approval store) resolving the
+    /// composed spec set the shell loads from.
+    pub(crate) manager: PluginManager,
+    /// The plugins that loaded successfully, in dependency (load) order.
+    pub(crate) loaded: Vec<ResolvedPlugin>,
+    /// Plugins that resolved but require a user-facing approval dialog before
+    /// they can load. Task 5 drives the dialog and finishes the load; Task 3
+    /// only records them (and renders them as "awaiting approval" panel rows).
+    pub(crate) pending_approvals: Vec<(ResolvedPlugin, mote_ui::ApprovalRequest)>,
 }
 
 impl PluginHost {
-    /// Stand up the runtime over `store`, then load every bundled plugin.
+    /// Stand up the runtime over `store`, then resolve and load every plugin
+    /// the composed spec set declares (plus the bundled first-party defaults).
+    ///
+    /// Loading is driven through the approval coordinator: each resolved plugin
+    /// is [`classify`]d against its provenance + the approval store. Auto-grant
+    /// plugins load immediately (and their approval is recorded); plugins that
+    /// need the dialog are parked in [`Self::pending_approvals`] for Task 5.
     ///
     /// Reuses the shell's shared `mote-storage` [`Store`] so plugin storage,
-    /// the audit sink, and the session all live in one database.
+    /// the audit sink, the session, and the approval store all live in one
+    /// database. The manager's config/cache dirs are the canonical
+    /// [`PluginManager::default_dirs`] so an approval recorded by the `mote`
+    /// CLI is honored here and vice versa.
     ///
     /// # Errors
-    /// Returns a boxed error only if the registry or audit log cannot be
-    /// created. A plugin that fails to load is logged and skipped (the window
-    /// keeps running); it does not abort startup.
+    /// Returns a boxed error only if the registry, audit log, or the canonical
+    /// state directories cannot be resolved. A plugin that fails to load or
+    /// classify is logged and skipped (the window keeps running); it does not
+    /// abort startup.
     pub(crate) fn boot(store: Store) -> Result<Self, Box<dyn std::error::Error>> {
+        // Canonical state dirs — shared with the CLI so approvals are mutual.
+        let (config_dir, cache_dir) = PluginManager::default_dirs()
+            .ok_or("cannot resolve Mote state directories ($XDG_*/$HOME unset)")?;
+        Self::boot_in(store, &config_dir, &cache_dir)
+    }
+
+    /// Boots the plugin host against explicit config/cache directories.
+    ///
+    /// [`boot`](Self::boot) is the production entry-point (canonical dirs);
+    /// this variant takes the dirs explicitly so headless tests can drive the
+    /// full resolve → classify → load pass with tempdirs and an in-memory store.
+    ///
+    /// # Errors
+    /// See [`boot`](Self::boot).
+    pub(crate) fn boot_in(
+        store: Store,
+        config_dir: &std::path::Path,
+        cache_dir: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let registry = Registry::load(SchemaVersion::V1)?;
+        let combos = registry.combinations().clone();
         let audit = AuditLog::new(
             &store,
             Config {
@@ -86,85 +110,119 @@ impl PluginHost {
                 flush_interval: Duration::from_millis(250),
             },
         )?;
-        let mut runtime = Runtime::new(registry, store.clone(), audit.producer());
+        let runtime = Runtime::new(registry, store.clone(), audit.producer());
 
-        // Bundled/first-party plugins run under the default identity and are
-        // granted as requested (trusted bundle).
+        let manager = PluginManager::new(config_dir, cache_dir, &store);
+
+        // Resolve the composed spec set (declared + seeded bundled defaults),
+        // reconciled (fetched/linked/hashed) by the manager.
+        let resolved = manager.resolved_set()?;
+
         let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
-        let policy = GrantAsRequested;
+        let mut host = Self {
+            runtime,
+            audit,
+            store,
+            manager,
+            loaded: Vec::new(),
+            pending_approvals: Vec::new(),
+        };
+        host.load_resolved(resolved, identity, &combos);
+        Ok(host)
+    }
 
-        let mut loaded = Vec::new();
-        for b in BUNDLED {
-            match runtime.load(b.source, identity, &policy) {
-                Ok(running) => {
-                    eprintln!(
-                        "mote-shell: loaded bundled plugin `{}` (caps: {:?}, perms: {})",
-                        running.name,
-                        running.capabilities,
-                        running.effective_permissions.len()
-                    );
-                    loaded.push(running.name);
-                }
+    /// Classifies and loads each resolved plugin (auto-grant path only here;
+    /// dialog-gated plugins are parked in [`Self::pending_approvals`]).
+    fn load_resolved(
+        &mut self,
+        resolved: Vec<ResolvedPlugin>,
+        identity: IdentityContext,
+        combos: &CombinationRegistry,
+    ) {
+        let total = resolved.len();
+        for rp in resolved {
+            let outcome = match classify(
+                &rp.manifest,
+                rp.provenance,
+                self.manager.approval_store(),
+                combos,
+            ) {
+                Ok(o) => o,
                 Err(e) => {
                     eprintln!(
-                        "mote-shell: bundled plugin `{}` failed to load: {e}",
-                        b.name
+                        "mote-shell: plugin `{}` could not be classified: {e}",
+                        rp.name
                     );
+                    continue;
+                }
+            };
+
+            match outcome {
+                ApprovalOutcome::AutoGrant => {
+                    match self
+                        .runtime
+                        .load(&rp.init_source, identity, &DecidedPolicy::grant())
+                    {
+                        Ok(running) => {
+                            eprintln!(
+                                "mote-shell: loaded plugin `{}` (caps: {:?}, perms: {})",
+                                running.name,
+                                running.capabilities,
+                                running.effective_permissions.len()
+                            );
+                            // Record the approval so a later launch (or the CLI)
+                            // sees this manifest as approved.
+                            if let Err(e) = self
+                                .manager
+                                .approval_store()
+                                .put(&rp.name, &ApprovalHash::of(&rp.manifest))
+                            {
+                                eprintln!(
+                                    "mote-shell: failed to record approval for `{}`: {e}",
+                                    rp.name
+                                );
+                            }
+                            self.loaded.push(rp);
+                        }
+                        Err(e) => {
+                            eprintln!("mote-shell: plugin `{}` failed to load: {e}", rp.name);
+                        }
+                    }
+                }
+                ApprovalOutcome::NeedsDialog(req) => {
+                    eprintln!(
+                        "mote-shell: plugin `{}` awaiting approval (dialog deferred to Task 5)",
+                        rp.name
+                    );
+                    self.pending_approvals.push((rp, req));
                 }
             }
         }
         eprintln!(
-            "mote-shell: plugin runtime up; {}/{} bundled plugins loaded",
-            loaded.len(),
-            BUNDLED.len()
+            "mote-shell: plugin runtime up; {}/{} plugins loaded, {} awaiting approval",
+            self.loaded.len(),
+            total,
+            self.pending_approvals.len()
         );
-
-        Ok(Self {
-            runtime,
-            audit,
-            store,
-            loaded,
-        })
     }
 
     /// Build the integrity-panel view-model from the host's LIVE state.
+    ///
+    /// Each loaded plugin renders with its real provenance-derived
+    /// [`PluginKind`], the integrity status the manager computed, and the action
+    /// set appropriate to its kind. Plugins awaiting approval (parked in
+    /// [`Self::pending_approvals`]) render as rows marked with
+    /// [`IntegrityStatus::Unknown`] — see the note on `pending_panel_row` for
+    /// the mote-ui variant gap.
     pub(crate) fn build_panel(&self) -> IntegrityPanel {
-        let plugins: Vec<PluginRow> = self
-            .loaded
-            .iter()
-            .filter_map(|name| self.runtime.running(name))
-            .map(|running| {
-                // For a bundled plugin granted as-requested, the effective grant
-                // set IS the requested set, so each effective permission is also
-                // its requested form (no narrowing, no denial).
-                let permissions = running
-                    .effective_permissions
-                    .iter()
-                    .map(|p| PermissionRow {
-                        requested: p.clone(),
-                        effective: p.clone(),
-                        narrowed: false,
-                        denied: false,
-                    })
-                    .collect();
-                PluginRow {
-                    name: running.name.as_str().to_owned(),
-                    // `RunningPlugin` does not surface the manifest version; the
-                    // shell owns the bundle, so it reads the version from the
-                    // embedded source it loaded (see `bundled_version`).
-                    version: bundled_version(running.name.as_str())
-                        .unwrap_or("bundled")
-                        .to_owned(),
-                    fulfills: running.capabilities.clone(),
-                    consumes: running.consumes.clone(),
-                    permissions,
-                    last_used: self.last_used(&running.name),
-                    integrity: IntegrityStatus::Bundled,
-                    kind: PluginKind::Bundled,
-                    actions: Vec::new(),
-                }
-            })
-            .collect();
+        let mut plugins: Vec<PluginRow> =
+            self.loaded.iter().map(|rp| self.loaded_row(rp)).collect();
+        // Plugins blocked on the approval dialog render as awaiting-approval rows.
+        plugins.extend(
+            self.pending_approvals
+                .iter()
+                .map(|(rp, _req)| pending_row(rp)),
+        );
 
         let query = self.audit.query();
 
@@ -198,10 +256,10 @@ impl PluginHost {
         let storage = self
             .loaded
             .iter()
-            .filter_map(|name| {
-                let bytes = self.storage_bytes(name);
+            .filter_map(|rp| {
+                let bytes = self.storage_bytes(&rp.name);
                 (bytes > 0).then(|| StorageRow {
-                    plugin: name.as_str().to_owned(),
+                    plugin: rp.name.as_str().to_owned(),
                     size_human: human_bytes(bytes),
                     size_bytes: bytes,
                     label: None,
@@ -214,6 +272,42 @@ impl PluginHost {
             network_audit,
             storage,
             denials,
+        }
+    }
+
+    /// Builds the panel row for a loaded plugin from its live runtime state.
+    ///
+    /// Effective permissions come from the running instance; for an
+    /// auto-granted plugin the effective set IS the requested set, so each
+    /// renders as its own (un-narrowed, un-denied) form.
+    fn loaded_row(&self, rp: &ResolvedPlugin) -> PluginRow {
+        let permissions = self
+            .runtime
+            .running(&rp.name)
+            .map(|running| {
+                running
+                    .effective_permissions
+                    .iter()
+                    .map(|p| PermissionRow {
+                        requested: p.clone(),
+                        effective: p.clone(),
+                        narrowed: false,
+                        denied: false,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        PluginRow {
+            name: rp.name.as_str().to_owned(),
+            version: rp.manifest.version.clone(),
+            fulfills: rp.manifest.capabilities.clone(),
+            consumes: rp.manifest.consumes.clone(),
+            permissions,
+            last_used: self.last_used(&rp.name),
+            integrity: mgr_integrity_to_ui(&rp.integrity),
+            actions: actions_for_kind(&kind),
+            kind,
         }
     }
 
@@ -240,18 +334,109 @@ impl PluginHost {
     }
 }
 
-/// The bundled plugin's declared `version`, read from the embedded source.
+/// Maps a plugin's [`Provenance`] to the integrity-panel [`PluginKind`].
 ///
-/// `RunningPlugin` does not expose the manifest version, but the shell owns the
-/// bundle and the version is a stable `version = "x.y.z"` line in the embedded
-/// `init.lua`. This is shell-side bundle metadata, not runtime introspection.
-fn bundled_version(name: &str) -> Option<&'static str> {
-    let src = BUNDLED.iter().find(|b| b.name == name)?.source;
-    let after = src.split("version").nth(1)?;
-    let start = after.find('"')? + 1;
-    let rest = &after[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+/// `dir` is the resolved active directory: for `path:` it is the user's real
+/// directory; for git-backed plugins it is the cache commit dir
+/// (`<cache>/<name>/<commit>`), so its final component is the resolved commit.
+///
+/// Fidelity gap: [`ResolvedPlugin`] does not carry the raw `github:`/`git+`
+/// source string, so `DeclaredGit.source` falls back to the directory path. The
+/// commit is recovered from the cache-dir name. `ImplicitLocal`/`DevMode`
+/// provenances are Task 6 and are not produced by [`PluginManager::resolved_set`]
+/// today; they map to their nearest mote-ui kind for completeness.
+fn provenance_to_kind(provenance: Provenance, dir: &std::path::Path) -> PluginKind {
+    let path = dir.display().to_string();
+    match provenance {
+        Provenance::Bundled => PluginKind::Bundled,
+        Provenance::Path => PluginKind::PathLocal { path },
+        Provenance::DeclaredGit => {
+            let commit = dir
+                .file_name()
+                .and_then(|c| c.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            PluginKind::DeclaredGit {
+                source: path,
+                commit,
+            }
+        }
+        Provenance::ImplicitLocal => PluginKind::ImplicitLocal { path },
+        Provenance::DevMode => PluginKind::DevMode { path },
+    }
+}
+
+/// Maps the pluginmgr [`MgrIntegrity`] to the integrity-panel [`IntegrityStatus`].
+///
+/// `PathLocal` (informational `path:`/implicit hash changes) maps to `Verified`
+/// — a `path:` plugin whose lock entry matches is verified; mote-ui has no
+/// distinct "path-local informational" status.
+const fn mgr_integrity_to_ui(status: &MgrIntegrity) -> IntegrityStatus {
+    match status {
+        MgrIntegrity::Verified | MgrIntegrity::PathLocal => IntegrityStatus::Verified,
+        MgrIntegrity::Mismatch { .. } => IntegrityStatus::Mismatch,
+        MgrIntegrity::Bundled => IntegrityStatus::Bundled,
+        MgrIntegrity::Unknown => IntegrityStatus::Unknown,
+    }
+}
+
+/// The action set offered on a plugin card, by [`PluginKind`].
+///
+/// - git → update / rollback / revoke / adjust scope
+/// - path & dev → reload / revoke / adjust scope
+/// - bundled → update / revoke
+/// - implicit-local → revoke / adjust scope (no update/rollback source)
+fn actions_for_kind(kind: &PluginKind) -> Vec<PluginAction> {
+    match kind {
+        PluginKind::DeclaredGit { .. } => vec![
+            PluginAction::Update,
+            PluginAction::Rollback,
+            PluginAction::Revoke,
+            PluginAction::AdjustScope,
+        ],
+        PluginKind::PathLocal { .. } | PluginKind::DevMode { .. } => vec![
+            PluginAction::Reload,
+            PluginAction::Revoke,
+            PluginAction::AdjustScope,
+        ],
+        PluginKind::Bundled => vec![PluginAction::Update, PluginAction::Revoke],
+        PluginKind::ImplicitLocal { .. } => {
+            vec![PluginAction::Revoke, PluginAction::AdjustScope]
+        }
+    }
+}
+
+/// Builds the panel row for a plugin awaiting the approval dialog.
+///
+/// The manifest's declared permissions render as requested (no effective grant
+/// exists yet — the plugin is not loaded). mote-ui has no "awaiting approval"
+/// [`IntegrityStatus`] variant, so [`IntegrityStatus::Unknown`] is the nearest
+/// existing state (verification has not run because the plugin is not yet
+/// approved/loaded). A dedicated variant is a frontend change for a later task.
+fn pending_row(rp: &ResolvedPlugin) -> PluginRow {
+    let kind = provenance_to_kind(rp.provenance, &rp.dir);
+    let permissions = rp
+        .manifest
+        .permissions
+        .iter()
+        .map(|p| PermissionRow {
+            requested: p.clone(),
+            effective: p.clone(),
+            narrowed: false,
+            denied: false,
+        })
+        .collect();
+    PluginRow {
+        name: rp.name.as_str().to_owned(),
+        version: rp.manifest.version.clone(),
+        fulfills: rp.manifest.capabilities.clone(),
+        consumes: rp.manifest.consumes.clone(),
+        permissions,
+        last_used: None,
+        integrity: IntegrityStatus::Unknown,
+        kind,
+        actions: Vec::new(),
+    }
 }
 
 /// A section heading with the `[label]` lockup and an optional count badge.
@@ -495,11 +680,135 @@ fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    fn resolved(name: &str, provenance: Provenance, integrity: MgrIntegrity) -> ResolvedPlugin {
+        let src = format!(
+            r#"
+            local M = {{}}
+            M.manifest = {{
+                schema = "v1",
+                name = "{name}",
+                version = "1.2.3",
+                permissions = {{ "storage:persistent" }},
+            }}
+            return M
+        "#
+        );
+        let manifest = mote_lua::load_plugin(&src, name)
+            .unwrap()
+            .manifest()
+            .clone();
+        ResolvedPlugin {
+            name: PluginName::new(name).unwrap(),
+            provenance,
+            dir: std::path::PathBuf::from(format!("/tmp/plugins/{name}")),
+            manifest,
+            integrity,
+            init_source: src,
+        }
+    }
+
     #[test]
-    fn bundled_version_reads_embedded_source() {
-        assert_eq!(bundled_version("urlbar"), Some("0.1.0"));
-        assert_eq!(bundled_version("workspace-manager"), Some("0.1.0"));
-        assert_eq!(bundled_version("nonexistent"), None);
+    fn provenance_maps_to_plugin_kind() {
+        assert!(matches!(
+            provenance_to_kind(Provenance::Bundled, std::path::Path::new("/x")),
+            PluginKind::Bundled
+        ));
+        assert!(matches!(
+            provenance_to_kind(Provenance::Path, std::path::Path::new("/x")),
+            PluginKind::PathLocal { .. }
+        ));
+        // Git dir's final component is the resolved commit.
+        match provenance_to_kind(
+            Provenance::DeclaredGit,
+            std::path::Path::new("/cache/adblock/abc123"),
+        ) {
+            PluginKind::DeclaredGit { commit, .. } => assert_eq!(commit, "abc123"),
+            other => panic!("expected DeclaredGit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mgr_integrity_maps_to_ui_integrity() {
+        assert_eq!(
+            mgr_integrity_to_ui(&MgrIntegrity::Bundled),
+            IntegrityStatus::Bundled
+        );
+        assert_eq!(
+            mgr_integrity_to_ui(&MgrIntegrity::Verified),
+            IntegrityStatus::Verified
+        );
+        assert_eq!(
+            mgr_integrity_to_ui(&MgrIntegrity::PathLocal),
+            IntegrityStatus::Verified
+        );
+        assert_eq!(
+            mgr_integrity_to_ui(&MgrIntegrity::Unknown),
+            IntegrityStatus::Unknown
+        );
+        assert_eq!(
+            mgr_integrity_to_ui(&MgrIntegrity::Mismatch {
+                actual: mote_types::Checksum::hash(b"a"),
+                expected: mote_types::Checksum::hash(b"b"),
+            }),
+            IntegrityStatus::Mismatch
+        );
+    }
+
+    #[test]
+    fn actions_match_plugin_kind() {
+        let git = actions_for_kind(&PluginKind::DeclaredGit {
+            source: "github:x/y".into(),
+            commit: "abc".into(),
+        });
+        assert_eq!(
+            git,
+            vec![
+                PluginAction::Update,
+                PluginAction::Rollback,
+                PluginAction::Revoke,
+                PluginAction::AdjustScope,
+            ]
+        );
+        let path = actions_for_kind(&PluginKind::PathLocal { path: "/x".into() });
+        assert_eq!(
+            path,
+            vec![
+                PluginAction::Reload,
+                PluginAction::Revoke,
+                PluginAction::AdjustScope,
+            ]
+        );
+        let bundled = actions_for_kind(&PluginKind::Bundled);
+        assert_eq!(bundled, vec![PluginAction::Update, PluginAction::Revoke]);
+    }
+
+    #[test]
+    fn pending_row_is_marked_awaiting_with_no_actions() {
+        let rp = resolved("needs-approval", Provenance::Path, MgrIntegrity::Unknown);
+        let row = pending_row(&rp);
+        assert_eq!(row.name, "needs-approval");
+        assert_eq!(row.version, "1.2.3");
+        // Awaiting approval is represented by Unknown integrity (no mote-ui
+        // dedicated variant) and an empty action set.
+        assert_eq!(row.integrity, IntegrityStatus::Unknown);
+        assert!(row.actions.is_empty(), "pending row offers no actions");
+        assert!(matches!(row.kind, PluginKind::PathLocal { .. }));
+        // The declared permission is surfaced as requested.
+        assert_eq!(row.permissions.len(), 1);
+        assert_eq!(row.permissions[0].requested, "storage:persistent");
+    }
+
+    #[test]
+    fn bundled_loaded_row_kind_integrity_actions() {
+        // A bundled plugin maps to Bundled kind/integrity and update+revoke.
+        let rp = resolved("urlbar", Provenance::Bundled, MgrIntegrity::Bundled);
+        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        assert!(matches!(kind, PluginKind::Bundled));
+        assert_eq!(mgr_integrity_to_ui(&rp.integrity), IntegrityStatus::Bundled);
+        assert_eq!(
+            actions_for_kind(&kind),
+            vec![PluginAction::Update, PluginAction::Revoke]
+        );
     }
 
     #[test]
@@ -552,5 +861,132 @@ mod tests {
     fn empty_panel_renders_placeholders() {
         let html = render_panel_html(&IntegrityPanel::empty());
         assert!(html.contains("no plugins loaded"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3b: PluginHost boot drives loading through the approval coordinator
+    // -----------------------------------------------------------------------
+
+    /// Writes a minimal valid path: plugin dir.
+    fn write_path_plugin(dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let lua = format!(
+            r#"
+local M = {{}}
+M.manifest = {{
+    schema = "v1",
+    name = "{name}",
+    version = "0.1.0",
+    permissions = {{ "storage:persistent" }},
+    identity_scope = "global",
+}}
+function M.setup() end
+return M
+"#
+        );
+        std::fs::write(dir.join("init.lua"), lua).unwrap();
+    }
+
+    /// Writes a `plugins.lua` declaring the given `(name, source)` entries.
+    fn write_plugins_lua(config_dir: &std::path::Path, entries: &[(&str, &str)]) {
+        let body = entries
+            .iter()
+            .map(|(k, src)| format!(r#"  ["{k}"] = {{ source = "{src}" }},"#))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            config_dir.join("plugins.lua"),
+            format!("mote.plugins({{\n{body}\n}})\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn boot_auto_grants_bundled_and_prior_approved_path_plugin() {
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin(plugin_dir.path(), "approved-plugin");
+
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[("approved-plugin", &src)]);
+
+        let store = Store::open_in_memory().unwrap();
+
+        // Pre-seed the approval store with the path plugin's current manifest
+        // hash, so classify auto-grants it (unchanged since prior approval).
+        let manifest = mote_lua::load_plugin(
+            &std::fs::read_to_string(plugin_dir.path().join("init.lua")).unwrap(),
+            "approved-plugin",
+        )
+        .unwrap()
+        .manifest()
+        .clone();
+        let approval = mote_pluginmgr::ApprovalStore::new(&store);
+        approval
+            .put(&manifest.name, &ApprovalHash::of(&manifest))
+            .unwrap();
+
+        let host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+
+        let loaded: Vec<&str> = host.loaded.iter().map(|r| r.name.as_str()).collect();
+        assert!(
+            host.pending_approvals.is_empty(),
+            "all plugins must auto-grant; pending: {:?}",
+            host.pending_approvals
+                .iter()
+                .map(|(r, _)| r.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(loaded.contains(&"approved-plugin"), "got {loaded:?}");
+        assert!(
+            loaded.contains(&"urlbar"),
+            "bundled urlbar loaded: {loaded:?}"
+        );
+        assert!(
+            loaded.contains(&"workspace-manager"),
+            "bundled workspace-manager loaded: {loaded:?}"
+        );
+    }
+
+    #[test]
+    fn boot_leaves_never_approved_path_plugin_pending() {
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin(plugin_dir.path(), "unapproved-plugin");
+
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[("unapproved-plugin", &src)]);
+
+        // No approval pre-seeded: the path plugin is a first install → dialog.
+        let store = Store::open_in_memory().unwrap();
+        let host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+
+        let loaded: Vec<&str> = host.loaded.iter().map(|r| r.name.as_str()).collect();
+        let pending: Vec<&str> = host
+            .pending_approvals
+            .iter()
+            .map(|(r, _)| r.name.as_str())
+            .collect();
+
+        assert!(
+            !loaded.contains(&"unapproved-plugin"),
+            "never-approved path plugin must NOT load: {loaded:?}"
+        );
+        assert_eq!(
+            pending,
+            vec!["unapproved-plugin"],
+            "exactly the unapproved plugin is pending"
+        );
+        // Bundled defaults still auto-grant + load regardless.
+        assert!(
+            loaded.contains(&"urlbar"),
+            "bundled still loads: {loaded:?}"
+        );
+        assert!(
+            loaded.contains(&"workspace-manager"),
+            "bundled still loads: {loaded:?}"
+        );
     }
 }
