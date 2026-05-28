@@ -34,6 +34,7 @@ pub mod managed;
 pub mod manager;
 pub mod provenance;
 pub mod resolve;
+pub mod resolved;
 pub mod source;
 
 pub use approval_store::{ApprovalStore, ApprovalStoreError};
@@ -50,4 +51,5 @@ pub use manager::{
 };
 pub use provenance::Provenance;
 pub use resolve::{PluginSpec, PluginSpecSet, ResolveError, compose, load_order};
+pub use resolved::ResolvedPlugin;
 pub use source::{Source, SourceParseError};

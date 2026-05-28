@@ -45,14 +45,16 @@ use mote_types::{Checksum, PluginName};
 use thiserror::Error;
 
 use crate::approval_store::{ApprovalStore, ApprovalStoreError};
-use crate::bundle::{BundleError, unpack_into_cache};
+use crate::bundle::{BundleError, bundled_names, unpack_into_cache};
 use crate::cache::{Cache, CacheError};
 use crate::diff::{DiffReport, diff};
 use crate::dirhash::{DirHashError, hash_dir};
 use crate::fetch::{FetchError, fetch};
 use crate::lock::{LockEntry, LockError, LockFile};
 use crate::managed::{ManagedError, ManagedFile};
+use crate::provenance::Provenance;
 use crate::resolve::{ResolveError, compose};
+use crate::resolved::ResolvedPlugin;
 use crate::source::{Source, SourceParseError};
 
 // ---------------------------------------------------------------------------
@@ -594,6 +596,108 @@ impl PluginManager {
     /// Fetch failures are recoverable: a failed plugin is added to
     /// [`SyncReport::failed`]; the rest continue.
     ///
+    /// Resolves the composed spec set (`plugins.lua` + `managed.lua` + the
+    /// bundled first-party defaults) to an ordered list of plugins ready to
+    /// load — **without** loading them into any runtime.
+    ///
+    /// Bundled first-party plugins are seeded (unpacked + linked) if the user's
+    /// config declares none of them, so a fresh profile still gets the
+    /// urlbar + workspace-manager defaults. Seeding is filesystem-only — it does
+    /// **not** write `managed.lua`.
+    ///
+    /// This method first runs [`sync`](Self::sync) to reconcile the declared
+    /// specs (fetch/link/hash + integrity), then reads the already-linked dirs
+    /// and the per-plugin integrity outcomes — it does not re-fetch. The result
+    /// is ordered by [`load_order`](crate::load_order) so every capability
+    /// fulfiller precedes its consumers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagerError`] for fatal errors (config/lock parse, bundle
+    /// unpack failure, manifest read failure, or a capability cycle / dangling
+    /// consumer surfaced by [`load_order`](crate::load_order)). Per-plugin
+    /// fetch failures during the internal `sync` are non-fatal and simply leave
+    /// that plugin's integrity as whatever the lock last recorded.
+    pub fn resolved_set(&self) -> Result<Vec<ResolvedPlugin>, ManagerError> {
+        // Reconcile declared specs first: fetch/link/hash + integrity. This is
+        // the single resolution pass; resolved_set only reads the result.
+        let sync_report = self.sync()?;
+        let integrity_by_name: std::collections::BTreeMap<PluginName, IntegrityStatus> =
+            sync_report
+                .ok
+                .into_iter()
+                .map(|o| (o.name, o.integrity))
+                .collect();
+
+        let spec_set = self.composed_spec_set()?;
+
+        // Bundled-defaults seeding: if NONE of the embedded first-party plugins
+        // is declared, seed them so a fresh profile still gets urlbar +
+        // workspace-manager. Filesystem-only (no managed.lua write).
+        let bundled = bundled_names()?;
+        let any_bundled_declared = bundled.iter().any(|b| spec_set.specs.contains_key(b));
+        let seed: Vec<PluginName> = if any_bundled_declared {
+            Vec::new()
+        } else {
+            bundled
+        };
+
+        // Collect (name, provenance) for every plugin to resolve: declared
+        // specs first, then any seeded bundled defaults.
+        let mut entries: Vec<(PluginName, Provenance)> = Vec::new();
+        for spec in spec_set.specs.values() {
+            let source: Source = spec.source.parse()?;
+            let provenance = match source {
+                Source::Bundled => Provenance::Bundled,
+                Source::Github { .. } | Source::Git { .. } => Provenance::DeclaredGit,
+                Source::Path(_) => Provenance::Path,
+            };
+            entries.push((spec.name.clone(), provenance));
+        }
+        for name in &seed {
+            // Seed the bundled default into the cache + active link so its dir
+            // resolves below, exactly as `sync_bundled` would for a declared
+            // bundled source.
+            let key = unpack_into_cache(name, &self.cache)?;
+            self.cache.link(name, &key.commit)?;
+            entries.push((name.clone(), Provenance::Bundled));
+        }
+
+        // Resolve each entry to its dir + manifest + init source.
+        let mut resolved: Vec<ResolvedPlugin> = Vec::with_capacity(entries.len());
+        let mut manifests: Vec<mote_lua::Manifest> = Vec::with_capacity(entries.len());
+        for (name, provenance) in entries {
+            let dir = self.cache.active_link(&name);
+            let manifest = Self::load_manifest_from_dir(&name, &dir)?;
+            let init = dir.join("init.lua");
+            let init_source = fs::read_to_string(&init).map_err(|e| ManagerError::io(&init, e))?;
+            let integrity = if matches!(provenance, Provenance::Bundled) {
+                IntegrityStatus::Bundled
+            } else {
+                integrity_by_name
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(IntegrityStatus::Unknown)
+            };
+            manifests.push(manifest.clone());
+            resolved.push(ResolvedPlugin {
+                name,
+                provenance,
+                dir,
+                manifest,
+                integrity,
+                init_source,
+            });
+        }
+
+        // Order by capability-contract dependency order (fulfillers first).
+        let order = crate::resolve::load_order(&manifests)?;
+        let position = |n: &PluginName| order.iter().position(|o| o == n).unwrap_or(usize::MAX);
+        resolved.sort_by_key(|rp| position(&rp.name));
+
+        Ok(resolved)
+    }
+
     /// # Errors
     ///
     /// Returns [`ManagerError`] only for fatal errors (lock parse/write, config
@@ -1541,6 +1645,66 @@ return M
     #[test]
     fn resolve_dirs_none_when_no_home_and_no_xdg() {
         assert!(PluginManager::resolve_dirs_from(None, None, None).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolved_set: composes declared + seeded bundled defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolved_set_includes_path_plugin_and_seeded_bundled_defaults() {
+        let f = fixture();
+
+        // A user-declared path: plugin.
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_plugin(plugin_dir.path(), "my-plugin", &["storage:persistent"]);
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(&f.config_dir, &[("my-plugin", &src)]);
+
+        let resolved = f.mgr.resolved_set().unwrap();
+
+        let by_name: std::collections::BTreeMap<&str, &ResolvedPlugin> =
+            resolved.iter().map(|r| (r.name.as_str(), r)).collect();
+
+        // The path plugin resolves with Path provenance + a populated manifest.
+        let mine = by_name.get("my-plugin").expect("my-plugin resolved");
+        assert_eq!(mine.provenance, Provenance::Path);
+        assert_eq!(mine.manifest.name.as_str(), "my-plugin");
+        assert!(
+            mine.init_source.contains("M.manifest"),
+            "init_source must be the real init.lua"
+        );
+
+        // Bundled first-party defaults are seeded (none were declared).
+        let urlbar = by_name.get("urlbar").expect("urlbar seeded");
+        assert_eq!(urlbar.provenance, Provenance::Bundled);
+        assert_eq!(urlbar.integrity, IntegrityStatus::Bundled);
+        assert!(!urlbar.init_source.is_empty());
+        let wsm = by_name
+            .get("workspace-manager")
+            .expect("workspace-manager seeded");
+        assert_eq!(wsm.provenance, Provenance::Bundled);
+    }
+
+    #[test]
+    fn resolved_set_does_not_seed_when_a_bundled_default_is_declared() {
+        let f = fixture();
+        // Declaring even one bundled default suppresses auto-seeding.
+        write_plugins_lua(&f.config_dir, &[("urlbar", "bundled")]);
+
+        let resolved = f.mgr.resolved_set().unwrap();
+        let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
+
+        assert!(names.contains(&"urlbar"), "declared urlbar present");
+        assert!(
+            !names.contains(&"workspace-manager"),
+            "workspace-manager must NOT be auto-seeded once a bundled default is declared"
+        );
+        let urlbar = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "urlbar")
+            .unwrap();
+        assert_eq!(urlbar.provenance, Provenance::Bundled);
     }
 
     // -----------------------------------------------------------------------
