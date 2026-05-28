@@ -2357,8 +2357,22 @@ fn windows_key_code(key: &Key) -> i32 {
         Key::Named(NamedKey::Delete) => 0x2E,
         Key::Named(NamedKey::Home) => 0x24,
         Key::Named(NamedKey::End) => 0x23,
+        // Letters and digits: the ASCII-uppercase value equals the Windows VK
+        // code (0x30–0x39 digits, 0x41–0x5A letters), so the shortcut is correct.
+        // Punctuation does NOT line up — e.g. '.' is ASCII 0x2E, which is
+        // `VK_DELETE` (see the `NamedKey::Delete => 0x2E` arm above). Faking the
+        // ASCII value as the keydown VK made the omnibox interpret '.' as a
+        // Delete keypress and drop it (issue #6). For non-alphanumeric
+        // printables the CHAR event `route_key` also emits carries the actual
+        // character and performs the text insertion, so a 0 ("unknown") keydown
+        // VK is both correct and free of the editing-key collisions.
         Key::Character(s) => s.chars().next().map_or(0, |c| {
-            u8::try_from(u32::from(c.to_ascii_uppercase())).map_or(0, i32::from)
+            let up = c.to_ascii_uppercase();
+            if up.is_ascii_alphanumeric() {
+                u8::try_from(u32::from(up)).map_or(0, i32::from)
+            } else {
+                0
+            }
         }),
         _ => 0,
     }
@@ -2498,6 +2512,36 @@ mod tests {
         assert_eq!(
             windows_key_code(&Key::Character("a".into())),
             i32::from(b'A')
+        );
+    }
+
+    #[test]
+    fn punctuation_does_not_collide_with_editing_vk_codes() {
+        // Regression for #6: '.' is ASCII 0x2E, which is VK_DELETE. Mapping the
+        // raw ASCII value as the keydown VK made the omnibox treat a typed '.'
+        // as Delete and drop it. Non-alphanumeric printables must NOT map to an
+        // editing VK; 0 ("unknown") is correct — the CHAR event inserts them.
+        assert_eq!(windows_key_code(&Key::Character(".".into())), 0);
+        assert_ne!(
+            windows_key_code(&Key::Character(".".into())),
+            windows_key_code(&Key::Named(NamedKey::Delete)),
+            "'.' must not share VK_DELETE's code"
+        );
+        for p in ["/", ":", "-", "_", "~", "?", "&", "=", "%", ",", "@"] {
+            assert_eq!(
+                windows_key_code(&Key::Character(p.into())),
+                0,
+                "punctuation `{p}` must map to 0, not a colliding editing VK"
+            );
+        }
+        // Alphanumerics still map to their (correct) ASCII-uppercase VK.
+        assert_eq!(
+            windows_key_code(&Key::Character("z".into())),
+            i32::from(b'Z')
+        );
+        assert_eq!(
+            windows_key_code(&Key::Character("5".into())),
+            i32::from(b'5')
         );
     }
 
