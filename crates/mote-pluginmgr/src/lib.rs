@@ -32,6 +32,7 @@ pub mod fetch;
 pub mod lock;
 pub mod managed;
 pub mod manager;
+pub mod provenance;
 pub mod resolve;
 pub mod source;
 
@@ -47,5 +48,6 @@ pub use manager::{
     GcReport, ImportOutcome, IntegrityStatus, ManagerError, PluginManager, RemoveOutcome,
     SyncOutcome, SyncReport, UpdateOutcome,
 };
+pub use provenance::Provenance;
 pub use resolve::{PluginSpec, PluginSpecSet, ResolveError, compose, load_order};
 pub use source::{Source, SourceParseError};
