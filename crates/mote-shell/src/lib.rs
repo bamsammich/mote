@@ -744,10 +744,11 @@ struct ShellApp {
     integrity_page: Option<Page>,
     /// Whether the integrity overlay is currently composited full-window.
     integrity_open: bool,
-    /// Whether the chrome-rendered integrity panel (T4: structured-DOM path in
+    /// Whether the chrome-rendered integrity panel (structured-DOM path in
     /// `panels.js`) is currently shown. Tracked independently from the legacy
     /// `integrity_open` overlay flag — Ctrl+Shift+I prefers the chrome path,
-    /// the overlay path remains as a fallback while T5 finishes the cleanup.
+    /// and the overlay path remains as a fallback for the chrome-not-ready
+    /// window (the legacy-overlay cleanup is a later task).
     integrity_chrome_open: bool,
     /// Last integrity paint count uploaded (re-upload only on a new frame).
     integrity_paints: u64,
@@ -888,33 +889,57 @@ impl ShellApp {
     /// The op handler already ran the op-boundary structural validation; here
     /// we do the semantic work via [`runtime::PluginHost::approve_pending`]
     /// (find the pending entry, cross-check, load or deny, record approval),
-    /// then update the chrome: hide the dialog and re-render the integrity
-    /// panel so the plugin appears as loaded/Verified (or simply dismisses on a
-    /// deny / dropped result).
+    /// then drive the chrome. Dismissal is **shell-driven** (panels.js no longer
+    /// hides on click): the shell hides the dialog only on a resolved outcome.
+    ///
+    /// - `Loaded` / `Denied`: hide the dialog, re-render the panel, and advance
+    ///   to the next pending dialog if the queue is non-empty.
+    /// - `LoadFailed`: leave the dialog up so the user can decline/retry; the
+    ///   plugin stays pending. (A proper in-dialog error banner is deferred.)
+    /// - `NotPending`: do nothing — the dropped result names no live dialog, so
+    ///   hiding could dismiss a legitimate dialog for a different plugin.
     fn approve_plugin(&mut self, result: &approval::DialogResult) {
-        let outcome = self.host.approve_pending(result);
-        self.push_hide_approval_dialog();
-        match outcome {
+        match self.host.approve_pending(result) {
             runtime::ApproveOutcome::Loaded => {
                 eprintln!("mote-shell: plugin `{}` approved + loaded", result.plugin());
+                self.push_hide_approval_dialog();
                 self.refresh_integrity_panel();
+                self.show_next_pending_dialog();
             }
             runtime::ApproveOutcome::Denied => {
                 eprintln!("mote-shell: plugin `{}` denied by user", result.plugin());
+                self.push_hide_approval_dialog();
                 self.refresh_integrity_panel();
+                self.show_next_pending_dialog();
             }
             runtime::ApproveOutcome::LoadFailed => {
+                // Leave the dialog visible so the user can decline/retry.
+                // TODO(phase-10): inline error banner in the dialog on LoadFailed.
                 eprintln!(
-                    "mote-shell: plugin `{}` approval load FAILED (left pending)",
+                    "mote-shell: plugin `{}` approval load FAILED (left pending; dialog kept)",
                     result.plugin()
                 );
             }
             runtime::ApproveOutcome::NotPending => {
+                // Do NOT hide: a dropped/stale result must not dismiss whatever
+                // legitimate dialog is currently shown.
                 eprintln!(
                     "mote-shell: approve for non-pending plugin `{}` (dropped)",
                     result.plugin()
                 );
             }
+        }
+    }
+
+    /// Render the next awaiting-approval dialog, if any. The dialog root holds a
+    /// single dialog, so the shell shows pending approvals one at a time: after
+    /// one resolves (`Loaded`/`Denied`) the shell advances to the next. For 0–1
+    /// pending this is a no-op beyond the initial push.
+    ///
+    /// follow-up: a richer multi-dialog queue UI is out of scope.
+    fn show_next_pending_dialog(&self) {
+        if let Some((_, req)) = self.host.pending_approvals.first() {
+            self.push_approval_dialog(req);
         }
     }
 
@@ -958,6 +983,10 @@ impl ShellApp {
     fn plugin_adjust_scope(&mut self, name: &str) {
         if let Some(req) = self.host.adjust_scope_request(name) {
             self.push_approval_dialog(&req);
+            // adjust_scope_request moves the plugin loaded→pending; refresh the
+            // panel (if open) so it reflects the parked/awaiting-approval state,
+            // consistent with the other panel actions.
+            self.refresh_integrity_panel();
         }
     }
 
@@ -1842,10 +1871,10 @@ impl ShellApp {
         }
         // Ctrl+Shift+I toggles the integrity panel (the `i` arrives as upper or
         // lower case depending on the shift state, so match case-insensitively).
-        // T4 prefers the chrome-rendered structured-DOM path: serialize the
-        // panel view-model and push it through window.mote.applyOp. The legacy
-        // overlay path stays as a fallback for the chrome-not-ready window so
-        // the keybind never appears broken; T5 deletes it.
+        // Prefers the chrome-rendered structured-DOM path: serialize the panel
+        // view-model and push it through window.mote.applyOp. The legacy overlay
+        // path stays as a fallback for the chrome-not-ready window so the keybind
+        // never appears broken (legacy-overlay cleanup is a later task).
         if self.modifiers.contains(Modifiers::SHIFT)
             && let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("i")
@@ -1866,11 +1895,13 @@ impl ShellApp {
             }
             return true;
         }
-        // T4 debug-only keybind (Ctrl+Shift+A): push a sample ApprovalRequest
-        // into the chrome page so the dialog renders for live verification.
-        // The buttons call `approve_plugin`, which T5 will register; until
-        // then the registry rejects the op (404) — expected.
-        // TODO(T5): remove this keybind once the load-pass wires the real path.
+        // Debug-only keybind (Ctrl+Shift+A): push a sample ApprovalRequest into
+        // the chrome page so the dialog renders. The buttons call the real
+        // `approve_plugin` op (registered in `build_op_registry`); the sample
+        // plugin is not pending, so an Approve resolves as NotPending and the
+        // dialog stays up (expected for the synthetic sample).
+        // Retained for T7 live verification (this headless box cannot synthesize
+        // CEF clicks); remove at T7 close.
         if self.modifiers.contains(Modifiers::SHIFT)
             && let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("a")
@@ -1887,7 +1918,7 @@ impl ShellApp {
         // (ADR-0005). Verifies the boundary in live behaviour; the Rust test
         // `hostile_approval_request_serializes_as_inert_json_strings` proves
         // the wire-format encoding.
-        // TODO(T5): remove this debug keybind alongside the sample one.
+        // Retained for T7 live verification; remove at T7 close.
         if self.modifiers.contains(Modifiers::SHIFT)
             && let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("x")
@@ -2076,12 +2107,13 @@ impl ApplicationHandler for ShellApp {
         if self.chrome_ready && !self.did_initial_load {
             self.did_initial_load = true;
             self.host.run_initial_load_pass();
-            // Render any first-install / update dialog now that chrome is live.
-            // The buttons call the `approve_plugin` op (registered below); the
-            // pump thread finishes the load and re-renders on the user's answer.
-            for (_, req) in &self.host.pending_approvals {
-                self.push_approval_dialog(req);
-            }
+            // Show the FIRST awaiting-approval dialog now that chrome is live.
+            // The single dialog root holds one dialog, so multi-pending is shown
+            // one at a time — `approve_plugin` advances to the next as each
+            // resolves (looping over all here would overwrite earlier dialogs).
+            // The buttons call the `approve_plugin` op; the pump thread finishes
+            // the load and re-renders on the user's answer.
+            self.show_next_pending_dialog();
         }
 
         if !self.first_frame_logged

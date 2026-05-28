@@ -244,23 +244,9 @@ impl PluginHost {
                                 running.effective_permissions.len()
                             );
                             // Record the approval so a later launch (or the CLI)
-                            // sees this manifest as approved — but NOT for
-                            // bundled plugins. `classify` short-circuits on
-                            // `Provenance::Bundled` without ever reading the
-                            // store, so a stored entry for a bundled plugin
-                            // would be dead data that also pollutes what the
-                            // `mote plugin` CLI enumerates from the store.
-                            if !matches!(rp.provenance, Provenance::Bundled)
-                                && let Err(e) = self
-                                    .manager
-                                    .approval_store()
-                                    .put(&rp.name, &ApprovalHash::of(&rp.manifest))
-                            {
-                                eprintln!(
-                                    "mote-shell: failed to record approval for `{}`: {e}",
-                                    rp.name
-                                );
-                            }
+                            // sees this manifest as approved (bundled plugins are
+                            // skipped — see `record_approval`).
+                            self.record_approval(&rp);
                             self.loaded.push(rp);
                         }
                         Err(e) => {
@@ -331,20 +317,21 @@ impl PluginHost {
             return ApproveOutcome::NotPending;
         };
 
-        // Semantic cross-check: every answered permission domain must be one the
-        // plugin actually requested (the pending request's permission domains).
-        // This stops a dialog result from smuggling a narrowing for a permission
-        // that was never requested.
-        let requested_domains: std::collections::BTreeSet<&str> = self.pending_approvals[idx]
+        // Semantic cross-check: every answered permission must correspond to a
+        // (domain, action) PAIR the plugin actually requested. Matching on the
+        // pair (not the bare domain) prevents a dialog result from smuggling a
+        // narrowing for an action the plugin never requested when it has two
+        // actions in the same domain. Both sides now carry bare domain+action.
+        let requested_pairs: std::collections::BTreeSet<(&str, &str)> = self.pending_approvals[idx]
             .1
             .permissions
             .iter()
-            .map(|p| p.domain.as_str())
+            .map(|p| (p.domain.as_str(), p.action.as_str()))
             .collect();
         if !result
             .permissions
             .iter()
-            .all(|p| requested_domains.contains(p.domain.as_str()))
+            .all(|p| requested_pairs.contains(&(p.domain.as_str(), p.action.as_str())))
         {
             eprintln!(
                 "mote-shell: approve for `{}` answered an unrequested permission; dropping",
@@ -565,14 +552,22 @@ impl PluginHost {
 
     /// Panel action — revoke the named plugin (`plugin_revoke`, §6.5): unload it
     /// from the runtime and drop its stored approval so it does not auto-load on
-    /// the next launch. The plugin leaves the loaded set. Logs on failure.
+    /// the next launch. The plugin leaves the loaded set.
+    ///
+    /// If `unload` fails the runtime still holds the plugin, so we leave it in
+    /// `self.loaded` and keep its approval — panel and runtime stay consistent
+    /// (no phantom "revoked" row for a plugin that is still running). The
+    /// approval-store removal is logged independently of the unload.
     pub(crate) fn revoke_plugin(&mut self, name: &str) {
         let Ok(plugin) = PluginName::new(name) else {
             eprintln!("mote-shell: plugin_revoke: invalid plugin name `{name}`");
             return;
         };
         if let Err(e) = self.runtime.unload(&plugin) {
-            eprintln!("mote-shell: revoke of `{name}` — unload failed: {e}");
+            // Unload failed → the plugin is still running. Do NOT drop it from
+            // `loaded` or remove its approval; keep state consistent.
+            eprintln!("mote-shell: revoke of `{name}` — unload failed, leaving loaded: {e}");
+            return;
         }
         if let Err(e) = self.manager.approval_store().remove(&plugin) {
             eprintln!("mote-shell: revoke of `{name}` — drop approval failed: {e}");
@@ -1280,6 +1275,32 @@ return M
         std::fs::write(dir.join("init.lua"), lua).unwrap();
     }
 
+    /// Writes a path: plugin dir whose manifest requests exactly `permissions`
+    /// (each a full `domain:action[:resource]` string).
+    fn write_path_plugin_with_perms(dir: &std::path::Path, name: &str, permissions: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let perms = permissions
+            .iter()
+            .map(|p| format!("\"{p}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lua = format!(
+            r#"
+local M = {{}}
+M.manifest = {{
+    schema = "v1",
+    name = "{name}",
+    version = "0.1.0",
+    permissions = {{ {perms} }},
+    identity_scope = "global",
+}}
+function M.setup() end
+return M
+"#
+        );
+        std::fs::write(dir.join("init.lua"), lua).unwrap();
+    }
+
     /// Writes a `plugins.lua` declaring the given `(name, source)` entries.
     fn write_plugins_lua(config_dir: &std::path::Path, entries: &[(&str, &str)]) {
         let body = entries
@@ -1473,16 +1494,32 @@ return M
 
     use crate::approval::{DialogPermission, DialogResult};
 
-    /// A grant `DialogResult` for `plugin`, granting `domain` fully (no narrow).
-    fn grant_full(plugin: &str, domain: &str) -> DialogResult {
+    /// A grant `DialogResult` for `plugin`, granting the bare `(domain, action)`
+    /// pair fully (no narrowing).
+    fn grant_full(plugin: &str, domain: &str, action: &str) -> DialogResult {
         DialogResult {
             plugin: plugin.to_owned(),
             decision: "grant".to_owned(),
             permissions: vec![DialogPermission {
                 domain: domain.to_owned(),
-                action: String::new(),
+                action: action.to_owned(),
                 mode: "full".to_owned(),
                 origins: None,
+            }],
+        }
+    }
+
+    /// A grant `DialogResult` for `plugin` that narrows the bare `(domain,
+    /// action)` pair to the given `origins`.
+    fn grant_origins(plugin: &str, domain: &str, action: &str, origins: &[&str]) -> DialogResult {
+        DialogResult {
+            plugin: plugin.to_owned(),
+            decision: "grant".to_owned(),
+            permissions: vec![DialogPermission {
+                domain: domain.to_owned(),
+                action: action.to_owned(),
+                mode: "origins".to_owned(),
+                origins: Some(origins.iter().map(|s| (*s).to_owned()).collect()),
             }],
         }
     }
@@ -1514,7 +1551,7 @@ return M
     #[test]
     fn approve_pending_grant_loads_and_records_approval() {
         let (mut host, _dir) = host_with_pending_plugin("grant-me");
-        let result = grant_full("grant-me", "storage:persistent");
+        let result = grant_full("grant-me", "storage", "persistent");
 
         let outcome = host.approve_pending(&result);
         assert_eq!(
@@ -1556,7 +1593,7 @@ return M
     #[test]
     fn approve_pending_deny_drops_without_loading() {
         let (mut host, _dir) = host_with_pending_plugin("deny-me");
-        let mut result = grant_full("deny-me", "storage:persistent");
+        let mut result = grant_full("deny-me", "storage", "persistent");
         result.decision = "deny".to_owned();
 
         let outcome = host.approve_pending(&result);
@@ -1584,7 +1621,7 @@ return M
     fn approve_pending_for_non_pending_plugin_is_dropped() {
         let (mut host, _dir) = host_with_pending_plugin("real-plugin");
         // A result naming a plugin that is not pending.
-        let result = grant_full("ghost-plugin", "storage:persistent");
+        let result = grant_full("ghost-plugin", "storage", "persistent");
         let outcome = host.approve_pending(&result);
         assert_eq!(
             outcome,
@@ -1603,9 +1640,9 @@ return M
     #[test]
     fn approve_pending_with_unrequested_permission_is_dropped() {
         // The plugin only requests storage:persistent; a result that answers an
-        // unrequested permission domain must be dropped (never loaded).
+        // unrequested (domain, action) pair must be dropped (never loaded).
         let (mut host, _dir) = host_with_pending_plugin("strict");
-        let result = grant_full("strict", "secret:read"); // not requested
+        let result = grant_full("strict", "secret", "read"); // not requested
         let outcome = host.approve_pending(&result);
         assert_eq!(
             outcome,
@@ -1619,10 +1656,31 @@ return M
     }
 
     #[test]
+    fn approve_pending_with_unrequested_action_in_same_domain_is_dropped() {
+        // The plugin requests storage:persistent. A result answering a DIFFERENT
+        // action in the SAME domain (storage:memory) must be dropped — the
+        // strengthened (domain, action)-pair cross-check, not domain-alone.
+        let (mut host, _dir) = host_with_pending_plugin("same-domain");
+        let result = grant_full("same-domain", "storage", "memory"); // wrong action
+        assert_eq!(
+            host.approve_pending(&result),
+            ApproveOutcome::NotPending,
+            "an unrequested action in a requested domain must be dropped"
+        );
+        assert!(
+            !host
+                .loaded
+                .iter()
+                .any(|rp| rp.name.as_str() == "same-domain"),
+            "a mismatched action must not load the plugin"
+        );
+    }
+
+    #[test]
     fn revoke_unloads_and_drops_approval() {
         let (mut host, _dir) = host_with_pending_plugin("revoke-me");
         // Approve + load first.
-        let _ = host.approve_pending(&grant_full("revoke-me", "storage:persistent"));
+        let _ = host.approve_pending(&grant_full("revoke-me", "storage", "persistent"));
         let name = PluginName::new("revoke-me").unwrap();
         assert!(
             host.runtime.running(&name).is_some(),
@@ -1662,7 +1720,7 @@ return M
     #[test]
     fn reload_keeps_plugin_loaded() {
         let (mut host, _dir) = host_with_pending_plugin("reload-me");
-        let _ = host.approve_pending(&grant_full("reload-me", "storage:persistent"));
+        let _ = host.approve_pending(&grant_full("reload-me", "storage", "persistent"));
         let name = PluginName::new("reload-me").unwrap();
         assert!(
             host.runtime.running(&name).is_some(),
@@ -1683,7 +1741,7 @@ return M
     #[test]
     fn adjust_scope_parks_loaded_plugin_for_reapproval() {
         let (mut host, _dir) = host_with_pending_plugin("scope-me");
-        let _ = host.approve_pending(&grant_full("scope-me", "storage:persistent"));
+        let _ = host.approve_pending(&grant_full("scope-me", "storage", "persistent"));
         assert!(host.loaded.iter().any(|rp| rp.name.as_str() == "scope-me"));
 
         let req = host.adjust_scope_request("scope-me");
@@ -1706,7 +1764,7 @@ return M
 
         // Re-approving with a grant reloads it (re-grant-via-reload) and moves it
         // back into loaded.
-        let outcome = host.approve_pending(&grant_full("scope-me", "storage:persistent"));
+        let outcome = host.approve_pending(&grant_full("scope-me", "storage", "persistent"));
         assert_eq!(
             outcome,
             ApproveOutcome::Loaded,
@@ -1715,6 +1773,121 @@ return M
         assert!(
             host.loaded.iter().any(|rp| rp.name.as_str() == "scope-me"),
             "re-approved plugin returns to the loaded set"
+        );
+    }
+
+    /// Boots a host against a never-approved path plugin requesting exactly
+    /// `permissions`, so it lands in `pending_approvals`.
+    fn host_with_pending_perms(
+        name: &str,
+        permissions: &[&str],
+    ) -> (PluginHost, tempfile::TempDir) {
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin_with_perms(plugin_dir.path(), name, permissions);
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[(name, &src)]);
+
+        let store = Store::open_in_memory().unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+        assert!(
+            host.pending_approvals
+                .iter()
+                .any(|(rp, _)| rp.name.as_str() == name),
+            "plugin `{name}` must be pending after the load pass"
+        );
+        (host, plugin_dir)
+    }
+
+    /// THE PROOF TEST (regression guard for the narrowing-contract bug).
+    ///
+    /// A plugin requests `page:inject_script:*`. The user approves it narrowed
+    /// to `https://example.com/*`. The resulting `RunningPlugin`'s effective
+    /// permission for `page:inject_script` must be restricted to that origin and
+    /// must NOT retain the full `*`. Before the bare-field fix the narrowing
+    /// no-op'd (composite domain + resource-in-action never matched
+    /// `GrantSet::narrow`) and the effective grant stayed `*` — this test fails
+    /// in that state.
+    #[test]
+    fn approve_pending_origins_narrowing_restricts_effective_grant() {
+        let (mut host, _dir) = host_with_pending_perms("narrow-me", &["page:inject_script:*"]);
+
+        let result = grant_origins(
+            "narrow-me",
+            "page",
+            "inject_script",
+            &["https://example.com/*"],
+        );
+        let outcome = host.approve_pending(&result);
+        assert_eq!(
+            outcome,
+            ApproveOutcome::Loaded,
+            "a narrowed grant must load the plugin"
+        );
+
+        let running = host
+            .runtime
+            .running(&PluginName::new("narrow-me").unwrap())
+            .expect("plugin must be running after a narrowed approve");
+        let effective = &running.effective_permissions;
+
+        // The narrowing took effect: the effective grant is the chosen origin…
+        assert!(
+            effective
+                .iter()
+                .any(|p| p == "page:inject_script:https://example.com/*"),
+            "effective grant must be narrowed to the chosen origin; got: {effective:?}"
+        );
+        // …and the full `*` is GONE (this is the regression guard).
+        assert!(
+            !effective.iter().any(|p| p == "page:inject_script:*"),
+            "the full `*` grant must NOT survive narrowing; got: {effective:?}"
+        );
+    }
+
+    /// Two pending plugins: the initial-load pass shows only the first; once it
+    /// resolves, the shell advances to the next (the minimal pending queue).
+    /// Headless coverage of the queue advance on `approve_pending`.
+    #[test]
+    fn approve_pending_advances_through_multiple_pending() {
+        // Two never-approved path plugins → two pending entries.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        write_path_plugin(dir_a.path(), "pending-a");
+        write_path_plugin(dir_b.path(), "pending-b");
+        write_plugins_lua(
+            config.path(),
+            &[
+                ("pending-a", &format!("path:{}", dir_a.path().display())),
+                ("pending-b", &format!("path:{}", dir_b.path().display())),
+            ],
+        );
+        let store = Store::open_in_memory().unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+        assert_eq!(
+            host.pending_approvals.len(),
+            2,
+            "both unapproved plugins are pending"
+        );
+
+        // Resolve the first; the second remains pending (the shell would now
+        // show it). approve_pending only resolves the named entry.
+        let outcome = host.approve_pending(&grant_full("pending-a", "storage", "persistent"));
+        assert_eq!(outcome, ApproveOutcome::Loaded);
+        assert_eq!(
+            host.pending_approvals.len(),
+            1,
+            "exactly one pending entry remains after resolving the first"
+        );
+        assert_eq!(
+            host.pending_approvals[0].0.name.as_str(),
+            "pending-b",
+            "the remaining pending entry is the second plugin"
         );
     }
 }

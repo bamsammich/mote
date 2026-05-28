@@ -518,8 +518,14 @@ impl NarrowMode {
 /// A single permission entry in the approval dialog, with its narrowing state.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NarrowablePermission {
-    /// Permission domain, e.g. `page:inject_script`.
+    /// The BARE permission domain, e.g. `page` (the first `domain:action`
+    /// segment). The dialog renders `domain:action` for display; the narrowing
+    /// op carries `domain` and `action` separately so the runtime's
+    /// `GrantSet::narrow` matches the correct `(domain, action)` pair.
     pub domain: String,
+    /// The BARE permission action, e.g. `inject_script` (the second
+    /// `domain:action` segment). Paired with [`Self::domain`] for narrowing.
+    pub action: String,
     /// The `[:resource]` part of the requested scope, e.g. `*` or
     /// `https://*.1password.com/*`. Empty string when there is no resource.
     pub requested_scope: String,
@@ -535,22 +541,33 @@ pub struct NarrowablePermission {
 }
 
 impl NarrowablePermission {
-    /// Returns the effective permission string (domain + effective scope).
+    /// The bare `domain:action` key (the display base for the permission row
+    /// and the base of [`Self::effective_string`]).
+    #[must_use]
+    pub fn domain_action(&self) -> String {
+        format!("{}:{}", self.domain, self.action)
+    }
+
+    /// Returns the effective permission string (`domain:action[:scope]`).
     ///
-    /// `GrantFull` → original requested; `GrantOrigins` → `<domain>:<origins
-    /// joined by ,>`; `Deny` → empty (callers should check `mode` first).
+    /// `GrantFull` → `domain:action[:requested_scope]`; `GrantOrigins` →
+    /// `domain:action:<origins joined by ,>`; `Deny` → empty (callers should
+    /// check `mode` first). This is a derived display helper — it is never
+    /// serialized across the bridge (the wire carries `domain`, `action`,
+    /// `requested_scope`, and `mode` as separate fields).
     #[must_use]
     pub fn effective_string(&self) -> String {
+        let base = self.domain_action();
         match &self.mode {
             NarrowMode::GrantFull => {
                 if self.requested_scope.is_empty() {
-                    self.domain.clone()
+                    base
                 } else {
-                    format!("{}:{}", self.domain, self.requested_scope)
+                    format!("{base}:{}", self.requested_scope)
                 }
             }
             NarrowMode::GrantOrigins(origins) => {
-                format!("{}:{}", self.domain, origins.join(","))
+                format!("{base}:{}", origins.join(","))
             }
             NarrowMode::Deny => String::new(),
         }
@@ -590,15 +607,17 @@ impl ApprovalRequest {
             source: "github:mote-browser/frontend-introspection-mcp @ a1b2c3d4e5f6".into(),
             permissions: vec![
                 NarrowablePermission {
-                    domain: "mcp:server:bind_loopback".into(),
-                    requested_scope: String::new(),
+                    domain: "mcp".into(),
+                    action: "server".into(),
+                    requested_scope: "bind_loopback".into(),
                     mode: NarrowMode::GrantFull,
                     description: "exposes an mcp endpoint on localhost only".into(),
                     narrowable: false,
                     high_risk: false,
                 },
                 NarrowablePermission {
-                    domain: "tabs:list".into(),
+                    domain: "tabs".into(),
+                    action: "list".into(),
                     requested_scope: String::new(),
                     mode: NarrowMode::GrantFull,
                     description: "read the list of open tabs in the current workspace".into(),
@@ -606,7 +625,8 @@ impl ApprovalRequest {
                     high_risk: false,
                 },
                 NarrowablePermission {
-                    domain: "page:read_dom".into(),
+                    domain: "page".into(),
+                    action: "read_dom".into(),
                     requested_scope: String::new(),
                     mode: NarrowMode::GrantFull,
                     description: "read the dom tree of any open page".into(),
@@ -614,7 +634,8 @@ impl ApprovalRequest {
                     high_risk: true,
                 },
                 NarrowablePermission {
-                    domain: "page:inject_script".into(),
+                    domain: "page".into(),
+                    action: "inject_script".into(),
                     requested_scope: "*".into(),
                     mode: NarrowMode::GrantOrigins(vec![
                         "https://localhost/*".into(),
@@ -626,7 +647,8 @@ impl ApprovalRequest {
                     high_risk: true,
                 },
                 NarrowablePermission {
-                    domain: "introspect:accessibility_tree".into(),
+                    domain: "introspect".into(),
+                    action: "accessibility_tree".into(),
                     requested_scope: String::new(),
                     mode: NarrowMode::GrantFull,
                     description: "read the full accessibility tree of any page".into(),
@@ -634,7 +656,8 @@ impl ApprovalRequest {
                     high_risk: true,
                 },
                 NarrowablePermission {
-                    domain: "introspect:network_history".into(),
+                    domain: "introspect".into(),
+                    action: "network_history".into(),
                     requested_scope: String::new(),
                     mode: NarrowMode::GrantFull,
                     description: "read full network request/response history including bodies"
@@ -774,20 +797,23 @@ mod tests {
     #[test]
     fn narrow_mode_grant_full_effective_string() {
         let perm = NarrowablePermission {
-            domain: "page:inject_script".into(),
+            domain: "page".into(),
+            action: "inject_script".into(),
             requested_scope: "*".into(),
             mode: NarrowMode::GrantFull,
             description: String::new(),
             narrowable: true,
             high_risk: true,
         };
+        assert_eq!(perm.domain_action(), "page:inject_script");
         assert_eq!(perm.effective_string(), "page:inject_script:*");
     }
 
     #[test]
     fn narrow_mode_grant_origins_effective_string() {
         let perm = NarrowablePermission {
-            domain: "page:inject_script".into(),
+            domain: "page".into(),
+            action: "inject_script".into(),
             requested_scope: "*".into(),
             mode: NarrowMode::GrantOrigins(vec![
                 "https://github.com/*".into(),
@@ -806,7 +832,8 @@ mod tests {
     #[test]
     fn narrow_mode_deny_effective_string_is_empty() {
         let perm = NarrowablePermission {
-            domain: "tabs:list".into(),
+            domain: "tabs".into(),
+            action: "list".into(),
             requested_scope: String::new(),
             mode: NarrowMode::Deny,
             description: String::new(),
@@ -837,35 +864,33 @@ mod tests {
             "plugin name missing from json"
         );
 
-        // Each permission's domain and the components of its effective_string()
-        // are reconstructable from the JSON (mode + domain + requested_scope are
-        // all serialized). For GrantFull the effective string appears verbatim;
-        // for GrantOrigins the origins serialize as a JSON array, so the
-        // comma-joined form is reconstructable from those array elements rather
-        // than present as a substring — assert each element instead.
+        // The wire carries `domain`, `action`, and `requested_scope` as separate
+        // serialized fields (NOT the derived `effective_string`, which is a
+        // display-only helper never sent across the bridge). Assert each is
+        // present as its own serialized value, plus each GrantOrigins origin.
         for perm in &original.permissions {
             assert!(
-                json.contains(perm.domain.as_str()),
+                json.contains(&format!("\"domain\":\"{}\"", perm.domain)),
                 "permission domain '{}' missing from json",
                 perm.domain
             );
-            match &perm.mode {
-                NarrowMode::GrantFull => {
-                    let effective = perm.effective_string();
+            assert!(
+                json.contains(&format!("\"action\":\"{}\"", perm.action)),
+                "permission action '{}' missing from json",
+                perm.action
+            );
+            assert!(
+                json.contains(&format!("\"requested_scope\":\"{}\"", perm.requested_scope)),
+                "requested_scope '{}' missing from json",
+                perm.requested_scope
+            );
+            if let NarrowMode::GrantOrigins(origins) = &perm.mode {
+                for origin in origins {
                     assert!(
-                        json.contains(effective.as_str()),
-                        "effective string '{effective}' missing from json"
+                        json.contains(origin.as_str()),
+                        "narrowed origin '{origin}' missing from json"
                     );
                 }
-                NarrowMode::GrantOrigins(origins) => {
-                    for origin in origins {
-                        assert!(
-                            json.contains(origin.as_str()),
-                            "effective origin '{origin}' missing from json"
-                        );
-                    }
-                }
-                NarrowMode::Deny => {}
             }
         }
 
@@ -887,7 +912,8 @@ mod tests {
             version: "1.0.0".into(),
             source: "github:example/my-plugin @ abc123".into(),
             permissions: vec![NarrowablePermission {
-                domain: "tabs:list".into(),
+                domain: "tabs".into(),
+                action: "list".into(),
                 requested_scope: String::new(),
                 mode: NarrowMode::GrantFull,
                 description: "list tabs".into(),

@@ -730,9 +730,17 @@
     var perState = (req.permissions || []).map(function (p) {
       return { mode: narrowKind(p.mode), origins: narrowOrigins(p.mode) };
     });
+    // `new_permissions` carries full permission strings (e.g.
+    // "page:inject_script:*"); permission rows are keyed by their bare
+    // "domain:action" display string. Normalise each new-permission entry to
+    // its leading "domain:action" so the "is-new" highlight matches the row.
     var newSet = {};
     if (Array.isArray(req.new_permissions)) {
-      for (var n = 0; n < req.new_permissions.length; n++) newSet[String(req.new_permissions[n])] = true;
+      for (var n = 0; n < req.new_permissions.length; n++) {
+        var parts = String(req.new_permissions[n]).split(":");
+        var key = parts.length >= 2 ? parts[0] + ":" + parts[1] : parts[0];
+        newSet[key] = true;
+      }
     }
 
     // Backdrop wraps the floating surface. The chrome host pre-creates
@@ -827,18 +835,24 @@
     });
 
     (req.permissions || []).forEach(function (perm, idx) {
+      // `domain` and `action` are BARE; the visible permission identity is the
+      // composed "domain:action" key (unchanged from the previous rendering).
+      var displayKey = String(perm.domain || "");
+      if (perm.action) displayKey += ":" + String(perm.action);
+      var isNew = !!newSet[displayKey];
+
       var classes = "perm-entry";
       if (perm.high_risk) classes += " is-high-risk";
-      if (newSet[String(perm.domain)]) classes += " is-new";
+      if (isNew) classes += " is-new";
       var entry = el("div", {
         class: classes,
-        attrs: { role: "listitem", "aria-label": String(perm.domain || "") },
+        attrs: { role: "listitem", "aria-label": displayKey },
       });
 
       var entryHead = el("div", { class: "perm-entry-head" });
       entryHead.appendChild(el("span", {
         class: "perm-domain",
-        text: String(perm.domain || ""),
+        text: displayKey,
       }));
       if (perm.requested_scope) {
         entryHead.appendChild(el("span", {
@@ -851,7 +865,7 @@
         riskWrap.appendChild(el("span", { class: "badge danger", text: "high risk" }));
         entryHead.appendChild(riskWrap);
       }
-      if (newSet[String(perm.domain)]) {
+      if (isNew) {
         entryHead.appendChild(el("span", { class: "perm-new-marker", text: "new" }));
       }
       entry.appendChild(entryHead);
@@ -864,7 +878,7 @@
       var radioName = "perm-" + idx;
       var modes = el("div", {
         class: "narrow-modes",
-        attrs: { role: "radiogroup", "aria-label": "grant mode for " + String(perm.domain || "") },
+        attrs: { role: "radiogroup", "aria-label": "grant mode for " + displayKey },
       });
 
       // `originHandleRef.value` is populated AFTER `buildOriginEditor` runs
@@ -924,11 +938,12 @@
     function getDecision(kind) {
       var perms = (req.permissions || []).map(function (perm, i) {
         var state = perState[i];
+        // Send the BARE domain + action so the runtime's GrantSet::narrow
+        // matches the correct (domain, action) pair. The resource/scope is
+        // carried by `origins` (narrowed) or implied by `mode:"full"`.
         var entry = {
           domain: String(perm.domain || ""),
-          // The op uses "action" / "mode" to disambiguate from existing
-          // grants in the same permission domain (T5 spec).
-          action: String(perm.requested_scope || ""),
+          action: String(perm.action || ""),
           mode: state.mode === "origins" ? "origins" : (state.mode === "deny" ? "deny" : "full"),
         };
         if (state.mode === "origins") {
@@ -943,17 +958,18 @@
       };
     }
 
+    // Dismissal is SHELL-DRIVEN (ADR-0007 async approval): the buttons only
+    // invoke the op; the pump thread decides whether/when to hide the dialog
+    // (hide on Loaded/Denied; keep it up on LoadFailed so the user can retry).
     declineBtn.addEventListener("click", function () {
       if (window.mote && window.mote.invoke) {
         window.mote.invoke("approve_plugin", getDecision("deny")).catch(function () {});
       }
-      hideApprovalDialog();
     });
     approveBtn.addEventListener("click", function () {
       if (window.mote && window.mote.invoke) {
         window.mote.invoke("approve_plugin", getDecision("grant")).catch(function () {});
       }
-      hideApprovalDialog();
     });
     footer.appendChild(declineBtn);
     footer.appendChild(approveBtn);

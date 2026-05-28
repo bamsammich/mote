@@ -322,11 +322,14 @@ fn build_request(
 /// human-readable descriptions for each permission are a future task (they
 /// require registry annotations not yet present in v1.toml).
 fn permission_to_narrowable(raw: &str) -> NarrowablePermission {
-    let (da_key, requested_scope, narrowable) = raw.parse::<Permission>().map_or_else(
+    let (domain, action, requested_scope, narrowable) = raw.parse::<Permission>().map_or_else(
         // Unparsable permission string — treat as non-narrowable with no scope.
-        |_| (raw.to_owned(), String::new(), false),
+        // The whole raw string goes in `domain` (with empty `action`) so the
+        // dialog still shows something; it cannot be narrowed.
+        |_| (raw.to_owned(), String::new(), String::new(), false),
         |parsed| {
-            let da = format!("{}:{}", parsed.domain(), parsed.action());
+            let domain = parsed.domain().to_owned();
+            let action = parsed.action().to_owned();
             if let Some(resource) = parsed.resource() {
                 let scope = resource.to_string();
                 // Origin-shaped resources can be narrowed to specific origins;
@@ -334,23 +337,26 @@ fn permission_to_narrowable(raw: &str) -> NarrowablePermission {
                 // cannot. `requested_scope` keeps the resource string for display
                 // either way.
                 let narrowable = scope == "*" || scope.contains("://") || scope.contains('/');
-                (da, scope, narrowable)
+                (domain, action, scope, narrowable)
             } else {
-                (da, String::new(), false)
+                (domain, action, String::new(), false)
             }
         },
     );
 
-    // High-risk: use the hardcoded list as the deliberate-modest signal.
-    // Combination-based per-permission high_risk would require passing the
-    // triggered combination set through here; that's a future refinement.
+    // High-risk: use the hardcoded list as the deliberate-modest signal, keyed
+    // by the `domain:action` pair. Combination-based per-permission high_risk
+    // would require passing the triggered combination set through here; that's a
+    // future refinement.
+    let da_key = format!("{domain}:{action}");
     let high_risk = HARDCODED_HIGH_RISK.contains(&da_key.as_str());
 
     // Description: raw permission string as a modest placeholder.
     let description = format!("grants {raw}");
 
     NarrowablePermission {
-        domain: da_key,
+        domain,
+        action,
         requested_scope,
         mode: NarrowMode::GrantFull,
         description,
@@ -825,6 +831,9 @@ mod tests {
             !secret.narrowable,
             "bare-name dynamic resource must not be narrowable"
         );
+        // domain/action are now BARE (the bug fix): the resource is the scope.
+        assert_eq!(secret.domain, "secret");
+        assert_eq!(secret.action, "read");
         assert_eq!(secret.requested_scope, "anthropic_api_key");
 
         // Bare-name mcp client → NOT narrowable.
@@ -834,9 +843,11 @@ mod tests {
             "bare-name mcp server resource must not be narrowable"
         );
 
-        // `*` resource → narrowable.
+        // `*` resource → narrowable; domain/action stay bare.
         let inject_star = permission_to_narrowable("page:inject_script:*");
         assert!(inject_star.narrowable, "`*` resource must be narrowable");
+        assert_eq!(inject_star.domain, "page");
+        assert_eq!(inject_star.action, "inject_script");
         assert_eq!(inject_star.requested_scope, "*");
 
         // Origin glob → narrowable.
