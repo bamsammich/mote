@@ -40,10 +40,10 @@ use cef::{
     Browser, CefString, Client, DisplayHandler, ImplClient, ImplDisplayHandler, ImplFrame,
     ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
     ImplResourceRequestHandler, LoadHandler, PaintElementType, Rect, RenderHandler, Request,
-    RequestHandler, ResourceRequestHandler, ReturnValue, WrapClient, WrapDisplayHandler,
-    WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler,
-    wrap_client, wrap_display_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler, wrap_resource_request_handler,
+    RequestHandler, ResourceRequestHandler, ReturnValue, ScreenInfo, WrapClient,
+    WrapDisplayHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler,
+    WrapResourceRequestHandler, wrap_client, wrap_display_handler, wrap_load_handler,
+    wrap_render_handler, wrap_request_handler, wrap_resource_request_handler,
 };
 
 use crate::browser::PageRole;
@@ -112,12 +112,24 @@ impl FrameSlot {
     }
 }
 
-/// The off-screen viewport size reported to CEF via `view_rect`.
+/// The off-screen viewport size reported to CEF via `view_rect`, plus the
+/// device scale reported via `screen_info` (CEF's `get_screen_info`).
 ///
-/// Held behind an `Arc` of two atomics so the owning [`crate::Page`] can update
-/// it on a window resize and the (possibly other-thread) render handler reads
-/// the live value each time CEF queries `view_rect`. The `Page` then calls
-/// `host.was_resized()` to make CEF re-query and re-paint at the new size.
+/// The stored width/height are **logical** (DIP) pixels: CEF lays the document
+/// out at `view_rect` size and multiplies by `device_scale_factor` to produce
+/// the physical paint buffer. The shell works in physical pixels, so
+/// [`crate::Page::notify_resized`] divides physical by the scale before storing
+/// here. `view_rect` returns the stored logical size verbatim; `screen_info`
+/// reports the stored scale.
+///
+/// Held behind an `Arc` of atomics so the owning [`crate::Page`] can update it
+/// on a window resize and the (possibly other-thread) render handler reads the
+/// live value each time CEF queries `view_rect`/`screen_info`. The `Page` then
+/// calls `host.was_resized()` + `host.notify_screen_info_changed()` to make CEF
+/// re-query and re-paint at the new size and scale.
+///
+/// The scale is stored as the bit pattern of an `f32` ([`f32::to_bits`]) in an
+/// `AtomicU32` so it can be read and written atomically without a lock.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewSize {
     inner: Arc<ViewSizeInner>,
@@ -125,39 +137,86 @@ pub(crate) struct ViewSize {
 
 #[derive(Debug)]
 struct ViewSizeInner {
+    /// Logical (DIP) width reported by `view_rect`.
     width: std::sync::atomic::AtomicI32,
+    /// Logical (DIP) height reported by `view_rect`.
     height: std::sync::atomic::AtomicI32,
+    /// Device scale factor, stored as `f32::to_bits`; default `1.0`.
+    device_scale_bits: std::sync::atomic::AtomicU32,
 }
 
 impl ViewSize {
-    /// A new shared size starting at `width`×`height`.
+    /// A new shared size starting at logical `width`×`height` and device scale
+    /// `1.0` (the shell pushes the real scale via
+    /// [`crate::Page::notify_resized`] right after page creation).
     pub(crate) fn new(width: i32, height: i32) -> Self {
         Self {
             inner: Arc::new(ViewSizeInner {
                 width: std::sync::atomic::AtomicI32::new(width),
                 height: std::sync::atomic::AtomicI32::new(height),
+                device_scale_bits: std::sync::atomic::AtomicU32::new(1.0_f32.to_bits()),
             }),
         }
     }
 
-    /// The current width (read by `view_rect`).
+    /// The current logical width (read by `view_rect`).
     pub(crate) fn width(&self) -> i32 {
         self.inner.width.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The current height (read by `view_rect`).
+    /// The current logical height (read by `view_rect`).
     pub(crate) fn height(&self) -> i32 {
         self.inner.height.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Update the size (the `Page` calls this on resize, then `was_resized()`).
-    pub(crate) fn set(&self, width: i32, height: i32) {
+    /// The current device scale factor (read by `screen_info`).
+    pub(crate) fn device_scale(&self) -> f32 {
+        f32::from_bits(
+            self.inner
+                .device_scale_bits
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// Store an explicit logical size and device scale. The `Page` derives the
+    /// logical size from the physical size and scale in
+    /// [`crate::Page::notify_resized`], then calls `was_resized()` +
+    /// `notify_screen_info_changed()`.
+    pub(crate) fn set(&self, width: i32, height: i32, device_scale: f32) {
         self.inner
             .width
             .store(width, std::sync::atomic::Ordering::SeqCst);
         self.inner
             .height
             .store(height, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .device_scale_bits
+            .store(device_scale.to_bits(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Convert a **physical** size to the **logical** (DIP) size CEF should lay
+    /// out at: `round(physical / device_scale)`, clamped to a minimum of 1px so
+    /// `view_rect` never reports a zero (or negative) dimension. A non-positive
+    /// or non-finite scale falls back to `1.0` (physical == logical).
+    pub(crate) fn physical_to_logical(physical: u32, device_scale: f64) -> i32 {
+        let scale = if device_scale.is_finite() && device_scale > 0.0 {
+            device_scale
+        } else {
+            1.0
+        };
+        let logical = (f64::from(physical) / scale).round();
+        // physical is u32 and scale > 0; `logical` fits comfortably in i32 for
+        // any real display, but clamp defensively to the i32 range and >= 1.
+        let logical = logical.clamp(1.0, f64::from(i32::MAX));
+        // The clamp guarantees `logical` is finite and within [1, i32::MAX], so
+        // the cast is in-range and the fractional part is already removed by
+        // `round()` — no truncation or sign surprise.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "clamped to [1, i32::MAX] and rounded above; in-range and lossless"
+        )]
+        let logical = logical as i32;
+        logical
     }
 }
 
@@ -180,12 +239,51 @@ wrap_render_handler! {
         fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
             guard((), || {
                 if let Some(r) = rect {
+                    // Stored dims are already LOGICAL (DIP): the `Page` divides
+                    // the physical size by the device scale before storing. CEF
+                    // multiplies this by `device_scale_factor` (from
+                    // `screen_info`) to produce the physical paint buffer.
                     r.x = 0;
                     r.y = 0;
                     r.width = self.state.size.width();
                     r.height = self.state.size.height();
                 }
             });
+        }
+
+        /// Report the off-screen display's properties to CEF (CEF's
+        /// `get_screen_info`). The `device_scale_factor` is what makes CEF
+        /// render the OSR document high-DPI aware: it lays out at the logical
+        /// `view_rect` size and scales the paint buffer by this factor, so the
+        /// chrome HTML is laid out at the correct DIP size on a high-DPI monitor
+        /// instead of treating physical pixels as CSS pixels (issue #7).
+        ///
+        /// Returns `1` to tell CEF the populated `ScreenInfo` is authoritative.
+        fn screen_info(
+            &self,
+            _browser: Option<&mut Browser>,
+            screen_info: Option<&mut ScreenInfo>,
+        ) -> ::std::os::raw::c_int {
+            guard(0, || {
+                let Some(info) = screen_info else {
+                    return 0;
+                };
+                let logical_w = self.state.size.width();
+                let logical_h = self.state.size.height();
+                info.device_scale_factor = self.state.size.device_scale();
+                info.depth = 24;
+                info.depth_per_component = 8;
+                info.is_monochrome = 0;
+                let rect = Rect {
+                    x: 0,
+                    y: 0,
+                    width: logical_w,
+                    height: logical_h,
+                };
+                info.rect = rect.clone();
+                info.available_rect = rect;
+                1
+            })
         }
 
         fn on_paint(
@@ -568,8 +666,70 @@ pub(crate) fn pixel_buf_len(w: u32, h: u32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pixel_buf_len, should_cancel_navigation};
+    use super::{ViewSize, pixel_buf_len, should_cancel_navigation};
     use crate::browser::PageRole;
+
+    #[test]
+    fn view_size_hidpi_reports_logical_and_scale() {
+        // The HiDPI repro from issue #7: a 1858×2098 physical frame at scale
+        // 1.25 must lay out at 1486×1678 DIP, and `screen_info` must report 1.25.
+        let size = ViewSize::new(1280, 800);
+        let scale = 1.25_f64;
+        let lw = ViewSize::physical_to_logical(1858, scale);
+        let lh = ViewSize::physical_to_logical(2098, scale);
+        size.set(lw, lh, 1.25_f32);
+
+        assert_eq!(size.width(), 1486); // round(1858 / 1.25) = round(1486.4)
+        assert_eq!(size.height(), 1678); // round(2098 / 1.25) = round(1678.4)
+        assert!((size.device_scale() - 1.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn view_size_scale_one_is_identity() {
+        // At scale 1.0 the logical size equals the physical size unchanged.
+        assert_eq!(ViewSize::physical_to_logical(1858, 1.0), 1858);
+        assert_eq!(ViewSize::physical_to_logical(2098, 1.0), 2098);
+
+        let size = ViewSize::new(0, 0);
+        size.set(
+            ViewSize::physical_to_logical(1858, 1.0),
+            ViewSize::physical_to_logical(2098, 1.0),
+            1.0,
+        );
+        assert_eq!(size.width(), 1858);
+        assert_eq!(size.height(), 2098);
+        assert!((size.device_scale() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn view_size_default_scale_is_one() {
+        // A freshly created ViewSize reports scale 1.0 until the shell pushes
+        // the real scale via notify_resized.
+        let size = ViewSize::new(1280, 800);
+        assert!((size.device_scale() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn physical_to_logical_rounds_to_nearest() {
+        // 100 / 3 = 33.33… rounds to 33; 200 / 3 = 66.66… rounds to 67.
+        assert_eq!(ViewSize::physical_to_logical(100, 3.0), 33);
+        assert_eq!(ViewSize::physical_to_logical(200, 3.0), 67);
+    }
+
+    #[test]
+    fn physical_to_logical_clamps_to_min_one() {
+        // A zero physical size never yields a zero (or negative) DIP dimension.
+        assert_eq!(ViewSize::physical_to_logical(0, 1.25), 1);
+    }
+
+    #[test]
+    fn physical_to_logical_bad_scale_falls_back_to_identity() {
+        // Non-positive / non-finite scales fall back to 1.0 (physical == logical)
+        // rather than dividing by zero or producing a bogus dimension.
+        assert_eq!(ViewSize::physical_to_logical(1858, 0.0), 1858);
+        assert_eq!(ViewSize::physical_to_logical(1858, -2.0), 1858);
+        assert_eq!(ViewSize::physical_to_logical(1858, f64::NAN), 1858);
+    }
 
     #[test]
     fn content_page_cancels_mote_navigation() {

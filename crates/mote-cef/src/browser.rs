@@ -385,18 +385,36 @@ impl Page {
         }
     }
 
-    /// Resize this off-screen browser's surface to `width`×`height` pixels.
+    /// Resize this off-screen browser's surface to `width`×`height` **physical**
+    /// pixels at display scale `device_scale` (e.g. `1.25` on a high-DPI monitor).
     ///
-    /// Updates the size CEF reads via the render handler's `view_rect`, then
-    /// calls `CefBrowserHost::WasResized` so CEF re-queries the rect and repaints
-    /// at the new size (the next [`Page::latest_frame`] is the resized frame).
+    /// `width`/`height` are physical pixels (the shell already computes them).
+    /// Internally the page derives the **logical** (DIP) size CEF lays out at —
+    /// `round(physical / device_scale)` — and stores both the logical size and
+    /// the scale. It then calls `CefBrowserHost::WasResized` so CEF re-queries
+    /// `view_rect` and `CefBrowserHost::NotifyScreenInfoChanged` so CEF re-queries
+    /// `get_screen_info` (the device scale). CEF lays the document out at the
+    /// logical size and scales the paint buffer by `device_scale`, producing a
+    /// `logical × scale = physical` frame that is crisp on a high-DPI display
+    /// instead of treating physical pixels as CSS pixels (issue #7).
+    ///
     /// The host layer (mote-shell) calls this when the window — and thus the
-    /// chrome (full-window) or content (viewport) region — changes size. No-op if
-    /// the browser is closing/closed.
-    pub fn notify_resized(&self, width: u32, height: u32) {
-        self.size.set(width.cast_signed(), height.cast_signed());
+    /// chrome (full-window) or content (viewport) region — changes size or scale.
+    /// No-op if the browser is closing/closed.
+    pub fn notify_resized(&self, width: u32, height: u32, device_scale: f64) {
+        let logical_w = ViewSize::physical_to_logical(width, device_scale);
+        let logical_h = ViewSize::physical_to_logical(height, device_scale);
+        // The device scale is stored as an f32 (CEF's `device_scale_factor` is
+        // f32); the precision loss for a display scale is negligible.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "CEF's device_scale_factor is f32; a display scale loses no meaningful precision"
+        )]
+        let device_scale_f32 = device_scale as f32;
+        self.size.set(logical_w, logical_h, device_scale_f32);
         if let Some(host) = self.browser.host() {
             host.was_resized();
+            host.notify_screen_info_changed();
         }
     }
 
