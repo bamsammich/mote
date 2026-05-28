@@ -36,6 +36,15 @@ mote-runtime = { path = "../mote-runtime" }
 mote-audit = { path = "../mote-audit" }
 # The permission/capability/event registry the runtime validates plugins against.
 mote-registry = { path = "../mote-registry" }
+# Plugin management (ApprovalStore, Provenance, diff) + the lua manifest loader
+# used by the install→approval brain (Task 2 / ADR-0007).
+mote-pluginmgr = { path = "../mote-pluginmgr" }
+mote-lua = { path = "../mote-lua" }
+mote-permissions = { path = "../mote-permissions" }
+# Ergonomic error enums for ClassifyError.
+thiserror = { workspace = true }
+# Serde + derive for DialogResult deserialization.
+serde = { version = "1.0", features = ["derive"] }
 # Proper, object-anchored JSON parsing of the chrome bootstrap's op `params`
 # (replaces the hand-rolled first-substring field extractors). Crate-local dep.
 serde_json = "1.0"

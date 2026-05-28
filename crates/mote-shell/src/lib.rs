@@ -58,6 +58,7 @@
 //! - **Provider-plugin navigation** (`ui:urlbar_provider`): the op accepts a URL
 //!   directly (the chrome bootstrap normalizes omnibox text).
 
+mod approval;
 mod picker;
 mod runtime;
 

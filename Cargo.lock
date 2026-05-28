@@ -3023,6 +3023,9 @@ version = "0.0.0"
 dependencies = [
  "mote-audit",
  "mote-cef",
+ "mote-lua",
+ "mote-permissions",
+ "mote-pluginmgr",
  "mote-registry",
  "mote-runtime",
  "mote-session",
@@ -3030,7 +3033,9 @@ dependencies = [
  "mote-types",
  "mote-ui",
  "raw-window-handle",
+ "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "winit",
 ]
 
