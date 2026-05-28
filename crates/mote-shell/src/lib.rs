@@ -75,7 +75,7 @@ use mote_cef::{
 use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
 use mote_storage::Store;
 use mote_types::{TabId, WorkspaceId};
-use mote_ui::{Compositor, PixelFormat, ViewportRect};
+use mote_ui::{ApprovalRequest, Compositor, IntegrityPanel, PixelFormat, ViewportRect};
 
 use crate::picker::{PickerEntry, PickerState};
 use winit::application::ApplicationHandler;
@@ -301,6 +301,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         host,
         integrity_page: None,
         integrity_open: false,
+        integrity_chrome_open: false,
         integrity_paints: 0,
         picker: PickerState::default(),
         picker_page: None,
@@ -515,6 +516,11 @@ fn build_chrome_resources() -> ChromeResources {
             mote_ui::HOST_JS,
             "text/javascript; charset=utf-8",
         )
+        .register(
+            "panels.js",
+            mote_ui::PANELS_JS,
+            "text/javascript; charset=utf-8",
+        )
         .register("tokens.css", mote_ui::TOKENS_CSS, css)
         .register("base.css", mote_ui::BASE_CSS, css)
         .register(
@@ -619,6 +625,10 @@ fn push(queue: &CommandQueue, command: ShellCommand) {
 /// The winit application: owns the window, the CEF engine + pages, the
 /// compositor, and the session. All CEF objects stay on this (the event-loop)
 /// thread.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "winit app state — each bool is an independent in-flight UI flag (integrity overlay open, chrome-side panel open, chrome-ready, first-frame-logged); a state machine would obscure them"
+)]
 struct ShellApp {
     engine: Engine,
     bridge: HostBridge,
@@ -643,6 +653,11 @@ struct ShellApp {
     integrity_page: Option<Page>,
     /// Whether the integrity overlay is currently composited full-window.
     integrity_open: bool,
+    /// Whether the chrome-rendered integrity panel (T4: structured-DOM path in
+    /// `panels.js`) is currently shown. Tracked independently from the legacy
+    /// `integrity_open` overlay flag — Ctrl+Shift+I prefers the chrome path,
+    /// the overlay path remains as a fallback while T5 finishes the cleanup.
+    integrity_chrome_open: bool,
     /// Last integrity paint count uploaded (re-upload only on a new frame).
     integrity_paints: u64,
     /// The workspace tab picker (`Mod+Space`) state machine. Logic lives
@@ -910,6 +925,66 @@ impl ShellApp {
                 "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_url',{{url:{url}}});"
             ));
         }
+    }
+
+    /// Push the integrity-panel view-model into the chrome document. The chrome
+    /// page's `panels.js` builds the panel DOM via `createElement` / `textContent`
+    /// (ADR-0005) — no HTML strings cross the bridge. Returns `true` when the
+    /// push was emitted, `false` when the chrome is not yet ready.
+    fn push_integrity_panel_to_chrome(&self, panel: &IntegrityPanel) -> bool {
+        if !self.chrome_ready {
+            return false;
+        }
+        let payload = match serde_json::to_string(panel) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: serialize integrity panel failed: {e}");
+                return false;
+            }
+        };
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('render_integrity_panel',{payload});"
+        ));
+        true
+    }
+
+    /// Hide the integrity panel inside the chrome document.
+    fn push_hide_integrity_to_chrome(&self) {
+        if !self.chrome_ready {
+            return;
+        }
+        let chrome = self.bridge.page();
+        chrome.eval_js(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('hide_integrity_panel',null);",
+        );
+    }
+
+    /// Push an approval-dialog view-model into the chrome document. The chrome
+    /// page's `panels.js` builds the dialog DOM via `createElement` /
+    /// `textContent` (ADR-0005). The dialog's buttons invoke `approve_plugin`
+    /// per the T5 op shape — that op lands in Task 5; until then the registry
+    /// returns 404 for it, which is the documented expected behaviour for T4.
+    #[allow(
+        dead_code,
+        reason = "T4: wired here for the debug push path; T5 calls this from the load-pass"
+    )]
+    fn push_approval_dialog(&self, req: &ApprovalRequest) -> bool {
+        if !self.chrome_ready {
+            return false;
+        }
+        let payload = match serde_json::to_string(req) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: serialize approval request failed: {e}");
+                return false;
+            }
+        };
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('show_approval_dialog',{payload});"
+        ));
+        true
     }
 
     /// Poll the active tab's live page for a document-title change (CEF reports
@@ -1537,10 +1612,21 @@ impl ShellApp {
         if event.state != ElementState::Pressed {
             return false;
         }
-        // Esc closes the integrity overlay (only when it is open).
-        if self.integrity_open && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            self.set_integrity_open(false);
-            return true;
+        // Esc closes the integrity panel (either the chrome-rendered one or
+        // the legacy overlay surface, whichever happens to be live).
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            let overlay_was_open = self.integrity_open;
+            let chrome_was_open = self.integrity_chrome_open;
+            if overlay_was_open {
+                self.set_integrity_open(false);
+            }
+            if chrome_was_open {
+                self.integrity_chrome_open = false;
+                self.push_hide_integrity_to_chrome();
+            }
+            if overlay_was_open || chrome_was_open {
+                return true;
+            }
         }
         // Mod+Space (Super or Ctrl) opens the workspace tab picker (DESIGN
         // §The workspace tab picker — default `Mod+Space`). `Mod` is Super on
@@ -1557,12 +1643,65 @@ impl ShellApp {
         }
         // Ctrl+Shift+I toggles the integrity panel (the `i` arrives as upper or
         // lower case depending on the shift state, so match case-insensitively).
+        // T4 prefers the chrome-rendered structured-DOM path: serialize the
+        // panel view-model and push it through window.mote.applyOp. The legacy
+        // overlay path stays as a fallback for the chrome-not-ready window so
+        // the keybind never appears broken; T5 deletes it.
         if self.modifiers.contains(Modifiers::SHIFT)
             && let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("i")
         {
-            let open = !self.integrity_open;
-            self.set_integrity_open(open);
+            if self.chrome_ready {
+                if self.integrity_chrome_open {
+                    self.integrity_chrome_open = false;
+                    self.push_hide_integrity_to_chrome();
+                } else {
+                    let panel = self.host.build_panel();
+                    if self.push_integrity_panel_to_chrome(&panel) {
+                        self.integrity_chrome_open = true;
+                    }
+                }
+            } else {
+                let open = !self.integrity_open;
+                self.set_integrity_open(open);
+            }
+            return true;
+        }
+        // T4 debug-only keybind (Ctrl+Shift+A): push a sample ApprovalRequest
+        // into the chrome page so the dialog renders for live verification.
+        // The buttons call `approve_plugin`, which T5 will register; until
+        // then the registry rejects the op (404) — expected.
+        // TODO(T5): remove this keybind once the load-pass wires the real path.
+        if self.modifiers.contains(Modifiers::SHIFT)
+            && let Key::Character(s) = &event.logical_key
+            && s.eq_ignore_ascii_case("a")
+            && self.chrome_ready
+        {
+            let req = ApprovalRequest::sample();
+            self.push_approval_dialog(&req);
+            return true;
+        }
+        // T4 debug-only keybind (Ctrl+Shift+X): push a HOSTILE ApprovalRequest
+        // whose plugin name, source, and permission domain carry XSS payloads
+        // (script tags, onerror attribute, raw quotes). The chrome must render
+        // them as inert literal text — proving the structured-DOM path holds
+        // (ADR-0005). Verifies the boundary in live behaviour; the Rust test
+        // `hostile_approval_request_serializes_as_inert_json_strings` proves
+        // the wire-format encoding.
+        // TODO(T5): remove this debug keybind alongside the sample one.
+        if self.modifiers.contains(Modifiers::SHIFT)
+            && let Key::Character(s) = &event.logical_key
+            && s.eq_ignore_ascii_case("x")
+            && self.chrome_ready
+        {
+            let mut req = ApprovalRequest::sample();
+            req.plugin = "<script>alert('xss-pluginname')</script>".into();
+            req.source = "evil\" onerror=\"alert('xss-source')".into();
+            req.permissions[0].domain = "</script><img src=x onerror=alert(1)>".into();
+            req.permissions[0].description =
+                "this description contains <script>alert(1)</script> markup".into();
+            req.dangerous_combinations[0] = "\"></div><script>fetch('//attacker')</script>".into();
+            self.push_approval_dialog(&req);
             return true;
         }
         match &event.logical_key {

@@ -120,3 +120,35 @@ body {
     transition-duration: 0ms !important;
   }
 }
+
+/* ---- Chrome overlay mounts (integrity panel + approval dialog) ----
+ * panels.js mounts the structured-DOM panel/dialog into one of these roots.
+ * `position: fixed; inset: 0` lifts the surface over the slot grid; the
+ * --bg fill prevents the composited page from bleeding through behind the
+ * panel content (the dialog uses its own .approval-backdrop dim layer).
+ */
+.chrome-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  overflow: auto;
+}
+
+/* The integrity panel fills the overlay with the chrome background so the
+ * panel reads as a discrete chrome surface (matches the legacy overlay
+ * visual: a full-bleed chrome wash, not a floating modal). */
+#mote-integrity-root {
+  background: var(--bg);
+}
+
+/* The approval dialog uses its own .approval-backdrop dim; the root itself
+ * is transparent so the page underneath shows through the dim, not behind it. */
+#mote-approval-root {
+  background: transparent;
+  z-index: 900;
+}
+
+#mote-integrity-root[hidden],
+#mote-approval-root[hidden] {
+  display: none;
+}

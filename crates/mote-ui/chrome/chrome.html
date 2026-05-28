@@ -4,14 +4,25 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!--
-      Content-Security-Policy: the chrome document loads only its own bundled
-      assets. No remote scripts; Lucide ships as inline SVG (no CDN), honoring
-      DESIGN's no-implicit-network posture. `img-src data:` covers inline
-      favicon placeholders. Tighten further when served over `mote://`.
+      Content-Security-Policy (ADR-0005): the chrome document loads only its own
+      bundled assets, served from this same `mote://chrome` origin. No remote
+      scripts, no inline scripts (`script-src 'self'` excludes both unless an
+      `'unsafe-inline'` token is added — it is not), no `unsafe-eval`. Style
+      keeps `'unsafe-inline'` for TWO live reasons:
+        1. panels.js's storage-bar sets a per-row computed `style="width:X%"`
+           attribute (clamped numeric percentage, never plugin-supplied);
+        2. the static status-line markup below carries a `style="color:
+           var(--fg-2)"` attribute on the `.seg` tab-count row.
+      Both must keep working — removing `'unsafe-inline'` from style-src here
+      requires migrating BOTH paths (CSS custom properties + utility classes)
+      and is tracked as a separate follow-up. `img-src data:` covers inline
+      favicon placeholders. `object-src 'none'` blocks plugin elements;
+      `base-uri 'self'` prevents `<base>` hijacking; `form-action 'none'`
+      blocks form submissions out of the chrome.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; script-src 'self';"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; connect-src 'self';"
     />
     <title>mote</title>
     <link rel="stylesheet" href="tokens.css" />
@@ -27,12 +38,18 @@
     <link rel="stylesheet" href="components/palette.css" />
     <link rel="stylesheet" href="components/sidebar.css" />
     <link rel="stylesheet" href="components/empty-slot.css" />
+    <link rel="stylesheet" href="components/integrity-panel.css" />
+    <link rel="stylesheet" href="components/approval-dialog.css" />
     <!--
       host.js: the privileged chrome↔Rust bootstrap. Wraps window.cefQuery into
       window.mote.invoke (structured ops, never eval) and wires the omnibox to
       the `navigate` op. Deferred so the DOM exists before it binds listeners.
+      panels.js: structured-DOM renderers for the integrity panel and the
+      permission-approval dialog. Loaded AFTER host.js so its applyOp wrapper
+      chains the base ops (set_tabs / set_url) through.
     -->
     <script src="host.js" defer></script>
+    <script src="panels.js" defer></script>
   </head>
 
   <!--
@@ -255,6 +272,26 @@
         <div class="seg theme-btn">theme: dusk</div>
       </div>
     </div>
+
+    <!--
+      Mount roots for the integrity panel (Ctrl+Shift+I) and the permission
+      approval dialog. Both are populated by panels.js from JSON the shell
+      pushes via window.mote.applyOp — never as HTML strings. They are hidden
+      until a render op fires. The chrome-overlay container fills the viewport
+      so the panel sits above page content the same way the legacy overlay did.
+    -->
+    <div
+      id="mote-integrity-root"
+      class="chrome-overlay"
+      hidden
+      aria-hidden="true"
+    ></div>
+    <div
+      id="mote-approval-root"
+      class="chrome-overlay"
+      hidden
+      aria-hidden="true"
+    ></div>
 
     <!--
       Command palette overlay (widget kind). Hidden until invoked (⌘⇧P).

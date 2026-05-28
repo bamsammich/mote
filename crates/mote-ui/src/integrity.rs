@@ -25,7 +25,7 @@ use std::fmt;
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Integrity status of a plugin's on-disk files vs. the lock-file checksum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IntegrityStatus {
     /// Files match the recorded checksum (BLAKE3).
     Verified,
@@ -66,7 +66,7 @@ impl IntegrityStatus {
 }
 
 /// How a plugin's code reached the user's machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PluginKind {
     /// Declared in `plugins.lua` with a `github:` or `git+https:` source.
     DeclaredGit {
@@ -127,7 +127,7 @@ impl PluginKind {
 ///
 /// Reflects the requested permission vs. the effective (possibly narrowed)
 /// scope the user approved (DESIGN §Permission Primitives).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PermissionRow {
     /// The permission as declared in the plugin manifest
     /// (e.g. `page:inject_script:*`).
@@ -144,7 +144,7 @@ pub struct PermissionRow {
 /// Actions available on a plugin card in the integrity panel.
 ///
 /// These correspond to the keycap buttons rendered at the bottom of each card.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PluginAction {
     /// Open the permission-scope editor for this plugin.
     AdjustScope,
@@ -182,7 +182,7 @@ impl PluginAction {
 }
 
 /// A single plugin entry in the integrity panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginRow {
     /// Plugin name as declared in the manifest.
     pub name: String,
@@ -223,7 +223,7 @@ impl PluginRow {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Decision made by the dispatch chain for a network request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AuditDecision {
     /// Request was blocked by a plugin.
     Blocked,
@@ -247,7 +247,7 @@ impl fmt::Display for AuditDecision {
 ///
 /// Each row is a summary by plugin, not per-request. The panel shows totals;
 /// the shell holds the full ring-buffer if the user wants to drill down.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuditRow {
     /// Who acted — plugin name, or `"browser"` for browser-own requests.
     pub actor: String,
@@ -264,7 +264,7 @@ pub struct AuditRow {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A single entry in the storage audit section of the integrity panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StorageRow {
     /// Plugin name.
     pub plugin: String,
@@ -281,7 +281,7 @@ pub struct StorageRow {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A permission call that was denied (logged in the ring buffer).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DenialRow {
     /// Plugin that attempted the call.
     pub plugin: String,
@@ -299,7 +299,7 @@ pub struct DenialRow {
 ///
 /// The shell constructs this and passes it to the renderer. The renderer
 /// calls [`IntegrityPanel::to_html`] (or drives the chrome surface directly).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntegrityPanel {
     /// Active plugins, in display order (declared first, implicit local last).
     pub plugins: Vec<PluginRow>,
