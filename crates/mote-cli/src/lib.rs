@@ -19,9 +19,9 @@
 //! - **`store_path`**: `<config_dir>/state.db` — the `SQLite` approval-state
 //!   store.
 //!
-//! [`PluginManager::default_dirs`] already encodes `$HOME/.config/mote` /
-//! `$HOME/.cache/mote/plugins` as the fallback pair; this crate extends that
-//! with `$XDG_CONFIG_HOME` / `$XDG_CACHE_HOME` awareness.
+//! [`PluginManager::default_dirs`] is the single canonical resolver for these
+//! paths (XDG-aware, with the `$HOME` fallback); [`resolve_dirs`] delegates to
+//! it so the CLI and the GUI shell always agree on where plugin state lives.
 //!
 //! # Architecture
 //!
@@ -183,24 +183,10 @@ pub enum SecretsCommand {
 /// Returns `None` if neither `HOME` nor the relevant `XDG_*` variable is set.
 #[must_use]
 pub fn resolve_dirs() -> Option<(PathBuf, PathBuf)> {
-    let config = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg).join("mote")
-    } else {
-        let home = std::env::var_os("HOME")?;
-        PathBuf::from(home).join(".config").join("mote")
-    };
-
-    let cache = if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
-        PathBuf::from(xdg).join("mote").join("plugins")
-    } else {
-        let home = std::env::var_os("HOME")?;
-        PathBuf::from(home)
-            .join(".cache")
-            .join("mote")
-            .join("plugins")
-    };
-
-    Some((config, cache))
+    // Delegate to the single canonical resolver so the CLI and the GUI shell
+    // always agree on where plugin state lives (an approval recorded by one
+    // must be visible to the other).
+    PluginManager::default_dirs()
 }
 
 // ---------------------------------------------------------------------------

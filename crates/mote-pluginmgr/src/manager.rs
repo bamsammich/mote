@@ -305,21 +305,58 @@ impl PluginManager {
         }
     }
 
-    /// Returns the default production `(config_dir, cache_dir)` pair.
+    /// Returns the canonical production `(config_dir, cache_dir)` pair.
     ///
-    /// Resolves `~/.config/mote` and `~/.cache/mote/plugins` via the `HOME`
-    /// environment variable. Does **not** create either directory. The returned
-    /// pair can be passed to [`PluginManager::new`].
+    /// This is the **single source of truth** for where Mote's plugin state
+    /// lives, shared by the CLI (`mote_cli::resolve_dirs` delegates here) and
+    /// the GUI shell so an approval recorded via `mote plugin` is visible to the
+    /// running browser and vice versa. Resolution follows the XDG Base Directory
+    /// specification:
     ///
-    /// Returns `None` if `HOME` is not set.
+    /// - **`config_dir`**: `$XDG_CONFIG_HOME/mote` if `XDG_CONFIG_HOME` is set,
+    ///   otherwise `$HOME/.config/mote`.
+    /// - **`cache_dir`**: `$XDG_CACHE_HOME/mote/plugins` if `XDG_CACHE_HOME` is
+    ///   set, otherwise `$HOME/.cache/mote/plugins`.
+    ///
+    /// Does **not** create either directory. The returned pair can be passed to
+    /// [`PluginManager::new`].
+    ///
+    /// Returns `None` if a needed environment variable is missing (i.e. neither
+    /// `XDG_CONFIG_HOME` nor `HOME` for the config dir, or neither
+    /// `XDG_CACHE_HOME` nor `HOME` for the cache dir).
     #[must_use]
     pub fn default_dirs() -> Option<(PathBuf, PathBuf)> {
-        let home = std::env::var_os("HOME")?;
-        let config = PathBuf::from(&home).join(".config").join("mote");
-        let cache = PathBuf::from(&home)
-            .join(".cache")
-            .join("mote")
-            .join("plugins");
+        Self::resolve_dirs_from(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("XDG_CACHE_HOME"),
+            std::env::var_os("HOME").as_deref(),
+        )
+    }
+
+    /// Pure resolver behind [`PluginManager::default_dirs`].
+    ///
+    /// Takes the relevant environment values explicitly so the XDG/HOME
+    /// precedence can be unit-tested without mutating process-global env (which
+    /// is `unsafe` in edition 2024 and racy across parallel tests).
+    #[must_use]
+    fn resolve_dirs_from(
+        xdg_config_home: Option<std::ffi::OsString>,
+        xdg_cache_home: Option<std::ffi::OsString>,
+        home: Option<&std::ffi::OsStr>,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let config = if let Some(xdg) = xdg_config_home {
+            PathBuf::from(xdg).join("mote")
+        } else {
+            PathBuf::from(home?).join(".config").join("mote")
+        };
+        let cache = if let Some(xdg) = xdg_cache_home {
+            PathBuf::from(xdg).join("mote").join("plugins")
+        } else {
+            PathBuf::from(home?)
+                .join(".cache")
+                .join("mote")
+                .join("plugins")
+        };
         Some((config, cache))
     }
 
@@ -1458,6 +1495,52 @@ return M
             .join("\n");
         let lua = format!("mote.plugins({{\n{body}\n}})\n");
         fs::write(config_dir.join("plugins.lua"), lua).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // default_dirs / resolve_dirs_from: canonical XDG resolver
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_dirs_prefers_xdg_when_set() {
+        let home = std::ffi::OsString::from("/home/user");
+        let (config, cache) = PluginManager::resolve_dirs_from(
+            Some("/xdg/config".into()),
+            Some("/xdg/cache".into()),
+            Some(home.as_os_str()),
+        )
+        .unwrap();
+        assert_eq!(config, PathBuf::from("/xdg/config/mote"));
+        assert_eq!(cache, PathBuf::from("/xdg/cache/mote/plugins"));
+    }
+
+    #[test]
+    fn resolve_dirs_falls_back_to_home_when_xdg_unset() {
+        let home = std::ffi::OsString::from("/home/user");
+        let (config, cache) =
+            PluginManager::resolve_dirs_from(None, None, Some(home.as_os_str())).unwrap();
+        assert_eq!(config, PathBuf::from("/home/user/.config/mote"));
+        assert_eq!(cache, PathBuf::from("/home/user/.cache/mote/plugins"));
+    }
+
+    #[test]
+    fn resolve_dirs_mixes_xdg_config_and_home_cache() {
+        // XDG_CONFIG_HOME set but XDG_CACHE_HOME unset: each axis resolves
+        // independently.
+        let home = std::ffi::OsString::from("/home/user");
+        let (config, cache) = PluginManager::resolve_dirs_from(
+            Some("/xdg/config".into()),
+            None,
+            Some(home.as_os_str()),
+        )
+        .unwrap();
+        assert_eq!(config, PathBuf::from("/xdg/config/mote"));
+        assert_eq!(cache, PathBuf::from("/home/user/.cache/mote/plugins"));
+    }
+
+    #[test]
+    fn resolve_dirs_none_when_no_home_and_no_xdg() {
+        assert!(PluginManager::resolve_dirs_from(None, None, None).is_none());
     }
 
     // -----------------------------------------------------------------------
