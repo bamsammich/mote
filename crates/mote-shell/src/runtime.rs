@@ -171,11 +171,17 @@ impl PluginHost {
                                 running.effective_permissions.len()
                             );
                             // Record the approval so a later launch (or the CLI)
-                            // sees this manifest as approved.
-                            if let Err(e) = self
-                                .manager
-                                .approval_store()
-                                .put(&rp.name, &ApprovalHash::of(&rp.manifest))
+                            // sees this manifest as approved — but NOT for
+                            // bundled plugins. `classify` short-circuits on
+                            // `Provenance::Bundled` without ever reading the
+                            // store, so a stored entry for a bundled plugin
+                            // would be dead data that also pollutes what the
+                            // `mote plugin` CLI enumerates from the store.
+                            if !matches!(rp.provenance, Provenance::Bundled)
+                                && let Err(e) = self
+                                    .manager
+                                    .approval_store()
+                                    .put(&rp.name, &ApprovalHash::of(&rp.manifest))
                             {
                                 eprintln!(
                                     "mote-shell: failed to record approval for `{}`: {e}",
@@ -946,6 +952,50 @@ return M
         assert!(
             loaded.contains(&"workspace-manager"),
             "bundled workspace-manager loaded: {loaded:?}"
+        );
+    }
+
+    #[test]
+    fn boot_does_not_pollute_approval_store_with_bundled_plugins() {
+        // The approval store is read-mediated by classify(); bundled plugins
+        // short-circuit without consulting it, so an entry for a bundled name
+        // is dead data + pollutes `mote plugin` CLI enumeration. Only the
+        // pre-approved path plugin should appear.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin(plugin_dir.path(), "approved-plugin");
+
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[("approved-plugin", &src)]);
+
+        let store = Store::open_in_memory().unwrap();
+        let manifest = mote_lua::load_plugin(
+            &std::fs::read_to_string(plugin_dir.path().join("init.lua")).unwrap(),
+            "approved-plugin",
+        )
+        .unwrap()
+        .manifest()
+        .clone();
+        let approval = mote_pluginmgr::ApprovalStore::new(&store);
+        approval
+            .put(&manifest.name, &ApprovalHash::of(&manifest))
+            .unwrap();
+
+        let _host = PluginHost::boot_in(store.clone(), config.path(), cache.path()).unwrap();
+
+        let approval = mote_pluginmgr::ApprovalStore::new(&store);
+        let names: Vec<String> = approval
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["approved-plugin".to_owned()],
+            "approval store must contain only the path plugin's entry; \
+             bundled plugins must NOT be recorded (got: {names:?})"
         );
     }
 

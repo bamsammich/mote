@@ -624,11 +624,19 @@ impl PluginManager {
     ///
     /// # Errors
     ///
-    /// Returns [`ManagerError`] for fatal errors (config/lock parse, bundle
-    /// unpack failure, manifest read failure, or a capability cycle / dangling
-    /// consumer surfaced by [`load_order`](crate::load_order)). Per-plugin
-    /// fetch failures during the internal `sync` are non-fatal and simply leave
-    /// that plugin's integrity as whatever the lock last recorded.
+    /// Returns [`ManagerError`] only for **profile-wide** fatal errors:
+    /// config/lock parse failure or a capability cycle / dangling consumer
+    /// surfaced by [`load_order`](crate::load_order).
+    ///
+    /// **Per-plugin failures are non-fatal** (mirrors `sync`'s R5 resilience
+    /// contract — the shell's `boot` must not abort startup because of a single
+    /// bad plugin). The following are logged and the offending plugin is
+    /// silently omitted from the returned [`Vec`]:
+    ///
+    /// - a spec whose source string does not parse;
+    /// - a bundled seed entry that fails to unpack or link;
+    /// - an entry whose active-link dir / `init.lua` cannot be read (typically
+    ///   a git plugin in `sync.failed` with no prior cache to fall back on).
     pub fn resolved_set(&self) -> Result<Vec<ResolvedPlugin>, ManagerError> {
         // Reconcile declared specs first: fetch/link/hash + integrity. This is
         // the single resolution pass; resolved_set only reads the result.
@@ -655,9 +663,25 @@ impl PluginManager {
 
         // Collect (name, provenance) for every plugin to resolve: declared
         // specs first, then any seeded bundled defaults.
+        //
+        // Per-plugin failures are NON-FATAL (the shell's `boot` contract: a
+        // single bad plugin does not abort startup). A spec whose source string
+        // fails to parse is logged and skipped here; a bundled-seed entry whose
+        // unpack/link fails is logged and skipped below; entries whose active
+        // dir is unreadable (e.g. a git plugin in `sync.failed` with no prior
+        // cache) are logged and skipped at the resolution step.
         let mut entries: Vec<(PluginName, Provenance)> = Vec::new();
         for spec in spec_set.specs.values() {
-            let source: Source = spec.source.parse()?;
+            let source: Source = match spec.source.parse() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "mote-pluginmgr: skipping `{}` — source {:?} did not parse: {e}",
+                        spec.name, spec.source
+                    );
+                    continue;
+                }
+            };
             let provenance = match source {
                 Source::Bundled => Provenance::Bundled,
                 Source::Github { .. } | Source::Git { .. } => Provenance::DeclaredGit,
@@ -668,20 +692,51 @@ impl PluginManager {
         for name in &seed {
             // Seed the bundled default into the cache + active link so its dir
             // resolves below, exactly as `sync_bundled` would for a declared
-            // bundled source.
-            let key = unpack_into_cache(name, &self.cache)?;
-            self.cache.link(name, &key.commit)?;
-            entries.push((name.clone(), Provenance::Bundled));
+            // bundled source. Failure here is non-fatal: log + skip this seed,
+            // continue with everything else.
+            match unpack_into_cache(name, &self.cache)
+                .map_err(ManagerError::from)
+                .and_then(|key| {
+                    self.cache
+                        .link(name, &key.commit)
+                        .map_err(ManagerError::from)
+                }) {
+                Ok(()) => entries.push((name.clone(), Provenance::Bundled)),
+                Err(e) => eprintln!(
+                    "mote-pluginmgr: skipping bundled seed `{name}` — unpack/link failed: {e}"
+                ),
+            }
         }
 
-        // Resolve each entry to its dir + manifest + init source.
+        // Resolve each entry to its dir + manifest + init source. An entry
+        // whose active-link dir is unreadable (typically a git plugin in
+        // `sync.failed` with no prior cache) is logged and skipped — mirroring
+        // sync's own resilience contract.
         let mut resolved: Vec<ResolvedPlugin> = Vec::with_capacity(entries.len());
         let mut manifests: Vec<mote_lua::Manifest> = Vec::with_capacity(entries.len());
         for (name, provenance) in entries {
             let dir = self.cache.active_link(&name);
-            let manifest = Self::load_manifest_from_dir(&name, &dir)?;
+            let manifest = match Self::load_manifest_from_dir(&name, &dir) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!(
+                        "mote-pluginmgr: skipping `{name}` — manifest at {} unreadable: {e}",
+                        dir.display()
+                    );
+                    continue;
+                }
+            };
             let init = dir.join("init.lua");
-            let init_source = fs::read_to_string(&init).map_err(|e| ManagerError::io(&init, e))?;
+            let init_source = match fs::read_to_string(&init) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "mote-pluginmgr: skipping `{name}` — init.lua at {} unreadable: {e}",
+                        init.display()
+                    );
+                    continue;
+                }
+            };
             let integrity = if matches!(provenance, Provenance::Bundled) {
                 IntegrityStatus::Bundled
             } else {
@@ -1695,6 +1750,36 @@ return M
             .get("workspace-manager")
             .expect("workspace-manager seeded");
         assert_eq!(wsm.provenance, Provenance::Bundled);
+    }
+
+    #[test]
+    fn resolved_set_skips_plugin_with_unparsable_source() {
+        // Per the resilience contract, a single bad plugin must not abort the
+        // whole resolution — it logs + skips and the rest continue. We exercise
+        // the source-parse skip path (unknown scheme), which is deterministic
+        // and exercises no network.
+        let f = fixture();
+        write_plugins_lua(&f.config_dir, &[("bad-plugin", "nonsense:whatever")]);
+
+        // Must NOT error — the bad plugin is skipped, the bundled defaults seed.
+        let resolved = f
+            .mgr
+            .resolved_set()
+            .expect("resolved_set must not fail fatally");
+        let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
+
+        assert!(
+            !names.contains(&"bad-plugin"),
+            "plugin with unparsable source must be omitted: {names:?}"
+        );
+        assert!(
+            names.contains(&"urlbar"),
+            "bundled defaults must still seed when a sibling fails: {names:?}"
+        );
+        assert!(
+            names.contains(&"workspace-manager"),
+            "bundled defaults must still seed when a sibling fails: {names:?}"
+        );
     }
 
     #[test]
