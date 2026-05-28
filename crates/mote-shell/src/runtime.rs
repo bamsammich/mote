@@ -245,8 +245,8 @@ impl PluginHost {
                                 running.effective_permissions.len()
                             );
                             // Record the approval so a later launch (or the CLI)
-                            // sees this manifest as approved (bundled plugins are
-                            // skipped — see `record_approval`).
+                            // sees this manifest as approved (bundled + dev-mode
+                            // plugins are skipped — see `record_approval`).
                             self.record_approval(&rp);
                             self.loaded.push(rp);
                         }
@@ -273,11 +273,12 @@ impl PluginHost {
     }
 
     /// Record an approved manifest's hash in the approval store (skipping
-    /// bundled plugins, which `classify` never consults — recording one would
-    /// be dead data that pollutes `mote plugin` CLI enumeration). Logs on
+    /// bundled AND dev-mode plugins, which `classify` auto-grants WITHOUT
+    /// consulting the store — recording one would be dead data that pollutes
+    /// `mote plugin` CLI enumeration, never read on a later launch). Logs on
     /// failure; the load already succeeded so a store hiccup is non-fatal.
     fn record_approval(&self, rp: &ResolvedPlugin) {
-        if matches!(rp.provenance, Provenance::Bundled) {
+        if matches!(rp.provenance, Provenance::Bundled | Provenance::DevMode) {
             return;
         }
         if let Err(e) = self
@@ -732,9 +733,12 @@ impl PluginHost {
 ///
 /// Fidelity gap: [`ResolvedPlugin`] does not carry the raw `github:`/`git+`
 /// source string, so `DeclaredGit.source` falls back to the directory path. The
-/// commit is recovered from the cache-dir name. `ImplicitLocal`/`DevMode`
-/// provenances are Task 6 and are not produced by [`PluginManager::resolved_set`]
-/// today; they map to their nearest mote-ui kind for completeness.
+/// commit is recovered from the cache-dir name. `DevMode` and `ImplicitLocal`
+/// are both produced by [`PluginManager::resolved_set`] (Task 6): `DevMode` via
+/// the dev-mode override (name in `dev_mode.plugins` or dir under a
+/// `dev_mode.directories` entry), `ImplicitLocal` via the
+/// `<config>/plugins/<name>` real-dir scan. Each maps to its respective mote-ui
+/// kind.
 fn provenance_to_kind(provenance: Provenance, dir: &std::path::Path) -> PluginKind {
     let path = dir.display().to_string();
     match provenance {

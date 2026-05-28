@@ -1030,6 +1030,17 @@ impl PluginManager {
     /// [`resolved_set`](Self::resolved_set) (identity-composed set), so an
     /// overlay-added or overlay-overridden plugin is linked before
     /// `resolved_set` reads its active-link dir.
+    ///
+    // KNOWN LIMITATION (multi-identity follow-up): there is exactly one global
+    // `plugins.lock`. When `resolved_set(Some(identity))` reconciles the
+    // identity-composed set, a plugin that exists ONLY in a per-identity overlay
+    // (`identities/<id>/plugins.lua`, not in global plugins.lua/managed.lua) gets
+    // its lock entry written into that single global lock. This is benign today:
+    // the sole session identity is `0` and no overlay file is created by default,
+    // so the identity-composed set equals the global set. Multi-identity support
+    // (a real per-identity overlay) must NOT let the global lock carry
+    // per-identity-overlay entries — track a per-identity lock (or scoped
+    // entries) when that phase lands. Not changed here.
     fn sync_specs(
         &self,
         spec_set: &crate::resolve::PluginSpecSet,
@@ -2434,6 +2445,33 @@ return M
             dev_dropped.provenance,
             Provenance::DevMode,
             "an implicit dir under a dev_mode directory becomes DevMode"
+        );
+    }
+
+    #[test]
+    fn implicit_local_named_in_dev_mode_plugins_is_dev_mode() {
+        let f = fixture();
+        // An implicit dir whose NAME is listed in dev_mode.plugins resolves as
+        // DevMode (name path, not directory path — mirror of the dir test).
+        let dropped = f.config_dir.join("plugins").join("dev-named-drop");
+        write_plugin(&dropped, "dev-named-drop", &[]);
+
+        // dev_mode lists the plugin by name; no dev_mode.directories at all.
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            "mote.dev_mode({ plugins = { \"dev-named-drop\" } })\n",
+        )
+        .unwrap();
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let dev_named = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "dev-named-drop")
+            .expect("dev-named-drop detected");
+        assert_eq!(
+            dev_named.provenance,
+            Provenance::DevMode,
+            "an implicit dir named in dev_mode.plugins becomes DevMode, not ImplicitLocal"
         );
     }
 
