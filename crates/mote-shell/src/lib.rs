@@ -153,6 +153,21 @@ enum ShellCommand {
     /// The chrome reported a focus-owner change (`chrome` ⇒ keyboard to the
     /// omnibox; otherwise to the active content page).
     FocusOwner(FocusOwner),
+    /// The user answered the approval dialog (`approve_plugin` op). The payload
+    /// passed the op-boundary structural validation; the pump thread does the
+    /// semantic cross-check and finishes the load/deny.
+    ApprovePlugin(approval::DialogResult),
+    /// Panel action: update the named plugin (git/bundled `plugin_update`).
+    PluginUpdate(String),
+    /// Panel action: roll the named plugin back to its prior commit.
+    PluginRollback(String),
+    /// Panel action: reload the named plugin (path/dev re-run).
+    PluginReload(String),
+    /// Panel action: revoke the named plugin (unload + drop its approval).
+    PluginRevoke(String),
+    /// Panel action: re-open the approval dialog for the named plugin so the
+    /// user can re-narrow its grant.
+    PluginAdjustScope(String),
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -573,6 +588,12 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let new_queue = Arc::clone(commands);
     let close_queue = Arc::clone(commands);
     let select_queue = Arc::clone(commands);
+    let approve_queue = Arc::clone(commands);
+    let update_queue = Arc::clone(commands);
+    let rollback_queue = Arc::clone(commands);
+    let reload_queue = Arc::clone(commands);
+    let revoke_queue = Arc::clone(commands);
+    let adjust_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -613,6 +634,75 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
             push(&focus_queue, ShellCommand::FocusOwner(owner));
             OpResponse::ok("{\"ok\":true}")
         })
+        .register("approve_plugin", move |params: &str| {
+            // Deserialize the dialog's structured verdict.
+            let Ok(result) = serde_json::from_str::<approval::DialogResult>(params) else {
+                return OpResponse::err(400, "approve_plugin: malformed payload");
+            };
+            // Op-boundary STRUCTURAL validation (ADR-0005 closed structured
+            // operations): bound every origin glob and the count per permission
+            // synchronously, BEFORE the string can become a Narrowing resource.
+            if let Err(msg) = validate_dialog_origins(&result) {
+                return OpResponse::err(400, msg);
+            }
+            push(&approve_queue, ShellCommand::ApprovePlugin(result));
+            OpResponse::ok("{\"accepted\":true}")
+        })
+        .register("plugin_update", move |params: &str| {
+            plugin_action_op(&update_queue, params, ShellCommand::PluginUpdate)
+        })
+        .register("plugin_rollback", move |params: &str| {
+            plugin_action_op(&rollback_queue, params, ShellCommand::PluginRollback)
+        })
+        .register("plugin_reload", move |params: &str| {
+            plugin_action_op(&reload_queue, params, ShellCommand::PluginReload)
+        })
+        .register("plugin_revoke", move |params: &str| {
+            plugin_action_op(&revoke_queue, params, ShellCommand::PluginRevoke)
+        })
+        .register("plugin_adjust_scope", move |params: &str| {
+            plugin_action_op(&adjust_queue, params, ShellCommand::PluginAdjustScope)
+        })
+}
+
+/// Op-boundary structural validation of the dialog's origin globs
+/// (ADR-0005 closed structured operations). For every permission narrowed to
+/// `origins`, every glob must pass [`approval::validate_origin_glob`] and the
+/// per-permission count must not exceed [`approval::MAX_ORIGINS_PER_PERMISSION`].
+/// Returns `Err(message)` on the first violation so the whole op is rejected —
+/// no arbitrary chrome-supplied string is ever pushed toward a `Narrowing`.
+fn validate_dialog_origins(result: &approval::DialogResult) -> Result<(), &'static str> {
+    for perm in &result.permissions {
+        if perm.mode != "origins" {
+            continue;
+        }
+        let origins = perm.origins.as_deref().unwrap_or(&[]);
+        if origins.len() > approval::MAX_ORIGINS_PER_PERMISSION {
+            return Err("approve_plugin: too many origins for a permission");
+        }
+        if !origins.iter().all(|o| approval::validate_origin_glob(o)) {
+            return Err("approve_plugin: invalid origin glob");
+        }
+    }
+    Ok(())
+}
+
+/// Shared handler for the five panel-action ops: parse a non-empty string
+/// `plugin` field, build the [`ShellCommand`] from it, and enqueue it. The
+/// plugin-name *format* is validated when the pump thread turns the string into
+/// a [`PluginName`]; here we only require a non-empty string.
+fn plugin_action_op(
+    queue: &CommandQueue,
+    params: &str,
+    make: impl FnOnce(String) -> ShellCommand,
+) -> OpResponse {
+    match json_string_field(params, "plugin") {
+        Some(name) if !name.is_empty() => {
+            push(queue, make(name));
+            OpResponse::ok("{\"ok\":true}")
+        }
+        _ => OpResponse::err(400, "requires a non-empty string `plugin`"),
+    }
 }
 
 /// Enqueue a command (poisoned-lock tolerant: a poisoned queue is recoverable).
@@ -783,8 +873,115 @@ impl ShellApp {
                 ShellCommand::CloseTab(id) => self.close_tab(TabId::new(id)),
                 ShellCommand::SelectTab(id) => self.select_tab(TabId::new(id)),
                 ShellCommand::FocusOwner(owner) => self.set_focus_owner(owner),
+                ShellCommand::ApprovePlugin(result) => self.approve_plugin(&result),
+                ShellCommand::PluginUpdate(name) => self.plugin_update(&name),
+                ShellCommand::PluginRollback(name) => self.plugin_rollback(&name),
+                ShellCommand::PluginReload(name) => self.plugin_reload(&name),
+                ShellCommand::PluginRevoke(name) => self.plugin_revoke(&name),
+                ShellCommand::PluginAdjustScope(name) => self.plugin_adjust_scope(&name),
             }
         }
+    }
+
+    /// Finish a dialog approval on the pump thread (ADR-0007 async approval).
+    ///
+    /// The op handler already ran the op-boundary structural validation; here
+    /// we do the semantic work via [`runtime::PluginHost::approve_pending`]
+    /// (find the pending entry, cross-check, load or deny, record approval),
+    /// then update the chrome: hide the dialog and re-render the integrity
+    /// panel so the plugin appears as loaded/Verified (or simply dismisses on a
+    /// deny / dropped result).
+    fn approve_plugin(&mut self, result: &approval::DialogResult) {
+        let outcome = self.host.approve_pending(result);
+        self.push_hide_approval_dialog();
+        match outcome {
+            runtime::ApproveOutcome::Loaded => {
+                eprintln!("mote-shell: plugin `{}` approved + loaded", result.plugin());
+                self.refresh_integrity_panel();
+            }
+            runtime::ApproveOutcome::Denied => {
+                eprintln!("mote-shell: plugin `{}` denied by user", result.plugin());
+                self.refresh_integrity_panel();
+            }
+            runtime::ApproveOutcome::LoadFailed => {
+                eprintln!(
+                    "mote-shell: plugin `{}` approval load FAILED (left pending)",
+                    result.plugin()
+                );
+            }
+            runtime::ApproveOutcome::NotPending => {
+                eprintln!(
+                    "mote-shell: approve for non-pending plugin `{}` (dropped)",
+                    result.plugin()
+                );
+            }
+        }
+    }
+
+    /// Panel action — update the plugin, then re-render the integrity panel.
+    ///
+    /// An expanding update needs re-approval: the host enqueues a fresh pending
+    /// entry and returns its [`ApprovalRequest`], which we render as a dialog
+    /// (the subsequent `approve_plugin` reloads with the new grant). A
+    /// non-expanding update is applied + reloaded by the host directly.
+    fn plugin_update(&mut self, name: &str) {
+        match self.host.update_plugin(name) {
+            runtime::UpdateAction::ReApproval(req) => {
+                self.push_approval_dialog(&req);
+            }
+            runtime::UpdateAction::Applied | runtime::UpdateAction::Failed => {}
+        }
+        self.refresh_integrity_panel();
+    }
+
+    /// Panel action — roll the plugin back to its prior commit + reload.
+    fn plugin_rollback(&mut self, name: &str) {
+        self.host.rollback_plugin(name);
+        self.refresh_integrity_panel();
+    }
+
+    /// Panel action — reload the plugin (path/dev re-run).
+    fn plugin_reload(&mut self, name: &str) {
+        self.host.reload_plugin(name);
+        self.refresh_integrity_panel();
+    }
+
+    /// Panel action — revoke the plugin (unload + drop its stored approval).
+    fn plugin_revoke(&mut self, name: &str) {
+        self.host.revoke_plugin(name);
+        self.refresh_integrity_panel();
+    }
+
+    /// Panel action — re-open the approval dialog for the plugin so the user can
+    /// re-narrow its grant. The subsequent `approve_plugin` reloads with the new
+    /// narrowing (re-grant-via-reload). No-op if the plugin is not loaded.
+    fn plugin_adjust_scope(&mut self, name: &str) {
+        if let Some(req) = self.host.adjust_scope_request(name) {
+            self.push_approval_dialog(&req);
+        }
+    }
+
+    /// Re-render the chrome integrity panel from live host state, but only when
+    /// it is currently open (so panel-driven actions reflect immediately without
+    /// popping the panel open behind a dialog the user did not request).
+    fn refresh_integrity_panel(&self) {
+        if self.integrity_chrome_open {
+            let panel = self.host.build_panel();
+            self.push_integrity_panel_to_chrome(&panel);
+        }
+    }
+
+    /// Hide the approval dialog inside the chrome document. The dialog buttons
+    /// also dismiss it locally (optimistic UX), so this is idempotent; it exists
+    /// for the pump-thread path (e.g. a dropped/denied result) and to keep the
+    /// chrome and host state in lockstep.
+    fn push_hide_approval_dialog(&self) {
+        if !self.chrome_ready {
+            return;
+        }
+        self.bridge.page().eval_js(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('hide_approval_dialog',null);",
+        );
     }
 
     /// Navigate the active tab, update session state, and push the new URL.
@@ -2326,5 +2523,71 @@ mod tests {
         assert_eq!(js_string("a\nb"), "\"a\\nb\"");
         // A `</script>` payload cannot terminate a script context.
         assert!(!js_string("</script>").contains("</script>"));
+    }
+
+    // ── approve_plugin op-boundary validation (ADR-0005) ──────────────────
+
+    /// Parses a JSON payload into a `DialogResult` and runs the op-boundary
+    /// origin-glob validation exactly as the `approve_plugin` op handler does.
+    fn validate_payload(json: &str) -> Result<(), &'static str> {
+        let result: approval::DialogResult =
+            serde_json::from_str(json).expect("test payload parses");
+        validate_dialog_origins(&result)
+    }
+
+    #[test]
+    fn approve_payload_with_valid_origins_passes_op_boundary() {
+        let json = r#"{"plugin":"p","decision":"grant","permissions":[
+            {"domain":"page:inject_script","action":"*","mode":"origins",
+             "origins":["https://example.com/*","https://*.github.com/*"]}]}"#;
+        assert!(validate_payload(json).is_ok(), "valid origin globs pass");
+    }
+
+    #[test]
+    fn approve_payload_with_full_mode_skips_origin_validation() {
+        // mode != "origins" → origins are not validated (none are present).
+        let json = r#"{"plugin":"p","decision":"grant","permissions":[
+            {"domain":"storage:persistent","action":"","mode":"full"}]}"#;
+        assert!(validate_payload(json).is_ok());
+    }
+
+    #[test]
+    fn approve_payload_with_injection_origin_is_rejected() {
+        let json = r#"{"plugin":"p","decision":"grant","permissions":[
+            {"domain":"page:inject_script","action":"*","mode":"origins",
+             "origins":["<script>alert(1)</script>"]}]}"#;
+        assert_eq!(
+            validate_payload(json),
+            Err("approve_plugin: invalid origin glob"),
+            "an injection-shaped origin must be rejected at the op boundary"
+        );
+    }
+
+    #[test]
+    fn approve_payload_over_origin_count_cap_is_rejected() {
+        let origins: Vec<String> = (0..=approval::MAX_ORIGINS_PER_PERMISSION)
+            .map(|i| format!("https://h{i}.example.com/*"))
+            .collect();
+        let result = approval::DialogResult {
+            plugin: "p".into(),
+            decision: "grant".into(),
+            permissions: vec![approval::DialogPermission {
+                domain: "page:inject_script".into(),
+                action: "*".into(),
+                mode: "origins".into(),
+                origins: Some(origins),
+            }],
+        };
+        assert_eq!(
+            validate_dialog_origins(&result),
+            Err("approve_plugin: too many origins for a permission"),
+            "exceeding the per-permission origin cap must be rejected"
+        );
+    }
+
+    #[test]
+    fn approve_payload_malformed_json_is_an_error() {
+        // The op handler maps a parse failure to a 400; mirror that boundary.
+        assert!(serde_json::from_str::<approval::DialogResult>("not json").is_err());
     }
 }

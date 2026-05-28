@@ -31,17 +31,22 @@
 use std::time::Duration;
 
 use mote_audit::{AuditLog, Config};
-use mote_pluginmgr::{IntegrityStatus as MgrIntegrity, PluginManager, Provenance, ResolvedPlugin};
+use mote_pluginmgr::{
+    IntegrityStatus as MgrIntegrity, PluginManager, Provenance, ResolvedPlugin, UpdateOutcome,
+};
 use mote_registry::{CombinationRegistry, Registry};
-use mote_runtime::{ApprovalHash, IdentityContext, Runtime};
+use mote_runtime::{Approval, ApprovalHash, IdentityContext, Runtime};
 use mote_storage::{IdentityScope, Store};
 use mote_types::{IdentityId, PluginName, SchemaVersion};
 use mote_ui::{
-    AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus, PermissionRow,
-    PluginAction, PluginKind, PluginRow, StorageRow,
+    ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
+    PermissionRow, PluginAction, PluginKind, PluginRow, StorageRow,
 };
 
-use crate::approval::{ApprovalOutcome, DecidedPolicy, classify};
+use crate::approval::{
+    ApprovalOutcome, DecidedPolicy, DialogResult, approval_from_dialog, build_update_request,
+    classify,
+};
 
 /// The audit-log handle bundled with the runtime. The shell holds it so the
 /// background audit thread stays alive and so the integrity panel can query it.
@@ -62,7 +67,38 @@ pub(crate) struct PluginHost {
     /// Plugins that resolved but require a user-facing approval dialog before
     /// they can load. Task 5 drives the dialog and finishes the load; Task 3
     /// only records them (and renders them as "awaiting approval" panel rows).
-    pub(crate) pending_approvals: Vec<(ResolvedPlugin, mote_ui::ApprovalRequest)>,
+    pub(crate) pending_approvals: Vec<(ResolvedPlugin, ApprovalRequest)>,
+}
+
+/// The result of resolving a dialog approval in [`PluginHost::approve_pending`].
+///
+/// The shell maps each variant to the chrome update it performs (hide the
+/// dialog, re-render the panel, log the failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApproveOutcome {
+    /// The plugin was approved and loaded; its approval was recorded and it
+    /// moved from `pending_approvals` into `loaded`.
+    Loaded,
+    /// The user denied the plugin (overall or per-permission); the pending
+    /// entry was dropped and the denial audited.
+    Denied,
+    /// The user approved but the runtime load failed; the entry stays pending.
+    LoadFailed,
+    /// No pending entry matched the result's plugin name; the result was dropped
+    /// (an approve for a non-pending plugin — stale or spoofed).
+    NotPending,
+}
+
+/// The result of a panel `plugin_update` action in [`PluginHost::update_plugin`].
+#[derive(Debug)]
+pub(crate) enum UpdateAction {
+    /// The update expanded the approval surface; a re-approval dialog must be
+    /// shown. Carries the request the shell renders.
+    ReApproval(ApprovalRequest),
+    /// A non-expanding update was applied and the plugin reloaded.
+    Applied,
+    /// The update or the subsequent reload failed (logged + audited).
+    Failed,
 }
 
 impl PluginHost {
@@ -234,7 +270,7 @@ impl PluginHost {
                 }
                 ApprovalOutcome::NeedsDialog(req) => {
                     eprintln!(
-                        "mote-shell: plugin `{}` awaiting approval (dialog deferred to Task 5)",
+                        "mote-shell: plugin `{}` awaiting approval (dialog shown)",
                         rp.name
                     );
                     self.pending_approvals.push((rp, req));
@@ -247,6 +283,320 @@ impl PluginHost {
             total,
             self.pending_approvals.len()
         );
+    }
+
+    /// Record an approved manifest's hash in the approval store (skipping
+    /// bundled plugins, which `classify` never consults — recording one would
+    /// be dead data that pollutes `mote plugin` CLI enumeration). Logs on
+    /// failure; the load already succeeded so a store hiccup is non-fatal.
+    fn record_approval(&self, rp: &ResolvedPlugin) {
+        if matches!(rp.provenance, Provenance::Bundled) {
+            return;
+        }
+        if let Err(e) = self
+            .manager
+            .approval_store()
+            .put(&rp.name, &ApprovalHash::of(&rp.manifest))
+        {
+            eprintln!(
+                "mote-shell: failed to record approval for `{}`: {e}",
+                rp.name
+            );
+        }
+    }
+
+    /// Finish a dialog approval (ADR-0007 async approval), on the pump thread.
+    ///
+    /// The op handler already ran the op-boundary structural validation; this
+    /// does the semantic work:
+    ///
+    /// 1. Find the matching `pending_approvals` entry by plugin name. None →
+    ///    [`ApproveOutcome::NotPending`] (drop a stale/spoofed result).
+    /// 2. Cross-check that every answered permission corresponds to one the
+    ///    plugin actually requested (the `domain` keys must be a subset of the
+    ///    pending [`ApprovalRequest`]'s permission domains). A mismatch → drop
+    ///    (treated as not-pending; never load on an unexpected permission set).
+    /// 3. Map the verdict to an [`Approval`]. A deny removes the entry and
+    ///    audits the denial → [`ApproveOutcome::Denied`].
+    /// 4. Otherwise load the plugin under the decided policy. On success record
+    ///    the approval and move the entry into `loaded` →
+    ///    [`ApproveOutcome::Loaded`]; on failure leave it pending →
+    ///    [`ApproveOutcome::LoadFailed`].
+    pub(crate) fn approve_pending(&mut self, result: &DialogResult) -> ApproveOutcome {
+        let Some(idx) = self
+            .pending_approvals
+            .iter()
+            .position(|(rp, _)| rp.name.as_str() == result.plugin())
+        else {
+            return ApproveOutcome::NotPending;
+        };
+
+        // Semantic cross-check: every answered permission domain must be one the
+        // plugin actually requested (the pending request's permission domains).
+        // This stops a dialog result from smuggling a narrowing for a permission
+        // that was never requested.
+        let requested_domains: std::collections::BTreeSet<&str> = self.pending_approvals[idx]
+            .1
+            .permissions
+            .iter()
+            .map(|p| p.domain.as_str())
+            .collect();
+        if !result
+            .permissions
+            .iter()
+            .all(|p| requested_domains.contains(p.domain.as_str()))
+        {
+            eprintln!(
+                "mote-shell: approve for `{}` answered an unrequested permission; dropping",
+                result.plugin()
+            );
+            return ApproveOutcome::NotPending;
+        }
+
+        let approval = approval_from_dialog(result);
+        let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
+
+        if let Approval::Deny { reason } = &approval {
+            eprintln!("mote-shell: plugin `{}` denied: {reason}", result.plugin());
+            // Drop the pending entry; the audit log records the denial via the
+            // runtime's gatekept path on the next launch attempt — here we only
+            // surface the user's decision in the shell log.
+            self.pending_approvals.remove(idx);
+            return ApproveOutcome::Denied;
+        }
+
+        let rp = self.pending_approvals[idx].0.clone();
+        let policy = DecidedPolicy::new(approval);
+        // adjust-scope parks an already-running plugin: re-narrow via `reload`
+        // (require_reapproval=true so a narrowing/re-grant always proceeds).
+        // A first install / expanding update is not yet running → `load`.
+        let result_load = if self.runtime.running(&rp.name).is_some() {
+            self.runtime
+                .reload(&rp.name, &rp.init_source, identity, &policy, true)
+                .map(|r| r.name)
+                .map_err(|e| e.to_string())
+        } else {
+            self.runtime
+                .load(&rp.init_source, identity, &policy)
+                .map(|r| r.name)
+                .map_err(|e| e.to_string())
+        };
+        match result_load {
+            Ok(loaded_name) => {
+                eprintln!("mote-shell: approved + (re)loaded `{loaded_name}`");
+                self.record_approval(&rp);
+                self.pending_approvals.remove(idx);
+                self.loaded.push(rp);
+                ApproveOutcome::Loaded
+            }
+            Err(e) => {
+                eprintln!(
+                    "mote-shell: approved `{}` but (re)load failed: {e} (left pending)",
+                    rp.name
+                );
+                ApproveOutcome::LoadFailed
+            }
+        }
+    }
+
+    /// Look up a loaded plugin's [`ResolvedPlugin`] by name (panel actions key
+    /// off the name string the chrome sends).
+    fn loaded_resolved(&self, name: &str) -> Option<&ResolvedPlugin> {
+        self.loaded.iter().find(|rp| rp.name.as_str() == name)
+    }
+
+    /// Panel action — update the named plugin (`plugin_update`, §6.5).
+    ///
+    /// Runs [`PluginManager::update`]. An expanding update returns
+    /// [`UpdateAction::ReApproval`] carrying a re-approval request the shell
+    /// renders (the user re-approves via `approve_plugin`, which reloads with
+    /// the new grant); a non-expanding update relinks the lock and the plugin is
+    /// reloaded in-place ([`UpdateAction::Applied`]). Any failure is logged and
+    /// returns [`UpdateAction::Failed`].
+    pub(crate) fn update_plugin(&mut self, name: &str) -> UpdateAction {
+        let Ok(plugin) = PluginName::new(name) else {
+            eprintln!("mote-shell: plugin_update: invalid plugin name `{name}`");
+            return UpdateAction::Failed;
+        };
+        match self.manager.update(&plugin) {
+            Ok(UpdateOutcome::Applied { commit }) => {
+                eprintln!("mote-shell: updated `{name}` -> {commit}; reloading");
+                if self.reload_from_disk(&plugin).is_ok() {
+                    UpdateAction::Applied
+                } else {
+                    UpdateAction::Failed
+                }
+            }
+            Ok(UpdateOutcome::NeedsReapproval { .. }) => {
+                eprintln!("mote-shell: update of `{name}` needs re-approval");
+                // Park a re-approval request from the just-updated on-disk
+                // manifest so `approve_plugin` reloads with the new grant.
+                self.park_reapproval(&plugin)
+                    .map_or(UpdateAction::Failed, UpdateAction::ReApproval)
+            }
+            Err(e) => {
+                eprintln!("mote-shell: update of `{name}` failed: {e}");
+                UpdateAction::Failed
+            }
+        }
+    }
+
+    /// Re-resolve a single plugin and park a re-approval request for it in
+    /// `pending_approvals` so the subsequent `approve_plugin` reloads it with
+    /// the new grant. Moves the plugin out of `loaded` (it is re-added on a
+    /// successful approve). Returns `None` (logging) if it cannot be resolved.
+    fn park_reapproval(&mut self, plugin: &PluginName) -> Option<ApprovalRequest> {
+        let rp = self.reresolve(plugin)?;
+        // Classify the freshly-resolved manifest to get the precise "what's new"
+        // surface; fall back to a bare update request if classification fails.
+        let req = match classify(
+            &rp.manifest,
+            rp.provenance,
+            self.manager.approval_store(),
+            &self.combos,
+        ) {
+            Ok(ApprovalOutcome::NeedsDialog(req)) => req,
+            _ => build_update_request(&rp.manifest, rp.provenance, &self.combos, Vec::new()),
+        };
+        self.park_pending(rp, req.clone());
+        Some(req)
+    }
+
+    /// Re-resolve a single plugin from the manager's composed spec set so its
+    /// `dir` / `init_source` / `manifest` reflect the current on-disk state
+    /// (after an update/rollback relink). Returns `None` (logging) on failure.
+    fn reresolve(&self, plugin: &PluginName) -> Option<ResolvedPlugin> {
+        match self.manager.resolved_set() {
+            Ok(set) => set.into_iter().find(|rp| &rp.name == plugin),
+            Err(e) => {
+                eprintln!("mote-shell: re-resolve of `{plugin}` failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Move `rp` into `pending_approvals` under `req`, removing any stale
+    /// `loaded`/`pending` entry for the same name first (so the approve path
+    /// operates on exactly one fresh entry).
+    fn park_pending(&mut self, rp: ResolvedPlugin, req: ApprovalRequest) {
+        let name = rp.name.clone();
+        self.loaded.retain(|existing| existing.name != name);
+        self.pending_approvals
+            .retain(|(existing, _)| existing.name != name);
+        self.pending_approvals.push((rp, req));
+    }
+
+    /// Panel action — roll the named plugin back to its prior commit
+    /// (`plugin_rollback`, §6.5), then reload it. Logs on failure.
+    pub(crate) fn rollback_plugin(&mut self, name: &str) {
+        let Ok(plugin) = PluginName::new(name) else {
+            eprintln!("mote-shell: plugin_rollback: invalid plugin name `{name}`");
+            return;
+        };
+        if let Err(e) = self.manager.rollback(&plugin) {
+            eprintln!("mote-shell: rollback of `{name}` failed: {e}");
+            return;
+        }
+        eprintln!("mote-shell: rolled back `{name}`; reloading");
+        let _ = self.reresolve_and_reload(&plugin);
+    }
+
+    /// Panel action — reload the named plugin (`plugin_reload`, §6.5;
+    /// path/dev re-run from its on-disk source). Logs on failure.
+    pub(crate) fn reload_plugin(&mut self, name: &str) {
+        let Ok(plugin) = PluginName::new(name) else {
+            eprintln!("mote-shell: plugin_reload: invalid plugin name `{name}`");
+            return;
+        };
+        if self.reload_from_disk(&plugin).is_ok() {
+            eprintln!("mote-shell: reloaded `{name}`");
+        }
+    }
+
+    /// Reload a loaded plugin from its resolved on-disk `init.lua` directory,
+    /// preserving its prior grant (`require_reapproval=false`; an expanding
+    /// manifest is refused by [`Runtime::reload`] and the panel update path
+    /// routes that case through the re-approval dialog instead). Picks up a
+    /// `path:`/dev edit. Returns `Err(())` (logging) on any failure.
+    fn reload_from_disk(&mut self, plugin: &PluginName) -> Result<(), ()> {
+        let Some(rp) = self.loaded_resolved(plugin.as_str()) else {
+            eprintln!("mote-shell: reload: `{plugin}` is not loaded");
+            return Err(());
+        };
+        let source = std::fs::read_to_string(rp.dir.join("init.lua"))
+            .unwrap_or_else(|_| rp.init_source.clone());
+        self.reload_with_source(plugin, source)
+    }
+
+    /// Re-resolve a plugin (to pick up a relink) and reload it in place. Used by
+    /// rollback, where the active link moved to a different commit dir.
+    fn reresolve_and_reload(&mut self, plugin: &PluginName) -> Result<(), ()> {
+        let Some(rp) = self.reresolve(plugin) else {
+            return Err(());
+        };
+        let source = rp.init_source.clone();
+        // Refresh the cached resolved entry so later renders see the new dir.
+        if let Some(existing) = self.loaded.iter_mut().find(|e| &e.name == plugin) {
+            *existing = rp;
+        }
+        self.reload_with_source(plugin, source)
+    }
+
+    /// Run [`Runtime::reload`] with `source` under the prior grant and refresh
+    /// the cached source on success. Returns `Err(())` (logging) on failure.
+    fn reload_with_source(&mut self, plugin: &PluginName, source: String) -> Result<(), ()> {
+        let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
+        match self
+            .runtime
+            .reload(plugin, &source, identity, &DecidedPolicy::grant(), false)
+        {
+            Ok(_) => {
+                if let Some(rp) = self.loaded.iter_mut().find(|rp| &rp.name == plugin) {
+                    rp.init_source = source;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("mote-shell: reload of `{plugin}` failed: {e}");
+                Err(())
+            }
+        }
+    }
+
+    /// Panel action — revoke the named plugin (`plugin_revoke`, §6.5): unload it
+    /// from the runtime and drop its stored approval so it does not auto-load on
+    /// the next launch. The plugin leaves the loaded set. Logs on failure.
+    pub(crate) fn revoke_plugin(&mut self, name: &str) {
+        let Ok(plugin) = PluginName::new(name) else {
+            eprintln!("mote-shell: plugin_revoke: invalid plugin name `{name}`");
+            return;
+        };
+        if let Err(e) = self.runtime.unload(&plugin) {
+            eprintln!("mote-shell: revoke of `{name}` — unload failed: {e}");
+        }
+        if let Err(e) = self.manager.approval_store().remove(&plugin) {
+            eprintln!("mote-shell: revoke of `{name}` — drop approval failed: {e}");
+        }
+        self.loaded.retain(|rp| rp.name != plugin);
+        eprintln!("mote-shell: revoked `{name}`");
+    }
+
+    /// Panel action — build a re-approval request for `plugin_adjust_scope`
+    /// (§6.5): re-open the install dialog for a loaded plugin seeded with its
+    /// current manifest so the user can re-narrow its grant. The subsequent
+    /// `approve_plugin` reloads with the new narrowing (re-grant-via-reload):
+    /// the plugin is parked in `pending_approvals`, so `approve_pending` finds
+    /// it and reloads. Returns `None` (logging) if the plugin is not loaded.
+    pub(crate) fn adjust_scope_request(&mut self, name: &str) -> Option<ApprovalRequest> {
+        let rp = self.loaded_resolved(name)?.clone();
+        // Seed the dialog as an update (is_update=true) with no "what's new"
+        // list: nothing expanded, the user is re-narrowing an existing grant.
+        let req = build_update_request(&rp.manifest, rp.provenance, &self.combos, Vec::new());
+        // Park it as pending so the eventual `approve_plugin` re-loads with the
+        // new grant. The plugin remains loaded in the runtime; `approve_pending`
+        // detects that and uses `reload` rather than `load`.
+        self.park_pending(rp, req.clone());
+        Some(req)
     }
 
     /// Build the integrity-panel view-model from the host's LIVE state.
@@ -1115,5 +1465,256 @@ return M
         );
         // The host is still usable: building the panel does not panic.
         let _ = host.build_panel();
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5b/5c: approve_pending / revoke / reload (headless host logic)
+    // -----------------------------------------------------------------------
+
+    use crate::approval::{DialogPermission, DialogResult};
+
+    /// A grant `DialogResult` for `plugin`, granting `domain` fully (no narrow).
+    fn grant_full(plugin: &str, domain: &str) -> DialogResult {
+        DialogResult {
+            plugin: plugin.to_owned(),
+            decision: "grant".to_owned(),
+            permissions: vec![DialogPermission {
+                domain: domain.to_owned(),
+                action: String::new(),
+                mode: "full".to_owned(),
+                origins: None,
+            }],
+        }
+    }
+
+    /// Boots a host against a single never-approved path plugin so it lands in
+    /// `pending_approvals` after the load pass.
+    fn host_with_pending_plugin(name: &str) -> (PluginHost, tempfile::TempDir) {
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin(plugin_dir.path(), name);
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[(name, &src)]);
+
+        let store = Store::open_in_memory().unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+        assert!(
+            host.pending_approvals
+                .iter()
+                .any(|(rp, _)| rp.name.as_str() == name),
+            "plugin `{name}` must be pending after the load pass"
+        );
+        // Keep plugin_dir alive for the host's lifetime by leaking it into the
+        // returned tuple (the path: source points into it).
+        (host, plugin_dir)
+    }
+
+    #[test]
+    fn approve_pending_grant_loads_and_records_approval() {
+        let (mut host, _dir) = host_with_pending_plugin("grant-me");
+        let result = grant_full("grant-me", "storage:persistent");
+
+        let outcome = host.approve_pending(&result);
+        assert_eq!(
+            outcome,
+            ApproveOutcome::Loaded,
+            "grant must load the plugin"
+        );
+        assert!(
+            host.loaded.iter().any(|rp| rp.name.as_str() == "grant-me"),
+            "approved plugin moves into loaded"
+        );
+        assert!(
+            !host
+                .pending_approvals
+                .iter()
+                .any(|(rp, _)| rp.name.as_str() == "grant-me"),
+            "approved plugin leaves pending"
+        );
+        // The approval is recorded so a later launch auto-grants it.
+        let recorded = host
+            .manager
+            .approval_store()
+            .list()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str() == "grant-me");
+        assert!(
+            recorded,
+            "an approved path plugin records its approval hash"
+        );
+        assert!(
+            host.runtime
+                .running(&PluginName::new("grant-me").unwrap())
+                .is_some(),
+            "the runtime now has the plugin loaded"
+        );
+    }
+
+    #[test]
+    fn approve_pending_deny_drops_without_loading() {
+        let (mut host, _dir) = host_with_pending_plugin("deny-me");
+        let mut result = grant_full("deny-me", "storage:persistent");
+        result.decision = "deny".to_owned();
+
+        let outcome = host.approve_pending(&result);
+        assert_eq!(outcome, ApproveOutcome::Denied, "deny must drop the plugin");
+        assert!(
+            !host.loaded.iter().any(|rp| rp.name.as_str() == "deny-me"),
+            "denied plugin must NOT load"
+        );
+        assert!(
+            !host
+                .pending_approvals
+                .iter()
+                .any(|(rp, _)| rp.name.as_str() == "deny-me"),
+            "denied plugin leaves pending"
+        );
+        assert!(
+            host.runtime
+                .running(&PluginName::new("deny-me").unwrap())
+                .is_none(),
+            "the runtime must not hold a denied plugin"
+        );
+    }
+
+    #[test]
+    fn approve_pending_for_non_pending_plugin_is_dropped() {
+        let (mut host, _dir) = host_with_pending_plugin("real-plugin");
+        // A result naming a plugin that is not pending.
+        let result = grant_full("ghost-plugin", "storage:persistent");
+        let outcome = host.approve_pending(&result);
+        assert_eq!(
+            outcome,
+            ApproveOutcome::NotPending,
+            "an approve for a non-pending plugin is dropped"
+        );
+        // The genuinely-pending plugin is untouched.
+        assert!(
+            host.pending_approvals
+                .iter()
+                .any(|(rp, _)| rp.name.as_str() == "real-plugin"),
+            "the real pending plugin is left intact"
+        );
+    }
+
+    #[test]
+    fn approve_pending_with_unrequested_permission_is_dropped() {
+        // The plugin only requests storage:persistent; a result that answers an
+        // unrequested permission domain must be dropped (never loaded).
+        let (mut host, _dir) = host_with_pending_plugin("strict");
+        let result = grant_full("strict", "secret:read"); // not requested
+        let outcome = host.approve_pending(&result);
+        assert_eq!(
+            outcome,
+            ApproveOutcome::NotPending,
+            "answering an unrequested permission must be dropped"
+        );
+        assert!(
+            !host.loaded.iter().any(|rp| rp.name.as_str() == "strict"),
+            "a mismatched result must not load the plugin"
+        );
+    }
+
+    #[test]
+    fn revoke_unloads_and_drops_approval() {
+        let (mut host, _dir) = host_with_pending_plugin("revoke-me");
+        // Approve + load first.
+        let _ = host.approve_pending(&grant_full("revoke-me", "storage:persistent"));
+        let name = PluginName::new("revoke-me").unwrap();
+        assert!(
+            host.runtime.running(&name).is_some(),
+            "loaded before revoke"
+        );
+        assert!(
+            host.manager
+                .approval_store()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|n| n == &name),
+            "approval recorded before revoke"
+        );
+
+        host.revoke_plugin("revoke-me");
+        assert!(
+            host.runtime.running(&name).is_none(),
+            "revoke unloads the plugin from the runtime"
+        );
+        assert!(
+            !host.loaded.iter().any(|rp| rp.name.as_str() == "revoke-me"),
+            "revoke removes the plugin from the loaded set"
+        );
+        assert!(
+            !host
+                .manager
+                .approval_store()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|n| n == &name),
+            "revoke drops the stored approval so it does not auto-load next launch"
+        );
+    }
+
+    #[test]
+    fn reload_keeps_plugin_loaded() {
+        let (mut host, _dir) = host_with_pending_plugin("reload-me");
+        let _ = host.approve_pending(&grant_full("reload-me", "storage:persistent"));
+        let name = PluginName::new("reload-me").unwrap();
+        assert!(
+            host.runtime.running(&name).is_some(),
+            "loaded before reload"
+        );
+
+        host.reload_plugin("reload-me");
+        assert!(
+            host.runtime.running(&name).is_some(),
+            "the plugin stays loaded across a reload"
+        );
+        assert!(
+            host.loaded.iter().any(|rp| rp.name.as_str() == "reload-me"),
+            "the plugin stays in the loaded set across a reload"
+        );
+    }
+
+    #[test]
+    fn adjust_scope_parks_loaded_plugin_for_reapproval() {
+        let (mut host, _dir) = host_with_pending_plugin("scope-me");
+        let _ = host.approve_pending(&grant_full("scope-me", "storage:persistent"));
+        assert!(host.loaded.iter().any(|rp| rp.name.as_str() == "scope-me"));
+
+        let req = host.adjust_scope_request("scope-me");
+        assert!(req.is_some(), "adjust-scope yields a re-approval request");
+        let req = req.unwrap();
+        assert!(req.is_update, "adjust-scope dialog is an update dialog");
+        assert!(
+            host.pending_approvals
+                .iter()
+                .any(|(rp, _)| rp.name.as_str() == "scope-me"),
+            "the plugin is parked as pending for re-approval"
+        );
+        // The plugin is still running (re-grant happens on the eventual approve).
+        assert!(
+            host.runtime
+                .running(&PluginName::new("scope-me").unwrap())
+                .is_some(),
+            "the plugin keeps running while awaiting re-narrowing"
+        );
+
+        // Re-approving with a grant reloads it (re-grant-via-reload) and moves it
+        // back into loaded.
+        let outcome = host.approve_pending(&grant_full("scope-me", "storage:persistent"));
+        assert_eq!(
+            outcome,
+            ApproveOutcome::Loaded,
+            "re-approve reloads via reload"
+        );
+        assert!(
+            host.loaded.iter().any(|rp| rp.name.as_str() == "scope-me"),
+            "re-approved plugin returns to the loaded set"
+        );
     }
 }

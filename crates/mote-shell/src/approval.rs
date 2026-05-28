@@ -14,16 +14,10 @@
 //! [`approval_from_dialog`] and [`DecidedPolicy`] once the user has responded;
 //! tests wire these pieces directly without any event loop.
 //!
-//! # Dead-code suppression
-//!
-//! The install/auto-grant path (`classify`, `DecidedPolicy`, …) is now wired
-//! into the shell's plugin host (Task 3). The dialog-result path
-//! (`approval_from_dialog`, `DialogResult`, …) is still tested directly but not
-//! yet referenced from the non-test build graph — Task 5 wires it once the
-//! approval dialog op handler exists. Rather than a blanket module-level
-//! `#![allow]`, each currently-dead item carries its own `#[allow(dead_code)]`
-//! naming the task that wires it in. This is self-cleaning: whoever connects an
-//! item in T5 sees the attribute on the item they're touching and removes it.
+//! Both paths are now wired into the shell: the install/auto-grant path
+//! (`classify`, `DecidedPolicy`) through the plugin host's load pass, and the
+//! dialog-result path (`approval_from_dialog`, `DialogResult`, the op-boundary
+//! [`validate_origin_glob`]) through the `approve_plugin` op handler.
 
 use std::collections::BTreeSet;
 
@@ -224,6 +218,23 @@ const HARDCODED_HIGH_RISK: &[&str] = &[
     "mcp:server",
 ];
 
+/// Builds an `is_update=true` [`ApprovalRequest`] for a re-approval / adjust-
+/// scope dialog (panel actions, Task 5 §6.5).
+///
+/// Unlike [`classify`]'s first-install path, this is used when the plugin is
+/// already loaded and the user is re-narrowing or re-approving an expanded
+/// manifest: `is_update` is set so the dialog reads "approve update", and
+/// `new_permissions` carries the (possibly empty) "what's new" surface the
+/// caller computed.
+pub(crate) fn build_update_request(
+    manifest: &Manifest,
+    provenance: Provenance,
+    combos: &CombinationRegistry,
+    new_permissions: Vec<String>,
+) -> ApprovalRequest {
+    build_request(manifest, provenance, combos, true, new_permissions)
+}
+
 /// Builds the [`ApprovalRequest`] view-model for the approval dialog.
 fn build_request(
     manifest: &Manifest,
@@ -348,32 +359,76 @@ fn permission_to_narrowable(raw: &str) -> NarrowablePermission {
     }
 }
 
+// ── Op-boundary structural validation ───────────────────────────────────────
+
+/// The maximum byte length of a single origin glob (ADR-0005 op-boundary cap).
+///
+/// Origin globs are short URL/host patterns (`https://*.example.com/*`); 2048
+/// is generous for any legitimate pattern while bounding the resource string a
+/// hostile chrome payload could push into a [`Narrowing`].
+pub(crate) const MAX_ORIGIN_GLOB_LEN: usize = 2048;
+
+/// The maximum number of origin globs a single dialog permission may carry
+/// (ADR-0005 op-boundary cap). Caps the fan-out a hostile payload can create.
+pub(crate) const MAX_ORIGINS_PER_PERMISSION: usize = 64;
+
+/// Structurally validates one origin-glob string at the `approve_plugin` op
+/// boundary (ADR-0005 "closed structured operations").
+///
+/// This is the **security-critical** gate that keeps an arbitrary chrome-supplied
+/// string from becoming a [`Narrowing`] resource. It enforces, in order:
+///
+/// - **Non-empty.** A zero-length glob is not a meaningful origin pattern.
+/// - **Bounded length.** At most [`MAX_ORIGIN_GLOB_LEN`] bytes.
+/// - **Bounded character set.** Only printable ASCII drawn from the set a
+///   URL/host glob needs: ASCII letters and digits plus `. - _ : / * ? @ ~`.
+///   Everything else — control characters, whitespace, quotes, backslash, `<`,
+///   `>`, `%`, and any non-ASCII byte — is rejected. This neutralises both
+///   markup-injection shapes (`<script>`) and ambiguous/encoded inputs.
+///
+/// It deliberately does **not** assert a full URL grammar (that the glob is a
+/// well-formed origin); narrowing semantics are matched downstream. Its job is
+/// to bound what can cross the trust boundary, not to parse it.
+pub(crate) fn validate_origin_glob(s: &str) -> bool {
+    if s.is_empty() || s.len() > MAX_ORIGIN_GLOB_LEN {
+        return false;
+    }
+    s.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'.' | b'-' | b'_' | b':' | b'/' | b'*' | b'?' | b'@' | b'~'
+            )
+    })
+}
+
 // ── Dialog result → Approval mapping ─────────────────────────────────────────
 
 /// Per-permission decision coming back from the approval dialog op payload.
-#[derive(serde::Deserialize)]
-#[allow(dead_code)] // wired in Task 5 (read by approval_from_dialog)
+///
+/// Fields are `pub(crate)` so the shell's `approve_plugin` op handler can run
+/// the op-boundary structural validation ([`validate_origin_glob`]) and the
+/// semantic cross-check before pushing the decision to the pump thread.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct DialogPermission {
-    domain: String,
-    action: String,
+    pub(crate) domain: String,
+    pub(crate) action: String,
     /// `"full"` | `"origins"` | `"deny"`
-    mode: String,
-    origins: Option<Vec<String>>,
+    pub(crate) mode: String,
+    pub(crate) origins: Option<Vec<String>>,
 }
 
 /// The approval dialog's op result payload.
-#[derive(serde::Deserialize)]
-#[allow(dead_code)] // wired in Task 5 (deserialized from the dialog op payload)
+#[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct DialogResult {
-    plugin: String,
+    pub(crate) plugin: String,
     /// `"grant"` | `"deny"`
-    decision: String,
-    permissions: Vec<DialogPermission>,
+    pub(crate) decision: String,
+    pub(crate) permissions: Vec<DialogPermission>,
 }
 
 impl DialogResult {
     /// The plugin name for cross-checking against the expected plugin.
-    #[allow(dead_code)] // wired in Task 5
     pub(crate) fn plugin(&self) -> &str {
         &self.plugin
     }
@@ -398,9 +453,8 @@ impl DialogResult {
 /// Note: cross-checking each `DialogPermission`'s `(domain, action)` against the
 /// pending [`ApprovalRequest`] (i.e. verifying the user only answered for
 /// permissions that were actually requested) happens **upstream** in the op
-/// handler (Task 5), not here. This function trusts that membership and only
-/// translates the per-permission verdicts into an [`Approval`].
-#[allow(dead_code)] // wired in Task 5
+/// handler, not here. This function trusts that membership and only translates
+/// the per-permission verdicts into an [`Approval`].
 pub(crate) fn approval_from_dialog(result: &DialogResult) -> Approval {
     // Overall decision: "deny" → immediate Deny.
     if result.decision != "grant" {
@@ -956,5 +1010,84 @@ mod tests {
             permissions: vec![],
         };
         assert_eq!(result.plugin(), "my-plugin");
+    }
+
+    // ── Op-boundary structural validation (ADR-0005, security-critical) ──────
+
+    #[test]
+    fn valid_origin_globs_pass() {
+        for s in [
+            "*",
+            "https://example.com/*",
+            "https://*.example.com/*",
+            "http://localhost:3000/*",
+            "*.github.com",
+            "https://example.com/path?query",
+            "user@host:1234/*",
+            "~/local-ish",
+            "a", // single printable char
+        ] {
+            assert!(validate_origin_glob(s), "must accept origin glob: {s:?}");
+        }
+    }
+
+    #[test]
+    fn empty_origin_glob_is_rejected() {
+        assert!(
+            !validate_origin_glob(""),
+            "empty glob is not a valid origin"
+        );
+    }
+
+    #[test]
+    fn over_length_origin_glob_is_rejected() {
+        let ok = "a".repeat(MAX_ORIGIN_GLOB_LEN);
+        assert!(validate_origin_glob(&ok), "at the cap is allowed");
+        let too_long = "a".repeat(MAX_ORIGIN_GLOB_LEN + 1);
+        assert!(
+            !validate_origin_glob(&too_long),
+            "over the cap must be rejected"
+        );
+    }
+
+    #[test]
+    fn control_chars_and_whitespace_are_rejected() {
+        for s in [
+            "https://e.com/\n",
+            "https://e.com/ ",
+            "\thttps://e.com",
+            "https://e\0.com",
+            "https://e.com/\r\n",
+        ] {
+            assert!(
+                !validate_origin_glob(s),
+                "control/whitespace must be rejected: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quotes_backslash_and_markup_are_rejected() {
+        for s in [
+            "https://e.com/\"",
+            "https://e.com/'",
+            "https://e.com\\admin",
+            "<script>alert(1)</script>",
+            "https://e.com/<img>",
+            "https://e.com/\">x",
+            "java%73cript:alert(1)", // `%` is not in the allowed set
+        ] {
+            assert!(
+                !validate_origin_glob(s),
+                "injection-shaped input must be rejected: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ascii_is_rejected() {
+        // Homoglyph / unicode payloads must not slip through.
+        assert!(!validate_origin_glob("https://exa\u{0430}mple.com/*"));
+        assert!(!validate_origin_glob("https://例え.com/*"));
     }
 }
