@@ -695,7 +695,7 @@ impl PluginHost {
             consumes: rp.manifest.consumes.clone(),
             permissions,
             last_used: self.last_used(&rp.name),
-            integrity: mgr_integrity_to_ui(&rp.integrity),
+            integrity: ui_integrity(rp.provenance, &rp.integrity),
             actions: actions_for_kind(&kind),
             kind,
         }
@@ -767,6 +767,20 @@ const fn mgr_integrity_to_ui(status: &MgrIntegrity) -> IntegrityStatus {
         MgrIntegrity::Mismatch { .. } => IntegrityStatus::Mismatch,
         MgrIntegrity::Bundled => IntegrityStatus::Bundled,
         MgrIntegrity::Unknown => IntegrityStatus::Unknown,
+    }
+}
+
+/// The integrity-panel status to render for a resolved plugin (Task 6c).
+///
+/// A `DevMode`-provenance plugin always shows [`IntegrityStatus::DevMode`]
+/// ("dev mode") regardless of the sync-computed hash status: it is the
+/// developer's working copy, auto-approved on every change, so "verified" /
+/// "mismatch" would be misleading. Every other provenance maps its
+/// [`MgrIntegrity`] through [`mgr_integrity_to_ui`].
+const fn ui_integrity(provenance: Provenance, status: &MgrIntegrity) -> IntegrityStatus {
+    match provenance {
+        Provenance::DevMode => IntegrityStatus::DevMode,
+        _ => mgr_integrity_to_ui(status),
     }
 }
 
@@ -1198,6 +1212,74 @@ mod tests {
         assert_eq!(
             actions_for_kind(&kind),
             vec![PluginAction::Update, PluginAction::Revoke]
+        );
+    }
+
+    #[test]
+    fn dev_mode_loaded_row_kind_integrity_actions() {
+        // Task 6c: a DevMode-provenance resolved plugin renders with the DevMode
+        // kind (⊙ glyph), DevMode integrity *regardless of the sync hash status*,
+        // and the dev/path action set (reload / revoke / adjust-scope).
+        let rp = resolved("my-dev-plugin", Provenance::DevMode, MgrIntegrity::Unknown);
+
+        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        assert!(
+            matches!(kind, PluginKind::DevMode { .. }),
+            "DevMode provenance -> PluginKind::DevMode"
+        );
+        assert_eq!(kind.glyph(), "⊙", "dev-mode glyph renders via PluginKind");
+
+        // The sync integrity is Unknown, but a dev-mode plugin always shows
+        // "dev mode" — not "unknown" / "verified".
+        assert_eq!(
+            ui_integrity(rp.provenance, &rp.integrity),
+            IntegrityStatus::DevMode,
+            "DevMode provenance overrides sync integrity"
+        );
+
+        assert_eq!(
+            actions_for_kind(&kind),
+            vec![
+                PluginAction::Reload,
+                PluginAction::Revoke,
+                PluginAction::AdjustScope,
+            ],
+            "dev-mode shares the path action set"
+        );
+    }
+
+    #[test]
+    fn dev_mode_build_panel_row_shows_dev_mode() {
+        // End-to-end through the live panel builder: a DevMode plugin pushed
+        // into `loaded` renders a row with DevMode kind + DevMode integrity.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+
+        // A DevMode plugin whose sync integrity is PathLocal (would map to
+        // "verified") — the panel must still show "dev mode".
+        host.loaded.push(resolved(
+            "dev-widget",
+            Provenance::DevMode,
+            MgrIntegrity::PathLocal,
+        ));
+
+        let panel = host.build_panel();
+        let row = panel
+            .plugins
+            .iter()
+            .find(|p| p.name == "dev-widget")
+            .expect("dev-widget row present");
+        assert!(matches!(row.kind, PluginKind::DevMode { .. }));
+        assert_eq!(row.integrity, IntegrityStatus::DevMode);
+        assert_eq!(
+            row.actions,
+            vec![
+                PluginAction::Reload,
+                PluginAction::Revoke,
+                PluginAction::AdjustScope,
+            ]
         );
     }
 

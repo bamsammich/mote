@@ -570,6 +570,46 @@ impl PluginManager {
         path.to_path_buf()
     }
 
+    /// Canonicalizes every `dev_mode.directories` entry (expanding `~`) for
+    /// prefix matching in [`is_dev_mode`](Self::is_dev_mode).
+    ///
+    /// An entry that does not exist on disk (so cannot be canonicalized) is
+    /// retained as its `~`-expanded form, so a configured-but-missing dev dir
+    /// still matches a child resolved by a literal path. Canonicalizing both
+    /// sides where possible defeats `..`/symlink aliasing in the common case.
+    fn canonical_dev_dirs(dev_mode: &DevModeConfig) -> Vec<PathBuf> {
+        dev_mode
+            .directories
+            .iter()
+            .map(|d| {
+                let expanded = Self::expand_tilde(Path::new(d));
+                expanded.canonicalize().unwrap_or(expanded)
+            })
+            .collect()
+    }
+
+    /// Whether the plugin `name` resolved at `dir` is a dev-mode plugin per the
+    /// merged `dev_mode` config: its manifest name appears in
+    /// `dev_mode.plugins`, OR its canonicalized resolved dir is at or under one
+    /// of `dev_dirs` (already canonicalized by
+    /// [`canonical_dev_dirs`](Self::canonical_dev_dirs)).
+    ///
+    /// `dir` is the `plugins/<name>` active link; canonicalizing it follows the
+    /// symlink to the real path-source / cache dir so the prefix match is
+    /// against the plugin's true location, not the slot path.
+    fn is_dev_mode(
+        name: &PluginName,
+        dir: &Path,
+        dev_mode: &DevModeConfig,
+        dev_dirs: &[PathBuf],
+    ) -> bool {
+        if dev_mode.plugins.iter().any(|p| p == name.as_str()) {
+            return true;
+        }
+        let real = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        dev_dirs.iter().any(|root| real.starts_with(root))
+    }
+
     /// Resolves a `path:` [`Source`] to the canonical, real directory.
     fn resolve_path_source(name: &PluginName, raw: &Path) -> Result<PathBuf, ManagerError> {
         let expanded = Self::expand_tilde(raw);
@@ -751,9 +791,11 @@ impl PluginManager {
         // their active-link dirs. The public `sync()` reconciles only the global
         // set; resolved_set must reconcile the identity set it actually loads.
         //
-        // `dev_mode` is consumed by the dev-mode marking pass (sub-task 6c);
-        // 6b only wires the identity overlay + the merge that produces it.
-        let (spec_set, _dev_mode) = self.composed_config(identity)?;
+        // `dev_mode` drives the dev-mode marking pass below (sub-task 6c): any
+        // plugin named in it or living under one of its directories is marked
+        // [`Provenance::DevMode`].
+        let (spec_set, dev_mode) = self.composed_config(identity)?;
+        let dev_dirs = Self::canonical_dev_dirs(&dev_mode);
 
         let sync_report = self.sync_specs(&spec_set)?;
         let integrity_by_name: std::collections::BTreeMap<PluginName, IntegrityStatus> =
@@ -821,10 +863,34 @@ impl PluginManager {
             }
         }
 
-        // Resolve each entry to its dir + manifest + init source. An entry
-        // whose active-link dir is unreadable (typically a git plugin in
-        // `sync.failed` with no prior cache) is logged and skipped — mirroring
-        // sync's own resilience contract.
+        // Resolve each entry to a ResolvedPlugin (applying the dev-mode override
+        // + integrity), then order by capability-contract dependency order
+        // (fulfillers first).
+        let (mut resolved, manifests) =
+            self.resolve_entries(entries, &integrity_by_name, &dev_mode, &dev_dirs);
+
+        let order = crate::resolve::load_order(&manifests)?;
+        let position = |n: &PluginName| order.iter().position(|o| o == n).unwrap_or(usize::MAX);
+        resolved.sort_by_key(|rp| position(&rp.name));
+
+        Ok(resolved)
+    }
+
+    /// Resolves each `(name, provenance)` entry to a [`ResolvedPlugin`],
+    /// reading its active-link dir / manifest / `init.lua`, applying the
+    /// dev-mode provenance override (6c), and assigning the integrity status.
+    ///
+    /// Returns the resolved plugins alongside their manifests (parallel, used by
+    /// the caller for `load_order`). An entry whose active-link dir or `init.lua`
+    /// is unreadable (typically a git plugin in `sync.failed` with no prior
+    /// cache) is logged and skipped — mirroring sync's resilience contract.
+    fn resolve_entries(
+        &self,
+        entries: Vec<(PluginName, Provenance)>,
+        integrity_by_name: &std::collections::BTreeMap<PluginName, IntegrityStatus>,
+        dev_mode: &DevModeConfig,
+        dev_dirs: &[PathBuf],
+    ) -> (Vec<ResolvedPlugin>, Vec<mote_lua::Manifest>) {
         let mut resolved: Vec<ResolvedPlugin> = Vec::with_capacity(entries.len());
         let mut manifests: Vec<mote_lua::Manifest> = Vec::with_capacity(entries.len());
         for (name, provenance) in entries {
@@ -850,6 +916,16 @@ impl PluginManager {
                     continue;
                 }
             };
+            // Dev-mode override (6c): a plugin named in `dev_mode.plugins`, or
+            // whose resolved dir lives under a `dev_mode.directories` entry, is
+            // the developer's own working copy — mark it `DevMode` regardless of
+            // its declared source (path/git/implicit/bundled). DevMode takes
+            // precedence; `classify` then auto-grants it (ADR-0008).
+            let provenance = if Self::is_dev_mode(&name, &dir, dev_mode, dev_dirs) {
+                Provenance::DevMode
+            } else {
+                provenance
+            };
             let integrity = if matches!(provenance, Provenance::Bundled) {
                 IntegrityStatus::Bundled
             } else {
@@ -868,13 +944,7 @@ impl PluginManager {
                 init_source,
             });
         }
-
-        // Order by capability-contract dependency order (fulfillers first).
-        let order = crate::resolve::load_order(&manifests)?;
-        let position = |n: &PluginName| order.iter().position(|o| o == n).unwrap_or(usize::MAX);
-        resolved.sort_by_key(|rp| position(&rp.name));
-
-        Ok(resolved)
+        (resolved, manifests)
     }
 
     /// # Errors
@@ -2112,6 +2182,103 @@ return M
                 .any(|d| d == "/dev/identity-only"),
             "identity-overlay dev dir merged: {:?}",
             dev_mode.directories
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6c: dev-mode marking — provenance overridden to DevMode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn plugin_under_dev_mode_directory_resolves_as_dev_mode() {
+        let f = fixture();
+
+        // A workspace dir that holds the dev plugin in a sub-directory; the
+        // dev_mode.directories entry is the workspace root.
+        let workspace = tempfile::tempdir().unwrap();
+        let plugin_dir = workspace.path().join("under-dev");
+        write_plugin(&plugin_dir, "under-dev", &[]);
+        let src = format!("path:{}", plugin_dir.display());
+
+        // plugins.lua declares the plugin AND a dev_mode directory covering it.
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            format!(
+                "mote.plugins({{ [\"under-dev\"] = {{ source = \"{src}\" }} }})\n\
+                 mote.dev_mode({{ directories = {{ \"{}\" }} }})\n",
+                workspace.path().display()
+            ),
+        )
+        .unwrap();
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let under_dev = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "under-dev")
+            .expect("under-dev resolved");
+        assert_eq!(
+            under_dev.provenance,
+            Provenance::DevMode,
+            "a path plugin whose dir is under a dev_mode directory must be DevMode"
+        );
+    }
+
+    #[test]
+    fn plugin_named_in_dev_mode_plugins_resolves_as_dev_mode() {
+        let f = fixture();
+
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_plugin(plugin_dir.path(), "named-dev", &[]);
+        let src = format!("path:{}", plugin_dir.path().display());
+
+        // plugins.lua declares the plugin AND lists it by name in dev_mode.
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            format!(
+                "mote.plugins({{ [\"named-dev\"] = {{ source = \"{src}\" }} }})\n\
+                 mote.dev_mode({{ plugins = {{ \"named-dev\" }} }})\n"
+            ),
+        )
+        .unwrap();
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let named_dev = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "named-dev")
+            .expect("named-dev resolved");
+        assert_eq!(
+            named_dev.provenance,
+            Provenance::DevMode,
+            "a plugin named in dev_mode.plugins must be DevMode"
+        );
+    }
+
+    #[test]
+    fn normal_path_plugin_is_not_dev_mode() {
+        let f = fixture();
+
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_plugin(plugin_dir.path(), "plain", &[]);
+        let src = format!("path:{}", plugin_dir.path().display());
+        // A dev_mode block exists but does NOT cover this plugin.
+        fs::write(
+            f.config_dir.join("plugins.lua"),
+            format!(
+                "mote.plugins({{ [\"plain\"] = {{ source = \"{src}\" }} }})\n\
+                 mote.dev_mode({{ directories = {{ \"/some/other/dir\" }} }})\n"
+            ),
+        )
+        .unwrap();
+
+        let resolved = f.mgr.resolved_set(None).unwrap();
+        let plain = resolved
+            .iter()
+            .find(|r| r.name.as_str() == "plain")
+            .expect("plain resolved");
+        assert_eq!(
+            plain.provenance,
+            Provenance::Path,
+            "a path plugin not covered by dev_mode must stay Path"
         );
     }
 
