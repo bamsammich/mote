@@ -497,7 +497,7 @@ impl IntegrityPanel {
 /// Rendered as a radio group in the approval dialog. Mirrors the design
 /// specification in DESIGN.md §Permission Primitives — "Grant fully / Grant on
 /// specific origins / Deny".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NarrowMode {
     /// Grant exactly as declared in the manifest.
     GrantFull,
@@ -516,7 +516,7 @@ impl NarrowMode {
 }
 
 /// A single permission entry in the approval dialog, with its narrowing state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NarrowablePermission {
     /// Permission domain, e.g. `page:inject_script`.
     pub domain: String,
@@ -561,7 +561,7 @@ impl NarrowablePermission {
 ///
 /// Rendered as a floating dialog when a new plugin is installed or an existing
 /// plugin updates its manifest in a permission-expanding way.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalRequest {
     /// Plugin name.
     pub plugin: String,
@@ -815,6 +815,95 @@ mod tests {
         };
         assert_eq!(perm.effective_string(), "");
         assert!(!perm.mode.is_granted());
+    }
+
+    #[test]
+    fn approval_request_round_trips_through_json() {
+        let original = ApprovalRequest::sample();
+        let json = serde_json::to_string(&original).expect("serialization must not fail");
+        let deserialized: ApprovalRequest =
+            serde_json::from_str(&json).expect("deserialization must not fail");
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn approval_request_json_contains_expected_content() {
+        let original = ApprovalRequest::sample();
+        let json = serde_json::to_string(&original).expect("serialization must not fail");
+
+        // Plugin name is present.
+        assert!(
+            json.contains("frontend-introspection-mcp"),
+            "plugin name missing from json"
+        );
+
+        // Each permission's domain and the components of its effective_string()
+        // are reconstructable from the JSON (mode + domain + requested_scope are
+        // all serialized). For GrantFull the effective string appears verbatim;
+        // for GrantOrigins the origins serialize as a JSON array, so the
+        // comma-joined form is reconstructable from those array elements rather
+        // than present as a substring — assert each element instead.
+        for perm in &original.permissions {
+            assert!(
+                json.contains(perm.domain.as_str()),
+                "permission domain '{}' missing from json",
+                perm.domain
+            );
+            match &perm.mode {
+                NarrowMode::GrantFull => {
+                    let effective = perm.effective_string();
+                    assert!(
+                        json.contains(effective.as_str()),
+                        "effective string '{effective}' missing from json"
+                    );
+                }
+                NarrowMode::GrantOrigins(origins) => {
+                    for origin in origins {
+                        assert!(
+                            json.contains(origin.as_str()),
+                            "effective origin '{origin}' missing from json"
+                        );
+                    }
+                }
+                NarrowMode::Deny => {}
+            }
+        }
+
+        // Every dangerous_combinations entry is present verbatim (plain ASCII,
+        // never JSON-escaped).
+        for combo in &original.dangerous_combinations {
+            assert!(
+                json.contains(combo.as_str()),
+                "dangerous combination '{combo}' missing from json"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_request_json_contains_new_permissions_when_update() {
+        // Construct a minimal is_update=true request so new_permissions appears.
+        let req = ApprovalRequest {
+            plugin: "my-plugin".into(),
+            version: "1.0.0".into(),
+            source: "github:example/my-plugin @ abc123".into(),
+            permissions: vec![NarrowablePermission {
+                domain: "tabs:list".into(),
+                requested_scope: String::new(),
+                mode: NarrowMode::GrantFull,
+                description: "list tabs".into(),
+                narrowable: false,
+                high_risk: false,
+            }],
+            dangerous_combinations: vec![],
+            is_update: true,
+            new_permissions: vec!["tabs:list".into()],
+        };
+        let json = serde_json::to_string(&req).expect("serialization must not fail");
+        assert!(
+            json.contains("\"is_update\":true"),
+            "is_update flag missing"
+        );
+        assert!(json.contains("tabs:list"), "new_permissions entry missing");
     }
 
     #[test]

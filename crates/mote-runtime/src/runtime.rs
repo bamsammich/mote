@@ -174,6 +174,13 @@ impl Runtime {
         self.engine.dispatch_keybind(hook_key, payload)
     }
 
+    /// The registry this runtime was built with (schema version, permission and
+    /// capability definitions).
+    #[must_use]
+    pub const fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Whether a plugin with `name` is auto-disabled by the dispatch engine
     /// (three errors/timeouts in 24h; DESIGN §Runtime guarantees).
     #[must_use]
@@ -652,3 +659,38 @@ fn grant_set_strings(set: &GrantSet) -> Vec<String> {
 
 // (`effective_from_set` removed — `approve` now builds `EffectiveGrants`
 // directly from the narrowed permission strings.)
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use mote_audit::{AuditLog, Config};
+    use mote_registry::Registry;
+    use mote_storage::Store;
+    use mote_types::SchemaVersion;
+
+    use super::*;
+
+    fn make_runtime() -> (Runtime, AuditLog) {
+        let registry = Registry::load(SchemaVersion::V1).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let config = Config {
+            ring_capacity: 256,
+            flush_threshold: 1,
+            flush_interval: Duration::from_millis(5),
+        };
+        let log = AuditLog::new(&store, config).unwrap();
+        let runtime = Runtime::new(registry, store, log.producer());
+        (runtime, log)
+    }
+
+    #[test]
+    fn registry_accessor_returns_registry_with_matching_version() {
+        // Keep the audit log alive for the test body so its background flush
+        // thread isn't dropped mid-test (matches the `tests/` helpers).
+        let (rt, _log) = make_runtime();
+        // The accessor must hand back the same registry the runtime was built
+        // with; comparing the version is the only public identity check.
+        assert_eq!(rt.registry().version(), SchemaVersion::V1);
+    }
+}

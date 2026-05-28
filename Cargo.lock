@@ -3057,6 +3057,8 @@ name = "mote-ui"
 version = "0.0.0"
 dependencies = [
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "wgpu",
 ]
