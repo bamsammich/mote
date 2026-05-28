@@ -62,23 +62,23 @@ The user-facing chrome that turns "plugin runtime + rendering engine" into "brow
 - [x] Hidden-tab TTL (default 30 days)
 - [ ] Settings model — config is **Lua** (resolved per DESIGN over the ROADMAP "TOML" wording). A restricted config-Lua context lands in Phase 3 (for `plugins.lua`) and grows into the full settings system
 - [x] Integrity panel: active plugins, permissions (requested→effective), audit log, storage, provenance, integrity status — live data. (revoke/update/rollback/reload **actions** wire with Phase-3 plugin management)
-- [~] Permission approval dialog — surface built (narrowing UI, dangerous-combo warnings); the install→approval **flow** pairs with Phase-3 plugin install
+- [x] Permission approval dialog — surface + the install→approval **flow** live (Phase 3): async approval on privileged chrome, origin-narrowing actually restricts the grant, bundled/dev-mode auto-grant, approvals persisted
 
 ### Phase 3 — Plugin management
 
 The infrastructure that makes plugins dotfile-driven and reproducible.
 
-- [ ] `plugins.lua` and `plugins.lock` parsing and resolution
-- [ ] Plugin source types: `github:`, `git+https://`, `path:`, `bundled`
-- [ ] Content-addressed plugin cache at `~/.cache/mote/plugins/<name>/<commit>/`
-- [ ] BLAKE3 hash computation per the documented spec
-- [ ] CLI surface: `add`, `remove`, `update`, `source`, `sync`, `rollback`, `diff`, `import`, `gc`, `review`, `pin`, `link`
-- [ ] Dependency graph resolution (library plugins, transitive fetches)
-- [ ] Update flow with prominent permission-change surfacing
+- [x] `plugins.lua` and `plugins.lock` parsing and resolution
+- [x] Plugin source types: `github:`, `git+https://`, `path:`, `bundled`
+- [x] Content-addressed plugin cache at `~/.cache/mote/plugins/<name>/<commit>/`
+- [x] BLAKE3 hash computation per the documented spec
+- [~] CLI surface: `add`, `remove`, `update`, `source`, `sync`, `rollback`, `diff`, `import`, `gc`, `pin` implemented; `update` (no-arg, update-all) and `review`/`link` still pending
+- [~] Dependency graph resolution — capability load-ordering done; library-plugin transitive fetch still pending
+- [x] Update flow with prominent permission-change surfacing (re-approval dialog lists added perms/caps/consumes)
 - [ ] First-party plugin update notifications (poll canonical sources, surface in integrity panel, prompt to switch source)
-- [ ] Implicit local plugins (bare files in `plugins/` not in `plugins.lua`) detected and approval-flowed
-- [ ] Plugin dev mode (per-plugin or per-directory; visual marking everywhere)
-- [ ] Per-identity `plugins.lua` support
+- [x] Implicit local plugins (bare dirs in `plugins/` not in `plugins.lua`) detected and approval-flowed
+- [x] Plugin dev mode (per-plugin or per-directory; visual marking via `⊙` in the integrity panel)
+- [x] Per-identity `plugins.lua` support (`identities/<id>/plugins.lua` overlay)
 
 ### Phase 4 — Secret management
 
