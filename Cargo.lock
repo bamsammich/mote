@@ -3674,6 +3674,7 @@ dependencies = [
  "mote-pluginmgr",
  "mote-registry",
  "mote-runtime",
+ "mote-secrets",
  "mote-session",
  "mote-storage",
  "mote-types",

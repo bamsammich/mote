@@ -28,19 +28,22 @@
 //! `mote://overlay/integrity.html` overlay surface; the shell composites it
 //! full-window on the `Ctrl+Shift+I` keybind.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use mote_audit::{AuditLog, Config};
 use mote_pluginmgr::{
     IntegrityStatus as MgrIntegrity, PluginManager, Provenance, ResolvedPlugin, UpdateOutcome,
+    build_secret_resolver,
 };
 use mote_registry::{CombinationRegistry, Registry};
-use mote_runtime::{Approval, ApprovalHash, IdentityContext, Runtime};
+use mote_runtime::{Approval, ApprovalHash, IdentityContext, Narrowing, Runtime};
+use mote_secrets::SecretResolver;
 use mote_storage::{IdentityScope, Store};
 use mote_types::{IdentityId, PluginName, SchemaVersion};
 use mote_ui::{
     ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
-    PermissionRow, PluginAction, PluginKind, PluginRow, StorageRow,
+    PermissionRow, PluginAction, PluginKind, PluginRow, SecretAccessRow, StorageRow,
 };
 
 use crate::approval::{
@@ -68,6 +71,10 @@ pub(crate) struct PluginHost {
     /// they can load. Task 5 drives the dialog and finishes the load; Task 3
     /// only records them (and renders them as "awaiting approval" panel rows).
     pub(crate) pending_approvals: Vec<(ResolvedPlugin, ApprovalRequest)>,
+    /// Secret resolver loaded from `secrets.lua` at boot, used by
+    /// `build_panel` to look up backend labels for the integrity panel's
+    /// per-plugin secret rows (Task 9).
+    secret_resolver: Rc<SecretResolver>,
 }
 
 /// The result of resolving a dialog approval in [`PluginHost::approve_pending`].
@@ -156,9 +163,31 @@ impl PluginHost {
                 flush_interval: Duration::from_millis(250),
             },
         )?;
-        let runtime = Runtime::new(registry, store.clone(), audit.producer());
+        let mut runtime = Runtime::new(registry, store.clone(), audit.producer());
 
         let manager = PluginManager::new(config_dir, cache_dir, &store);
+
+        // Wire the per-identity secret resolver BEFORE any plugin loads.
+        // Plugins capture the resolver Rc at load time, so it must be set here,
+        // in boot_in, which runs before run_initial_load_pass.
+        let session_identity = IdentityId::new(super::SESSION_IDENTITY);
+        let router = runtime.make_secret_router();
+        let secret_resolver =
+            match build_secret_resolver(config_dir, Some(&session_identity), Some(router)) {
+                Ok((resolver, errors)) => {
+                    for e in &errors {
+                        eprintln!("mote-shell: secret skipped: {e}");
+                    }
+                    let resolver = Rc::new(resolver);
+                    runtime.set_secret_resolver(Rc::clone(&resolver));
+                    resolver
+                }
+                Err(e) => {
+                    // A malformed secrets.lua must NOT abort boot; the window always opens.
+                    eprintln!("mote-shell: secrets config failed to load; secrets disabled: {e}");
+                    Rc::new(SecretResolver::empty())
+                }
+            };
 
         Ok(Self {
             runtime,
@@ -168,6 +197,7 @@ impl PluginHost {
             combos,
             loaded: Vec::new(),
             pending_approvals: Vec::new(),
+            secret_resolver,
         })
     }
 
@@ -579,6 +609,68 @@ impl PluginHost {
         eprintln!("mote-shell: revoked `{name}`");
     }
 
+    /// Panel action — revoke a specific secret grant from a loaded plugin
+    /// (`plugin_revoke_secret`, Task 9).
+    ///
+    /// Narrows the plugin's `(secret, read)` grant to exclude `secret_name`,
+    /// keeping all other secret grants, then reloads in place (the new
+    /// effective-permission set no longer includes `secret:read:<secret_name>`).
+    ///
+    /// This is **session-scoped** — consistent with all other narrowings in
+    /// Mote. The `ApprovalStore` persists only the manifest hash, never
+    /// narrowings; a relaunch re-grants the full manifest set.
+    ///
+    /// Edge case: revoking the last secret → `remaining` is empty →
+    /// `GrantSet::narrow` with an empty resource set produces a [`GlobSet`]
+    /// that matches nothing (deny-all for that pair), which is the correct
+    /// revoke-everything outcome.
+    pub(crate) fn revoke_secret(&mut self, plugin_name: &str, secret_name: &str) {
+        let Ok(plugin) = PluginName::new(plugin_name) else {
+            eprintln!("mote-shell: plugin_revoke_secret: invalid plugin name `{plugin_name}`");
+            return;
+        };
+        let Some(running) = self.runtime.running(&plugin) else {
+            eprintln!("mote-shell: plugin_revoke_secret: plugin `{plugin_name}` is not running");
+            return;
+        };
+        // Collect the remaining secret-read resources (all but the revoked one).
+        let remaining: Vec<String> = running
+            .effective_permissions
+            .iter()
+            .filter_map(|p| p.strip_prefix("secret:read:").map(str::to_owned))
+            .filter(|n| n != secret_name)
+            .collect();
+
+        let approval = Approval::Narrow {
+            narrowings: vec![Narrowing {
+                domain: "secret".to_owned(),
+                action: "read".to_owned(),
+                resources: remaining,
+            }],
+        };
+
+        let Some(rp) = self.loaded_resolved(plugin_name) else {
+            eprintln!("mote-shell: plugin_revoke_secret: plugin `{plugin_name}` not in loaded set");
+            return;
+        };
+        let source = rp.init_source.clone();
+        let identity = IdentityContext::new(IdentityId::new(super::SESSION_IDENTITY));
+        let policy = DecidedPolicy::new(approval);
+        match self
+            .runtime
+            .reload(&plugin, &source, identity, &policy, false)
+        {
+            Ok(_) => {
+                eprintln!("mote-shell: revoked secret `{secret_name}` from `{plugin_name}`");
+            }
+            Err(e) => {
+                eprintln!(
+                    "mote-shell: plugin_revoke_secret: reload of `{plugin_name}` failed: {e}"
+                );
+            }
+        }
+    }
+
     /// Panel action — build a re-approval request for `plugin_adjust_scope`
     /// (§6.5): re-open the install dialog for a loaded plugin seeded with its
     /// current manifest so the user can re-narrow its grant. The subsequent
@@ -672,12 +764,11 @@ impl PluginHost {
     /// auto-granted plugin the effective set IS the requested set, so each
     /// renders as its own (un-narrowed, un-denied) form.
     fn loaded_row(&self, rp: &ResolvedPlugin) -> PluginRow {
-        let permissions = self
-            .runtime
-            .running(&rp.name)
-            .map(|running| {
-                running
-                    .effective_permissions
+        let running = self.runtime.running(&rp.name);
+        let permissions = running
+            .as_ref()
+            .map(|r| {
+                r.effective_permissions
                     .iter()
                     .map(|p| PermissionRow {
                         requested: p.clone(),
@@ -688,6 +779,41 @@ impl PluginHost {
                     .collect()
             })
             .unwrap_or_default();
+
+        // Build per-secret rows from the plugin's effective `secret:read:<name>`
+        // permissions.  The audit query is O(N) over the ring; acceptable for
+        // the panel render (noted as a v0.2 follow-up).
+        let secrets = running
+            .as_ref()
+            .map(|r| {
+                let query = self.audit.query();
+                r.effective_permissions
+                    .iter()
+                    .filter_map(|p| p.strip_prefix("secret:read:").map(str::to_owned))
+                    .map(|name| {
+                        let backend = self
+                            .secret_resolver
+                            .backend_label(&name)
+                            .unwrap_or("unknown")
+                            .to_owned();
+                        // Find the most-recent audit event whose operation matches
+                        // `secret:read:<name>` for this plugin.
+                        let op = format!("secret:read:{name}");
+                        let last_read = query
+                            .recent_for_plugin(&rp.name, usize::MAX)
+                            .into_iter()
+                            .rfind(|ev| ev.operation == op)
+                            .map(|ev| relative_time(ev.timestamp));
+                        SecretAccessRow {
+                            name,
+                            backend,
+                            last_read,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let kind = provenance_to_kind(rp.provenance, &rp.dir);
         PluginRow {
             name: rp.name.as_str().to_owned(),
@@ -695,6 +821,7 @@ impl PluginHost {
             fulfills: rp.manifest.capabilities.clone(),
             consumes: rp.manifest.consumes.clone(),
             permissions,
+            secrets,
             last_used: self.last_used(&rp.name),
             integrity: ui_integrity(rp.provenance, &rp.integrity),
             actions: actions_for_kind(&kind),
@@ -840,6 +967,7 @@ fn pending_row(rp: &ResolvedPlugin) -> PluginRow {
         fulfills: rp.manifest.capabilities.clone(),
         consumes: rp.manifest.consumes.clone(),
         permissions,
+        secrets: Vec::new(),
         last_used: None,
         integrity: IntegrityStatus::Unknown,
         kind,
@@ -1341,6 +1469,7 @@ mod tests {
                     narrowed: false,
                     denied: false,
                 }],
+                secrets: vec![],
                 last_used: None,
                 integrity: IntegrityStatus::Bundled,
                 kind: PluginKind::Bundled,
@@ -2003,6 +2132,227 @@ return M
             host.pending_approvals[0].0.name.as_str(),
             "pending-b",
             "the remaining pending entry is the second plugin"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 9: revoke_secret + loaded_row secret rows
+    // -----------------------------------------------------------------------
+
+    /// Write a `secrets.lua` that defines one env-backed secret named `name`
+    /// reading from the env var `var`.
+    fn write_secrets_lua(config_dir: &std::path::Path, name: &str, var: &str) {
+        std::fs::write(
+            config_dir.join("secrets.lua"),
+            format!(
+                "mote.secrets.define({{ [\"{name}\"] = {{ backend = \"env\", var = \"{var}\" }} }})\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Boot a host with a path-plugin that requests the given permissions and
+    /// a `secrets.lua` defining one env-backed secret.  Returns the host and the
+    /// tempdir that owns the plugin source so the path: source stays alive.
+    fn host_with_secret_plugin(
+        plugin_name: &str,
+        permissions: &[&str],
+        secret_name: &str,
+        env_var: &str,
+    ) -> (PluginHost, tempfile::TempDir) {
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin_with_perms(plugin_dir.path(), plugin_name, permissions);
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[(plugin_name, &src)]);
+        write_secrets_lua(config.path(), secret_name, env_var);
+
+        // Pre-approve so the plugin auto-grants.
+        let store = Store::open_in_memory().unwrap();
+        let manifest = mote_lua::load_plugin(
+            &std::fs::read_to_string(plugin_dir.path().join("init.lua")).unwrap(),
+            plugin_name,
+        )
+        .unwrap()
+        .manifest()
+        .clone();
+        let approval_store = mote_pluginmgr::ApprovalStore::new(&store);
+        approval_store
+            .put(&manifest.name, &ApprovalHash::of(&manifest))
+            .unwrap();
+
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+        assert!(
+            host.loaded.iter().any(|rp| rp.name.as_str() == plugin_name),
+            "plugin `{plugin_name}` must be loaded"
+        );
+        (host, plugin_dir)
+    }
+
+    /// Test (1): `revoke_secret` narrows exactly the target secret and leaves
+    /// the other intact.
+    #[test]
+    fn revoke_secret_removes_target_keeps_other() {
+        let (mut host, _dir) = host_with_secret_plugin(
+            "multi-secret",
+            &["secret:read:A", "secret:read:B"],
+            // Only define A for the resolver; B will be "unknown" — that's fine.
+            "A",
+            "HOME",
+        );
+
+        let plugin = PluginName::new("multi-secret").unwrap();
+
+        // Before: plugin can read both A and B.
+        let running = host.runtime.running(&plugin).unwrap();
+        assert!(
+            running
+                .effective_permissions
+                .iter()
+                .any(|p| p == "secret:read:A"),
+            "before revoke: A must be in effective permissions"
+        );
+        assert!(
+            running
+                .effective_permissions
+                .iter()
+                .any(|p| p == "secret:read:B"),
+            "before revoke: B must be in effective permissions"
+        );
+
+        host.revoke_secret("multi-secret", "A");
+
+        // After: A is gone, B remains.
+        let running = host.runtime.running(&plugin).unwrap();
+        assert!(
+            !running
+                .effective_permissions
+                .iter()
+                .any(|p| p == "secret:read:A"),
+            "after revoke: A must NOT be in effective permissions"
+        );
+        assert!(
+            running
+                .effective_permissions
+                .iter()
+                .any(|p| p == "secret:read:B"),
+            "after revoke: B must still be in effective permissions"
+        );
+    }
+
+    /// Test (2): revoking the last secret leaves the plugin loaded but with no
+    /// secret-read grants.
+    #[test]
+    fn revoke_last_secret_leaves_plugin_loaded_with_no_secret_grants() {
+        let (mut host, _dir) =
+            host_with_secret_plugin("single-secret", &["secret:read:ONLY"], "ONLY", "HOME");
+
+        let plugin = PluginName::new("single-secret").unwrap();
+
+        // Before: can read ONLY.
+        let running = host.runtime.running(&plugin).unwrap();
+        assert!(
+            running
+                .effective_permissions
+                .iter()
+                .any(|p| p == "secret:read:ONLY"),
+            "before: ONLY must be in effective permissions"
+        );
+
+        host.revoke_secret("single-secret", "ONLY");
+
+        // After: plugin still running, but no secret:read grants.
+        let running = host
+            .runtime
+            .running(&plugin)
+            .expect("plugin must remain loaded after revoking its last secret");
+        assert!(
+            !running
+                .effective_permissions
+                .iter()
+                .any(|p| p.starts_with("secret:read:")),
+            "after revoking last secret: no secret:read grants must remain; got: {:?}",
+            running.effective_permissions
+        );
+    }
+
+    /// Test (3): `build_panel` / `loaded_row` populates `secrets` with the
+    /// correct backend label for a plugin granted a defined secret.
+    #[test]
+    fn loaded_row_populates_secret_rows_with_backend() {
+        // Set HOME so the env backend can be looked up (it always exists).
+        let (host, _dir) =
+            host_with_secret_plugin("env-secret-user", &["secret:read:MY_KEY"], "MY_KEY", "HOME");
+
+        let panel = host.build_panel();
+        let row = panel
+            .plugins
+            .iter()
+            .find(|p| p.name == "env-secret-user")
+            .expect("plugin row must be present in the panel");
+
+        assert_eq!(
+            row.secrets.len(),
+            1,
+            "exactly one secret row expected; got {:?}",
+            row.secrets
+        );
+        assert_eq!(row.secrets[0].name, "MY_KEY");
+        assert_eq!(
+            row.secrets[0].backend, "env",
+            "secret defined with env backend must have backend label `env`"
+        );
+        // last_read is None because no secrets.get call has been audited.
+        assert_eq!(row.secrets[0].last_read, None);
+    }
+
+    /// Test (4): a plugin granted a secret not defined in `secrets.lua` shows
+    /// backend `"unknown"` in the panel row.
+    #[test]
+    fn loaded_row_unknown_backend_for_undefined_secret() {
+        // The plugin requests secret:read:UNDEF but no secrets.lua defines it.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plugin_dir = tempfile::tempdir().unwrap();
+        write_path_plugin_with_perms(
+            plugin_dir.path(),
+            "undef-secret-user",
+            &["secret:read:UNDEF"],
+        );
+        let src = format!("path:{}", plugin_dir.path().display());
+        write_plugins_lua(config.path(), &[("undef-secret-user", &src)]);
+        // No write_secrets_lua call — resolver has no defs.
+
+        let store = Store::open_in_memory().unwrap();
+        let manifest = mote_lua::load_plugin(
+            &std::fs::read_to_string(plugin_dir.path().join("init.lua")).unwrap(),
+            "undef-secret-user",
+        )
+        .unwrap()
+        .manifest()
+        .clone();
+        let approval_store = mote_pluginmgr::ApprovalStore::new(&store);
+        approval_store
+            .put(&manifest.name, &ApprovalHash::of(&manifest))
+            .unwrap();
+
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+
+        let panel = host.build_panel();
+        let row = panel
+            .plugins
+            .iter()
+            .find(|p| p.name == "undef-secret-user")
+            .expect("plugin row must be present");
+
+        assert_eq!(row.secrets.len(), 1);
+        assert_eq!(row.secrets[0].name, "UNDEF");
+        assert_eq!(
+            row.secrets[0].backend, "unknown",
+            "undefined secret must have backend label `unknown`"
         );
     }
 }

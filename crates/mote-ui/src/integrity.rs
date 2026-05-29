@@ -158,6 +158,11 @@ pub enum PluginAction {
     Settings,
     /// Reload the plugin from disk (dev-mode / path-local).
     Reload,
+    /// Revoke the named secret grant from this plugin (session-scoped).
+    RevokeSecret {
+        /// The secret name whose `secret:read:<name>` grant should be removed.
+        name: String,
+    },
 }
 
 impl PluginAction {
@@ -171,14 +176,27 @@ impl PluginAction {
             Self::Rollback => "rollback",
             Self::Settings => "settings",
             Self::Reload => "reload",
+            Self::RevokeSecret { .. } => "revoke secret",
         }
     }
 
     /// Whether this action is destructive (renders as `btn-danger`).
     #[must_use]
     pub const fn is_destructive(&self) -> bool {
-        matches!(self, Self::Revoke)
+        matches!(self, Self::Revoke | Self::RevokeSecret { .. })
     }
+}
+
+/// A single secret a plugin is granted to read, shown in its integrity card.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SecretAccessRow {
+    /// The secret name (the resource of a `secret:read:<name>` grant).
+    pub name: String,
+    /// Backend label: one of `env`/`file`/`age`/`keyring`/`password-manager`,
+    /// or `"unknown"` when the resolver has no definition for this name.
+    pub backend: String,
+    /// Human-relative time of the most recent successful/attempted read, if any.
+    pub last_read: Option<String>,
 }
 
 /// A single plugin entry in the integrity panel.
@@ -194,6 +212,8 @@ pub struct PluginRow {
     pub consumes: Vec<String>,
     /// Permissions declared in the manifest.
     pub permissions: Vec<PermissionRow>,
+    /// Secrets this plugin is granted to read, with backend and last-read info.
+    pub secrets: Vec<SecretAccessRow>,
     /// Last time the plugin exercised a permission (human-readable).
     pub last_used: Option<String>,
     /// Integrity status of the plugin's files vs. the lock-file checksum.
@@ -360,6 +380,7 @@ impl IntegrityPanel {
                             denied: false,
                         },
                     ],
+                    secrets: vec![],
                     last_used: Some("2 minutes ago".into()),
                     integrity: IntegrityStatus::Verified,
                     kind: PluginKind::DeclaredGit {
@@ -405,6 +426,7 @@ impl IntegrityPanel {
                             denied: false,
                         },
                     ],
+                    secrets: vec![],
                     last_used: Some("now".into()),
                     integrity: IntegrityStatus::Verified,
                     kind: PluginKind::DeclaredGit {
@@ -443,6 +465,7 @@ impl IntegrityPanel {
                             denied: false,
                         },
                     ],
+                    secrets: vec![],
                     last_used: Some("just now".into()),
                     integrity: IntegrityStatus::DevMode,
                     kind: PluginKind::DevMode {
@@ -745,6 +768,7 @@ mod tests {
             fulfills: vec![],
             consumes: vec![],
             permissions: vec![],
+            secrets: vec![],
             last_used: None,
             integrity: IntegrityStatus::DevMode,
             kind: PluginKind::DevMode {
@@ -786,6 +810,7 @@ mod tests {
                     denied: false,
                 },
             ],
+            secrets: vec![],
             last_used: None,
             integrity: IntegrityStatus::Verified,
             kind: PluginKind::Bundled,

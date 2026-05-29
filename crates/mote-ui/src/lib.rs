@@ -41,7 +41,7 @@ pub use host::{Node, UiHost};
 pub use integrity::{
     ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
     NarrowMode, NarrowablePermission, PermissionRow, PluginAction, PluginKind, PluginRow,
-    StorageRow,
+    SecretAccessRow, StorageRow,
 };
 pub use layout::Layout;
 pub use slot::{Edge, Slot};

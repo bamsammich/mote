@@ -168,6 +168,14 @@ enum ShellCommand {
     /// Panel action: re-open the approval dialog for the named plugin so the
     /// user can re-narrow its grant.
     PluginAdjustScope(String),
+    /// Panel action: revoke a specific secret grant from the named plugin
+    /// (session-scoped narrowing; does not persist across relaunch).
+    PluginRevokeSecret {
+        /// The plugin whose grant should be narrowed.
+        plugin: String,
+        /// The secret name (`<name>` from `secret:read:<name>`).
+        name: String,
+    },
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -595,6 +603,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let reload_queue = Arc::clone(commands);
     let revoke_queue = Arc::clone(commands);
     let adjust_queue = Arc::clone(commands);
+    let revoke_secret_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -664,6 +673,9 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
         .register("plugin_adjust_scope", move |params: &str| {
             plugin_action_op(&adjust_queue, params, ShellCommand::PluginAdjustScope)
         })
+        .register("plugin_revoke_secret", move |params: &str| {
+            plugin_revoke_secret_op(&revoke_secret_queue, params)
+        })
 }
 
 /// Op-boundary structural validation of the dialog's origin globs
@@ -703,6 +715,25 @@ fn plugin_action_op(
             OpResponse::ok("{\"ok\":true}")
         }
         _ => OpResponse::err(400, "requires a non-empty string `plugin`"),
+    }
+}
+
+/// Handler for `plugin_revoke_secret`: parse non-empty `plugin` and `name`
+/// string fields and enqueue the revoke command. The plugin-name *format* is
+/// validated when the pump thread turns the string into a [`PluginName`]; here
+/// we only require both fields to be present non-empty strings.
+fn plugin_revoke_secret_op(queue: &CommandQueue, params: &str) -> OpResponse {
+    let plugin = json_string_field(params, "plugin").filter(|s| !s.is_empty());
+    let name = json_string_field(params, "name").filter(|s| !s.is_empty());
+    match (plugin, name) {
+        (Some(plugin), Some(name)) => {
+            push(queue, ShellCommand::PluginRevokeSecret { plugin, name });
+            OpResponse::ok("{\"ok\":true}")
+        }
+        _ => OpResponse::err(
+            400,
+            "plugin_revoke_secret requires non-empty string fields `plugin` and `name`",
+        ),
     }
 }
 
@@ -881,6 +912,9 @@ impl ShellApp {
                 ShellCommand::PluginReload(name) => self.plugin_reload(&name),
                 ShellCommand::PluginRevoke(name) => self.plugin_revoke(&name),
                 ShellCommand::PluginAdjustScope(name) => self.plugin_adjust_scope(&name),
+                ShellCommand::PluginRevokeSecret { plugin, name } => {
+                    self.plugin_revoke_secret(&plugin, &name);
+                }
             }
         }
     }
@@ -989,6 +1023,14 @@ impl ShellApp {
             // consistent with the other panel actions.
             self.refresh_integrity_panel();
         }
+    }
+
+    /// Panel action — revoke a specific secret grant from a loaded plugin
+    /// (session-scoped; does not persist across relaunch). Narrows the plugin's
+    /// `(secret, read)` grant to exclude `name`, then refreshes the panel.
+    fn plugin_revoke_secret(&mut self, plugin: &str, name: &str) {
+        self.host.revoke_secret(plugin, name);
+        self.refresh_integrity_panel();
     }
 
     /// Re-render the chrome integrity panel from live host state, but only when

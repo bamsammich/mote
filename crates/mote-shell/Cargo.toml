@@ -39,6 +39,9 @@ mote-registry = { path = "../mote-registry" }
 # Plugin management (ApprovalStore, Provenance, diff) + the lua manifest loader
 # used by the install→approval brain (Task 2 / ADR-0007).
 mote-pluginmgr = { path = "../mote-pluginmgr" }
+# Secret resolver: backend-label lookup and the empty resolver fallback used
+# when the shell cannot load secrets.lua (e.g. parse error at boot).
+mote-secrets = { path = "../mote-secrets" }
 mote-lua = { path = "../mote-lua" }
 mote-permissions = { path = "../mote-permissions" }
 # Ergonomic error enums for ClassifyError.
