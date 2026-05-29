@@ -13,3 +13,10 @@ publish = false
 workspace = true
 
 [dependencies]
+thiserror.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
+age.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

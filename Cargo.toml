@@ -41,6 +41,14 @@ raw-window-handle = "0.6"
 blake3 = "1.8"
 # Ergonomic, idiomatic error enums for the shared vocabulary.
 thiserror = "2.0"
+# Secret-value wrapper: zeroizes on drop, redacting Debug impl.
+# Used by mote-secrets for all resolved secret values.
+secrecy = "0.10"
+# Secure memory zeroing for secret values.
+zeroize = "1.8"
+# File encryption/decryption (identity-file backend). Default features only;
+# no async, no passphrase, no SSH — D3 from the Phase-4 design doc.
+age = "0.11"
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.
