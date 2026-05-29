@@ -144,6 +144,10 @@ return M
 
 /// A second plugin claiming the exclusive `ui:urlbar_provider` already held by
 /// `onepw` → exclusive double-claim.
+///
+/// NOTE: The doc comment above previously said "exclusive `password-manager:provider`"
+/// but this plugin actually claims `ui:urlbar_provider`. The PM capability is
+/// non-exclusive (Task 4 of Phase 4 secrets); only UI slots are exclusive.
 const SECOND_EXCLUSIVE_SRC: &str = r#"
 local M = {}
 M.manifest = {
@@ -306,6 +310,95 @@ fn phase1_end_to_end() {
         ),
         "expected exclusive-capability conflict, got {err:?}"
     );
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+// ---------------------------------------------------------------------------
+// password-manager:provider composability test (Task 4, Phase 4 secrets)
+// ---------------------------------------------------------------------------
+
+/// First password-manager plugin — fulfills the non-exclusive
+/// `password-manager:provider` capability.
+/// Implements the required API contract: `list_credentials` + `fill_credential`.
+const PM_PROVIDER_A_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "pm-provider-a",
+  version = "1.0.0",
+  permissions = {},
+  capabilities = { "password-manager:provider" },
+  identity_scope = "global",
+}
+M.api = {
+  list_credentials = function(query) return {} end,
+  fill_credential  = function(id, field) return "" end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Second password-manager plugin — also fulfills `password-manager:provider`.
+/// Loading this alongside `pm-provider-a` must NOT produce an exclusive-conflict
+/// error (composability = non-exclusive per Task 4).
+/// Implements the required API contract: `list_credentials` + `fill_credential`.
+const PM_PROVIDER_B_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "pm-provider-b",
+  version = "1.0.0",
+  permissions = {},
+  capabilities = { "password-manager:provider" },
+  identity_scope = "global",
+}
+M.api = {
+  list_credentials = function(query) return {} end,
+  fill_credential  = function(id, field) return "" end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Two plugins both fulfilling `password-manager:provider` must coexist —
+/// `password-manager:provider` is non-exclusive (composability = `NonExclusive`).
+/// Neither load call may return [`LoadError::ExclusiveCapabilityConflict`].
+///
+/// This proves the runtime load path (`check_exclusive_claims` /
+/// `probe.claim(…)`) permits multiple `password-manager:provider` claimants,
+/// which is the core runtime invariant asserted by Task 4.
+#[test]
+fn two_password_manager_providers_coexist() {
+    let (mut runtime, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+
+    // First PM provider loads without error.
+    let a = runtime
+        .load(PM_PROVIDER_A_SRC, identity(), &policy)
+        .expect("first password-manager:provider must load without error");
+    assert_eq!(a.name, plugin("pm-provider-a"));
+    assert!(
+        a.capabilities
+            .contains(&"password-manager:provider".to_owned()),
+        "pm-provider-a must expose password-manager:provider"
+    );
+
+    // Second PM provider also loads without error — no exclusive conflict.
+    let b = runtime.load(PM_PROVIDER_B_SRC, identity(), &policy).expect(
+        "second password-manager:provider must load without exclusive-capability-conflict \
+             error (composability = NonExclusive, Task 4 Phase 4)",
+    );
+    assert_eq!(b.name, plugin("pm-provider-b"));
+    assert!(
+        b.capabilities
+            .contains(&"password-manager:provider".to_owned()),
+        "pm-provider-b must expose password-manager:provider"
+    );
+
+    // Both are simultaneously loaded.
+    assert!(runtime.is_loaded(&plugin("pm-provider-a")));
+    assert!(runtime.is_loaded(&plugin("pm-provider-b")));
 
     log.shutdown().expect("audit log shuts down cleanly");
 }
