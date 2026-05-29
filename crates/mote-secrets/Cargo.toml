@@ -1,6 +1,6 @@
 [package]
 name = "mote-secrets"
-description = "Secret subsystem — typed SecretDef definitions, env/file/age backends (keyring + password-manager are stubs pending Tasks 3/5), SecretResolver dispatch, and the SecretProviderRouter API for targeted password-manager fan-out."
+description = "Secret subsystem — typed SecretDef definitions, env/file/age/keyring backends (password-manager is a stub pending Task 5), SecretResolver dispatch, and the SecretProviderRouter API for targeted password-manager fan-out."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ thiserror.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
 age.workspace = true
+keyring.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

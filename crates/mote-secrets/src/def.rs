@@ -13,7 +13,6 @@ use std::path::PathBuf;
 pub enum BackendKind {
     /// OS keyring (Secret Service / macOS Keychain / Windows Credential Store).
     /// `id` is `"service/account"` (split on last `/`).
-    /// Resolved by Task 3 — stub here.
     Keyring {
         /// Service/account identifier (`"service"` or `"service/account"`).
         id: String,

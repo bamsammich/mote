@@ -12,6 +12,56 @@ use zeroize::Zeroizing;
 
 use crate::{BackendKind, ResolveError, SecretValue};
 
+// ---------------------------------------------------------------------------
+// keyring backend
+// ---------------------------------------------------------------------------
+
+/// Resolve a secret from the OS keyring (Secret Service / GNOME Keyring).
+///
+/// `id` is split on the **last** `/` to yield `(service, account)`.
+/// When no `/` is present the whole string is used as the service and the
+/// account is empty.
+///
+/// The `String` returned by `keyring::Entry::get_password` is a plaintext
+/// secret. It is wrapped in [`Zeroizing`] before being moved into
+/// [`SecretString`] so the buffer is zeroed even if the construction fails
+/// or if this stack frame unwinds.
+fn resolve_keyring(id: &str) -> Result<SecretValue, ResolveError> {
+    let (service, account) = id
+        .rfind('/')
+        .map_or((id, ""), |pos| (&id[..pos], &id[pos + 1..]));
+
+    let entry =
+        keyring::Entry::new(service, account).map_err(|e| ResolveError::BackendUnavailable {
+            backend: format!("keyring (entry creation failed: {e})"),
+        })?;
+
+    // WHY: get_password returns a plain String containing the secret — wrap in
+    // Zeroizing immediately so the buffer is zeroed on drop in every exit path,
+    // including the conversion to SecretString.
+    let mut password: Zeroizing<String> = match entry.get_password() {
+        Ok(p) => Zeroizing::new(p),
+        Err(keyring::Error::NoEntry) => {
+            return Err(ResolveError::NotFound { name: id.into() });
+        }
+        Err(keyring::Error::NoStorageAccess(e)) => {
+            return Err(ResolveError::BackendUnavailable {
+                backend: format!("keyring (no storage access: {e})"),
+            });
+        }
+        Err(e) => {
+            return Err(ResolveError::BackendUnavailable {
+                backend: format!("keyring ({e})"),
+            });
+        }
+    };
+
+    // Take ownership from Zeroizing (leaving an empty String behind, which is
+    // then zeroized on drop) and move into SecretString so only one owner
+    // holds the plaintext at a time.
+    Ok(SecretString::new(std::mem::take(&mut *password).into()))
+}
+
 /// Dispatch to the correct backend based on `kind`.
 ///
 /// # Errors
@@ -24,12 +74,7 @@ pub(crate) fn resolve_backend(kind: &BackendKind) -> Result<SecretValue, Resolve
         BackendKind::Env { var } => resolve_env(var),
         BackendKind::File { path, opt_in } => resolve_file(path, *opt_in),
         BackendKind::Age { path, identity } => resolve_age(path, identity.as_deref()),
-        BackendKind::Keyring { .. } => {
-            // Task 3 — keyring backend. Not implemented in this task.
-            Err(ResolveError::BackendUnavailable {
-                backend: "keyring".into(),
-            })
-        }
+        BackendKind::Keyring { id } => resolve_keyring(id),
         BackendKind::PasswordManager { .. } => {
             // Task 5 — password-manager targeted-dispatch backend.
             // The router is wired by mote-runtime; here we cannot call it without
@@ -69,10 +114,14 @@ fn resolve_file(path: &std::path::Path, opt_in: bool) -> Result<SecretValue, Res
         });
     }
 
-    let mut content = std::fs::read_to_string(path).map_err(|e| ResolveError::Io {
-        path: path.to_owned(),
-        source: e,
-    })?;
+    // WHY: content holds the raw secret plaintext — must zeroize on drop so it
+    // is cleared even if we return early or the caller unwinds before
+    // SecretString takes ownership.
+    let mut content: Zeroizing<String> =
+        Zeroizing::new(std::fs::read_to_string(path).map_err(|e| ResolveError::Io {
+            path: path.to_owned(),
+            source: e,
+        })?);
 
     // Strip exactly one trailing newline (editors commonly add one).
     if content.ends_with('\n') {
@@ -82,7 +131,7 @@ fn resolve_file(path: &std::path::Path, opt_in: bool) -> Result<SecretValue, Res
         }
     }
 
-    Ok(SecretString::new(content.into()))
+    Ok(SecretString::new(std::mem::take(&mut *content).into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -340,17 +389,70 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // stub backend tests
+    // keyring backend tests
     // -----------------------------------------------------------------------
 
+    /// In a headless environment (no Secret Service daemon) the backend returns
+    /// `BackendUnavailable` (mapped from `keyring::Error::NoStorageAccess`).
+    /// This covers the default `cargo test` path where no GNOME Keyring / `DBus`
+    /// session bus is available.
     #[test]
-    fn keyring_returns_backend_unavailable() {
+    fn keyring_no_daemon_returns_backend_unavailable() {
+        // Use a name that is extremely unlikely to exist so `NoEntry` is not
+        // the path in environments where a keyring IS available.
         let kind = BackendKind::Keyring {
-            id: "svc/acct".into(),
+            id: "mote-test-svc-xzxzxz/acct-xzxzxz-0000".into(),
         };
-        let err = resolve_backend(&kind).expect_err("keyring is a stub");
-        assert!(matches!(err, ResolveError::BackendUnavailable { .. }));
+        let result = resolve_backend(&kind);
+        match result {
+            // No daemon → BackendUnavailable; daemon up but no entry → NotFound.
+            // Both are valid outcomes depending on environment.
+            Err(ResolveError::BackendUnavailable { .. } | ResolveError::NotFound { .. }) => {}
+            Ok(_) => panic!("expected an error for a non-existent keyring entry"),
+            Err(other) => panic!("unexpected error variant: {other}"),
+        }
     }
+
+    /// Full round-trip: store a secret via `keyring`, resolve it via
+    /// `resolve_backend`, assert equality, then clean up.
+    ///
+    /// Requires a running Secret Service daemon (GNOME Keyring or equivalent)
+    /// with an unlocked login keyring and a live `DBus` session bus.
+    ///
+    /// **Run manually** when the daemon is available:
+    /// ```sh
+    /// cargo test -p mote-secrets -- --ignored keyring_roundtrip_live
+    /// ```
+    #[test]
+    #[ignore = "requires a live Secret Service daemon and DBus session bus"]
+    fn keyring_roundtrip_live() {
+        use secrecy::ExposeSecret as _;
+
+        let service = "mote-test-secrets-task3";
+        let account = "roundtrip-test";
+        let id = format!("{service}/{account}");
+        let expected = "task3_live_secret_value_42";
+
+        // Store the secret directly via the keyring crate.
+        let entry = keyring::Entry::new(service, account).expect("should create keyring entry");
+        entry
+            .set_password(expected)
+            .expect("should set password in keyring");
+
+        // Resolve via the backend under test.
+        let kind = BackendKind::Keyring { id };
+        let val = resolve_backend(&kind).expect("should resolve the stored secret");
+        assert_eq!(val.expose_secret(), expected);
+
+        // Clean up: delete the entry so tests are idempotent.
+        entry
+            .delete_credential()
+            .expect("should delete keyring entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // stub backend test
+    // -----------------------------------------------------------------------
 
     #[test]
     fn password_manager_returns_backend_unavailable() {

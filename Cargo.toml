@@ -49,6 +49,11 @@ zeroize = "1.8"
 # File encryption/decryption (identity-file backend). Default features only;
 # no async, no passphrase, no SSH — D3 from the Phase-4 design doc.
 age = "0.11"
+# OS keyring via DBus Secret Service (GNOME Keyring / KDE Wallet on Linux).
+# Features: sync-secret-service = DBus Secret Service protocol (no async, no
+# OpenSSL — pure-Rust crypto); linux-native not used here (kernel keyring, not
+# Secret Service). Versioned at the latest 3.x stable; 4.x has a different API.
+keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.
