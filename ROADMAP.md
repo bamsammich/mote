@@ -84,15 +84,15 @@ The infrastructure that makes plugins dotfile-driven and reproducible.
 
 The substrate for plugin credentials.
 
-- [ ] `secrets.lua` parsing
-- [ ] Backend: `keyring` (OS-native; macOS Keychain, Linux Secret Service)
-- [ ] Backend: `password-manager` (routes to `secret:provider` plugin)
-- [ ] Backend: `age` (encrypted file with user-unlocked key)
-- [ ] Backend: `env` (environment variable)
-- [ ] Backend: `file` (plaintext, opt-in only)
-- [ ] Per-secret permission grants (`secret:read:<name>`)
-- [ ] Integrity panel surfaces which plugin reads which secret with revoke controls
-- [ ] Per-identity `secrets.lua` override
+- [x] `secrets.lua` parsing
+- [x] Backend: `keyring` (OS-native; macOS Keychain, Linux Secret Service)
+- [x] Backend: `password-manager` (routes to `secret:provider` plugin)
+- [x] Backend: `age` (encrypted file with user-unlocked key)
+- [x] Backend: `env` (environment variable)
+- [x] Backend: `file` (plaintext, opt-in only)
+- [x] Per-secret permission grants (`secret:read:<name>`)
+- [x] Integrity panel surfaces which plugin reads which secret with revoke controls
+- [x] Per-identity `secrets.lua` override
 
 ### Phase 5 — First-party plugins (Tier 1)
 
