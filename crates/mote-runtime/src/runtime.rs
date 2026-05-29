@@ -169,42 +169,6 @@ impl Runtime {
         self.resolver = resolver;
     }
 
-    /// Reads a module-level field from a loaded plugin's Lua state and
-    /// converts it to a `String`.
-    ///
-    /// Returns `None` if the plugin is not loaded or the field cannot be read.
-    /// The conversion rules mirror the test assertions:
-    /// - `nil`   → `Some("")`
-    /// - string  → `Some(value)`
-    /// - integer → `Some(decimal string)`
-    /// - other   → `None`
-    ///
-    /// This method is provided for integration tests; it is not part of the
-    /// public plugin-facing surface.
-    #[must_use]
-    pub fn eval_plugin_field(&self, plugin_name: &str, field: &str) -> Option<String> {
-        let name = PluginName::new(plugin_name).ok()?;
-        self.core.with_mut(|state| {
-            let rec = state.plugins.get(&name)?;
-            let val: mote_lua::Value = rec.module.raw_get(field).ok()?;
-            match val {
-                mote_lua::Value::Nil => Some(String::new()),
-                mote_lua::Value::String(s) => Some(s.to_str().ok()?.to_owned()),
-                mote_lua::Value::Integer(n) => Some(n.to_string()),
-                mote_lua::Value::Number(f) => {
-                    // Display as integer when there is no fractional part.
-                    if f.fract() == 0.0 {
-                        #[allow(clippy::cast_possible_truncation)]
-                        Some((f as i64).to_string())
-                    } else {
-                        Some(f.to_string())
-                    }
-                }
-                _ => None,
-            }
-        })
-    }
-
     /// Dispatches a filter-chain hook (`net:intercept_request`, …) through the
     /// engine to every registered plugin handler, returning the resolved
     /// outcome (DESIGN §Hook dispatch patterns: first-block-wins,

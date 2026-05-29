@@ -539,6 +539,16 @@ fn invoke_capability_on_targets_named_provider_only() {
 
 // ---------------------------------------------------------------------------
 // Task 6: secrets.get host API gated on secret:read:<name>
+//
+// Behavior is observed through filter-chain dispatch, mirroring the idiom
+// established in the rest of this file: assertions go through the AUDIT TRAIL
+// and DISPATCH OUTCOMES, never through raw module-field readback.
+//
+// Each test plugin declares `net:intercept_request` so its hook registers, and
+// returns `{ action = "modify", payload = <value> }` from that hook.
+// `dispatch_filter_chain` surfaces the handler's return as
+// `ChainResolution::Allowed { payload: <HostValue> }`, making the secret value
+// (or nil) observable without any extra public API on the runtime.
 // ---------------------------------------------------------------------------
 
 /// Build a `SecretResolver` backed by a single env-var secret. The env var
@@ -556,79 +566,6 @@ fn env_resolver(secret_name: &str, var: &str) -> mote_secrets::SecretResolver {
     )
 }
 
-/// A plugin granted `secret:read:MY_SECRET` that reads the secret in `setup()`.
-const SECRETS_READER_SRC: &str = r#"
-local M = {}
-M.manifest = {
-  schema = "v1",
-  name = "secrets-reader",
-  version = "1.0.0",
-  permissions = { "secret:read:MY_SECRET" },
-  identity_scope = "global",
-}
-M.last_value = nil
-function M.setup()
-  M.last_value = secrets.get("MY_SECRET")
-end
-return M
-"#;
-
-/// A plugin WITHOUT `secret:read:MY_SECRET` — secrets.get must return nil.
-const SECRETS_READER_UNGRANTED_SRC: &str = r#"
-local M = {}
-M.manifest = {
-  schema = "v1",
-  name = "secrets-reader-ungranted",
-  version = "1.0.0",
-  permissions = {},
-  identity_scope = "global",
-}
-M.last_value = "SENTINEL"
-function M.setup()
-  M.last_value = secrets.get("MY_SECRET")
-end
-return M
-"#;
-
-/// A GRANTED plugin reading an undefined name — must return nil, no panic.
-const SECRETS_READER_UNKNOWN_NAME_SRC: &str = r#"
-local M = {}
-M.manifest = {
-  schema = "v1",
-  name = "secrets-reader-unknown",
-  version = "1.0.0",
-  permissions = { "secret:read:UNDEFINED_KEY" },
-  identity_scope = "global",
-}
-M.last_value = "SENTINEL"
-function M.setup()
-  M.last_value = secrets.get("UNDEFINED_KEY")
-end
-return M
-"#;
-
-/// A plugin that tries to call `secrets.list` and enumerate `secrets` via
-/// `pairs()` — proves no enumeration surface is exposed.
-const SECRETS_NO_ENUMERATE_SRC: &str = r#"
-local M = {}
-M.manifest = {
-  schema = "v1",
-  name = "secrets-no-enumerate",
-  version = "1.0.0",
-  permissions = { "secret:read:MY_SECRET" },
-  identity_scope = "global",
-}
-M.list_result = "SENTINEL"
-M.key_count = -1
-function M.setup()
-  M.list_result = secrets.list
-  local count = 0
-  for _ in pairs(secrets) do count = count + 1 end
-  M.key_count = count
-end
-return M
-"#;
-
 /// Build a runtime pre-loaded with the given resolver.
 fn make_runtime_with_resolver(resolver: mote_secrets::SecretResolver) -> (Runtime, AuditLog) {
     let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
@@ -644,7 +581,101 @@ fn make_runtime_with_resolver(resolver: mote_secrets::SecretResolver) -> (Runtim
     (runtime, log)
 }
 
-/// (T6-1) GRANTED plugin reading an env-backed secret gets the resolved value.
+/// Granted plugin: reads `MY_SECRET` from the hook and returns it as the
+/// modified payload.  Uses `net:intercept_request` so the hook registers.
+const SECRETS_GRANTED_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-granted",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "secret:read:MY_SECRET" },
+  identity_scope = "global",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    return { action = "modify", payload = secrets.get("MY_SECRET") }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Ungranted plugin: same hook, but NO `secret:read:MY_SECRET`.
+/// `secrets.get` must return nil; the payload propagates that nil.
+const SECRETS_UNGRANTED_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-ungranted",
+  version = "1.0.0",
+  permissions = { "net:intercept_request" },
+  identity_scope = "global",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    return { action = "modify", payload = secrets.get("MY_SECRET") }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Granted plugin reading a name that has NO def in the resolver — must return
+/// nil from the hook payload (no panic).
+const SECRETS_UNDEFINED_NAME_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-undefined-name",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "secret:read:UNDEFINED_KEY" },
+  identity_scope = "global",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    return { action = "modify", payload = secrets.get("UNDEFINED_KEY") }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Plugin that probes for the enumeration surface:
+/// - `secrets.list == nil` → payload is `true`  (list does not exist — good)
+/// - payload is `false` if `secrets.list` somehow exists
+///
+/// Additionally wraps the key count in the modify payload so the test can
+/// confirm exactly one key (`get`) is reachable via `pairs(secrets)`.
+/// The payload is a Lua boolean for the `list == nil` check; the key-count
+/// check is done separately by asserting the count embedded in the payload.
+///
+/// Strategy: return the string `"list_nil=<bool>,count=<n>"` as the payload so
+/// both observations travel through a single dispatch call.
+const SECRETS_NO_ENUMERATE_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-no-enumerate",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "secret:read:MY_SECRET" },
+  identity_scope = "global",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    local list_nil = (secrets.list == nil)
+    local count = 0
+    for _ in pairs(secrets) do count = count + 1 end
+    return { action = "modify", payload = "list_nil=" .. tostring(list_nil) .. ",count=" .. tostring(count) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// (T6-1) GRANTED plugin: `secrets.get("MY_SECRET")` returns the env-backed
+/// value as the filter-chain modify payload.  Audit records Allow with
+/// `detail` containing the backend label.
 #[test]
 fn secrets_get_granted_returns_value() {
     let home = std::env::var("HOME").expect("HOME must be set");
@@ -652,53 +683,79 @@ fn secrets_get_granted_returns_value() {
     let policy = GrantAsRequested;
 
     runtime
-        .load(SECRETS_READER_SRC, identity(), &policy)
-        .expect("secrets-reader must load");
+        .load(SECRETS_GRANTED_SRC, identity(), &policy)
+        .expect("secrets-granted must load");
 
-    let val = runtime
-        .eval_plugin_field("secrets-reader", "last_value")
-        .expect("last_value must be readable after setup()");
+    let outcome = runtime.dispatch_filter_chain("net:intercept_request", HostValue::Nil);
+    match outcome.resolution {
+        ChainResolution::Allowed { payload } => {
+            assert_eq!(
+                payload,
+                HostValue::Str(home),
+                "secrets.get must return the resolved env-backed secret value as the payload"
+            );
+        }
+        other @ ChainResolution::Blocked { .. } => panic!("expected Allowed, got {other:?}"),
+    }
 
-    assert_eq!(
-        val, home,
-        "secrets.get must return the resolved secret value"
-    );
-
-    // Audit: Allow recorded for secret:read:MY_SECRET.
+    // Audit: exactly one Allow for secret:read:MY_SECRET, with backend:env detail.
     drain(&log);
     let history = log.query().history().expect("audit history");
+    let allow_events: Vec<_> = history
+        .iter()
+        .filter(|e| {
+            e.plugin.as_str() == "secrets-granted"
+                && e.operation == "secret:read:MY_SECRET"
+                && e.decision == AuditDecision::Allow
+        })
+        .collect();
     assert!(
-        history.iter().any(|e| e.plugin.as_str() == "secrets-reader"
-            && e.operation == "secret:read:MY_SECRET"
-            && e.decision == AuditDecision::Allow),
+        !allow_events.is_empty(),
         "a successful secrets.get must record Allow for secret:read:MY_SECRET"
+    );
+    assert!(
+        allow_events
+            .iter()
+            .any(|e| e.detail.as_deref().is_some_and(|d| d.contains("env"))),
+        "the Allow audit must carry the backend label in its detail; \
+         events: {allow_events:?}"
     );
 
     log.shutdown().expect("audit log shuts down cleanly");
 }
 
-/// (T6-2) UNGRANTED plugin: secrets.get returns nil and records a Deny.
+/// (T6-2) UNGRANTED plugin: `secrets.get` returns nil → payload is
+/// `HostValue::Nil`.  Gate records a Deny for `secret:read:MY_SECRET`.
 #[test]
 fn secrets_get_ungranted_returns_nil_and_denies() {
     let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
     let policy = GrantAsRequested;
 
     runtime
-        .load(SECRETS_READER_UNGRANTED_SRC, identity(), &policy)
-        .expect("secrets-reader-ungranted must load");
+        .load(SECRETS_UNGRANTED_SRC, identity(), &policy)
+        .expect("secrets-ungranted must load");
 
-    // nil from Lua → empty string from eval_plugin_field.
-    let val = runtime
-        .eval_plugin_field("secrets-reader-ungranted", "last_value")
-        .expect("last_value field must be readable");
-    assert_eq!(val, "", "secrets.get without grant must return nil");
+    let outcome = runtime.dispatch_filter_chain("net:intercept_request", HostValue::Nil);
+    match outcome.resolution {
+        ChainResolution::Allowed { payload } => {
+            assert_eq!(
+                payload,
+                HostValue::Nil,
+                "secrets.get without the grant must yield nil as the payload"
+            );
+        }
+        other @ ChainResolution::Blocked { .. } => {
+            panic!("expected Allowed (with nil payload), got {other:?}")
+        }
+    }
 
+    // Audit: a Deny for secret:read:MY_SECRET under the ungranted plugin.
     drain(&log);
     let history = log.query().history().expect("audit history");
     assert!(
         history
             .iter()
-            .any(|e| e.plugin.as_str() == "secrets-reader-ungranted"
+            .any(|e| e.plugin.as_str() == "secrets-ungranted"
                 && e.operation == "secret:read:MY_SECRET"
                 && e.decision == AuditDecision::Deny),
         "an ungranted secrets.get must record Deny for secret:read:MY_SECRET"
@@ -707,26 +764,38 @@ fn secrets_get_ungranted_returns_nil_and_denies() {
     log.shutdown().expect("audit log shuts down cleanly");
 }
 
-/// (T6-3) GRANTED plugin reading an undefined name returns nil — no panic.
+/// (T6-3) GRANTED plugin reading a name with no def → nil payload, no panic.
+/// The Allow audit is still recorded (the permission was granted; the resolver
+/// simply has no def for the key).
 #[test]
 fn secrets_get_undefined_name_returns_nil() {
     let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
     let policy = GrantAsRequested;
 
     runtime
-        .load(SECRETS_READER_UNKNOWN_NAME_SRC, identity(), &policy)
-        .expect("secrets-reader-unknown must load");
+        .load(SECRETS_UNDEFINED_NAME_SRC, identity(), &policy)
+        .expect("secrets-undefined-name must load");
 
-    let val = runtime
-        .eval_plugin_field("secrets-reader-unknown", "last_value")
-        .expect("last_value field must be readable");
-    assert_eq!(val, "", "secrets.get for an undefined name must return nil");
+    let outcome = runtime.dispatch_filter_chain("net:intercept_request", HostValue::Nil);
+    match outcome.resolution {
+        ChainResolution::Allowed { payload } => {
+            assert_eq!(
+                payload,
+                HostValue::Nil,
+                "secrets.get for an undefined name must yield nil — no panic"
+            );
+        }
+        other @ ChainResolution::Blocked { .. } => {
+            panic!("expected Allowed with nil payload, got {other:?}")
+        }
+    }
 
     log.shutdown().expect("audit log shuts down cleanly");
 }
 
 /// (T6-4) No enumeration surface: `secrets.list` is nil; `pairs(secrets)`
-/// yields exactly one key (`get`).
+/// yields exactly one key (`get`).  Both observations are surfaced through
+/// the filter-chain modify payload so no extra public API is needed.
 #[test]
 fn secrets_table_has_only_get_no_enumerate() {
     let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
@@ -736,18 +805,23 @@ fn secrets_table_has_only_get_no_enumerate() {
         .load(SECRETS_NO_ENUMERATE_SRC, identity(), &policy)
         .expect("secrets-no-enumerate must load");
 
-    let list_val = runtime
-        .eval_plugin_field("secrets-no-enumerate", "list_result")
-        .expect("list_result must be readable");
-    assert_eq!(list_val, "", "secrets.list must not exist (nil)");
-
-    let key_count = runtime
-        .eval_plugin_field("secrets-no-enumerate", "key_count")
-        .expect("key_count must be readable");
-    assert_eq!(
-        key_count, "1",
-        "secrets table must have exactly 1 key ('get'), got key_count={key_count}"
-    );
+    let outcome = runtime.dispatch_filter_chain("net:intercept_request", HostValue::Nil);
+    match outcome.resolution {
+        ChainResolution::Allowed { payload } => {
+            let HostValue::Str(report) = payload else {
+                panic!("expected a string payload from the enumerate probe, got {payload:?}");
+            };
+            assert!(
+                report.contains("list_nil=true"),
+                "secrets.list must not exist (nil); probe returned: {report}"
+            );
+            assert!(
+                report.contains("count=1"),
+                "secrets table must expose exactly one key ('get'); probe returned: {report}"
+            );
+        }
+        other @ ChainResolution::Blocked { .. } => panic!("expected Allowed, got {other:?}"),
+    }
 
     log.shutdown().expect("audit log shuts down cleanly");
 }
