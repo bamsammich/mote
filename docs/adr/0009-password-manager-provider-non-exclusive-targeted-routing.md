@@ -1,6 +1,6 @@
 # ADR-0009 — `password-manager:provider` is Non-Exclusive; Secret/Provider Routing is Targeted, Not Fan-Out
 
-- **Status:** Proposed
+- **Status:** Accepted (approved by the maintainer 2026-05-28)
 - **Date:** 2026-05-28
 
 ---
@@ -69,6 +69,9 @@ single explicitly-named fulfiller — never fan-out.**
 - Bad, because it adds a targeted-invocation path (`invoke_capability_on`) alongside the
   existing exclusive/fan-out shapes; bounded — it is a thin filter over the same per-fulfiller
   invocation machinery, used only by the secret route in v0.1.
+- Bounded scope: `invoke_capability_on` is introduced **only** for the secret route in v0.1.
+  It is not a general-purpose primitive; any future caller (e.g. Phase-5 autofill) that wants
+  targeted dispatch requires its own recorded decision rather than silently reusing this path.
 - Requires reconciling DESIGN.md (6 exclusivity assertions + the routing paragraph), the
   registry (`password-manager:provider` composability; `secret:provider` description), and
   risk B7 (marked resolved).

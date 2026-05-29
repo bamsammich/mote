@@ -81,6 +81,24 @@ Per-name last-wins across calls and across global→identity overlay. Unknown ba
 missing required field, or `file` without `opt_in = true` → a config-load error naming
 the offending secret; non-fatal to the browser (ADR-0007 posture).
 
+### 4a. Canonical config file set & ownership (recorded here, not in ADR-0006)
+
+> The adr-review gate (2026-05-28) noted that `secrets.lua`'s location and ownership are
+> not captured in an authoritative decision record. ADR-0006 is Accepted and must not be
+> edited, so the canonical set is recorded here for future sessions/engineers. ADR-0006
+> remains the governing decision for the *read-only-user-config / managed-mutation-layer*
+> principle; this table only enumerates the files that principle applies to.
+
+| File | Location | Owner | Mote writes? |
+|------|----------|-------|--------------|
+| `plugins.lua` | `~/.config/mote/` (+ `identities/<id>/`) | User-authored | No (read-only, ADR-0006) |
+| `secrets.lua` | `~/.config/mote/` (+ `identities/<id>/`) — **NOT in dotfiles** (carries references, never values; lives beside `plugins.lua`) | User-authored | No (read-only, ADR-0006) |
+| `managed.lua` | `~/.config/mote/` | **Mote-managed** | Yes — the managed mutation layer (grants, approvals, Phase-3 narrowing, per-secret revoke) |
+| `plugins.lock` | `~/.config/mote/` | Mote-generated lockfile | Yes |
+
+Per-secret revoke (this phase) writes to the **managed layer**, never to user-authored
+`secrets.lua` — see §8 and ADR-0006.
+
 ## 5. Resolution flow
 
 1. Plugin Lua calls `secrets.get("anthropic_api_key")`.
