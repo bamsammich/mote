@@ -16,6 +16,7 @@ ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 
 | [0006](0006-user-config-read-only-to-mote.md) | User Config is Read-Only to Mote; Mutations Go to a Managed Layer | Accepted |
 | [0007](0007-plugin-management-ui-privileged-async-approval.md) | Plugin Management UI: Privileged-Chrome Surfaces with Async Approval | Accepted |
 | [0008](0008-approval-carve-outs-bundled-and-dev-mode.md) | Approval Carve-Outs: Bundled and Dev-Mode Plugins Auto-Approve | Accepted |
+| [0009](0009-password-manager-provider-non-exclusive-targeted-routing.md) | `password-manager:provider` Non-Exclusive; Secret/Provider Routing is Targeted | Proposed |
 
 ## Numbering convention
 
