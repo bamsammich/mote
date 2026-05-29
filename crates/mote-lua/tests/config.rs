@@ -1,12 +1,13 @@
-//! Config-Lua context tests (Phase 3, work unit 3.1d).
+//! Config-Lua context tests (Phase 3, work unit 3.1d; Phase 4, Task 1).
 //!
 //! These tests cover the restricted config sandbox exposed by
 //! [`mote_lua::eval_config`]. The config context is a *separate* restricted
 //! sandbox from the plugin sandbox: it exposes only `mote.plugins`,
-//! `mote.dev_mode`, and `mote.updates.configure`, and nothing from the plugin
-//! host API (no permission declarations, no event hooks, no capability surfaces).
+//! `mote.dev_mode`, `mote.updates.configure`, and `mote.secrets.define`, and
+//! nothing from the plugin host API (no permission declarations, no event
+//! hooks, no capability surfaces).
 
-use mote_lua::{ConfigError, UpdateCadence, eval_config};
+use mote_lua::{ConfigError, SecretParam, UpdateCadence, eval_config};
 
 // ---------------------------------------------------------------------------
 // Representative plugins.lua → correct ConfigSpec
@@ -486,4 +487,146 @@ mote.plugins({})
         matches!(err, ConfigError::Evaluate(_)),
         "expected Evaluate error, got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 Task 1: mote.secrets.define parser
+// ---------------------------------------------------------------------------
+
+/// Basic happy path: one secret with a string param.
+#[test]
+fn secrets_define_single_entry_with_string_param() {
+    let source = r#"
+mote.secrets.define({
+  k = { backend = "env", var = "X" },
+})
+"#;
+    let spec = eval_config(source, "secrets.lua").expect("parses");
+    assert_eq!(spec.secrets.len(), 1);
+    let entry = &spec.secrets[0];
+    assert_eq!(entry.name, "k");
+    assert_eq!(entry.backend, "env");
+    assert_eq!(
+        entry.params.get("var"),
+        Some(&SecretParam::Str("X".to_owned()))
+    );
+}
+
+/// A boolean param (`opt_in = true`) is captured as `Bool(true)`.
+#[test]
+fn secrets_define_captures_bool_param() {
+    let source = r#"
+mote.secrets.define({
+  my_file_secret = { backend = "file", path = "/run/secrets/key", opt_in = true },
+})
+"#;
+    let spec = eval_config(source, "secrets.lua").expect("parses");
+    assert_eq!(spec.secrets.len(), 1);
+    let entry = &spec.secrets[0];
+    assert_eq!(entry.backend, "file");
+    assert_eq!(entry.params.get("opt_in"), Some(&SecretParam::Bool(true)));
+    assert_eq!(
+        entry.params.get("path"),
+        Some(&SecretParam::Str("/run/secrets/key".to_owned()))
+    );
+}
+
+/// Missing `backend` field → `MissingSecretBackend` error naming the secret.
+#[test]
+fn secrets_define_missing_backend_is_clear_error() {
+    let source = r#"
+mote.secrets.define({
+  my_secret = { var = "X" },
+})
+"#;
+    let err = eval_config(source, "secrets.lua").expect_err("missing backend must error");
+    assert!(
+        matches!(&err, ConfigError::MissingSecretBackend { name } if name == "my_secret"),
+        "expected MissingSecretBackend for 'my_secret', got {err:?}"
+    );
+}
+
+/// Non-table entry → `BadSecretEntry` error naming the secret.
+#[test]
+fn secrets_define_non_table_entry_is_clear_error() {
+    let source = r#"
+mote.secrets.define({
+  bad_secret = "not-a-table",
+})
+"#;
+    let err = eval_config(source, "secrets.lua").expect_err("non-table entry must error");
+    assert!(
+        matches!(&err, ConfigError::BadSecretEntry { name, .. } if name == "bad_secret"),
+        "expected BadSecretEntry for 'bad_secret', got {err:?}"
+    );
+}
+
+/// Non-string, non-bool param value → `BadSecretEntry` error.
+#[test]
+fn secrets_define_unsupported_param_type_is_clear_error() {
+    let source = r#"
+mote.secrets.define({
+  weird = { backend = "env", var = 42 },
+})
+"#;
+    let err = eval_config(source, "secrets.lua").expect_err("unsupported param type must error");
+    assert!(
+        matches!(&err, ConfigError::BadSecretEntry { name, .. } if name == "weird"),
+        "expected BadSecretEntry for 'weird', got {err:?}"
+    );
+}
+
+/// Two `define` calls with the same name → later wins.
+#[test]
+fn secrets_define_repeated_name_later_wins() {
+    let source = r#"
+mote.secrets.define({
+  api_key = { backend = "env", var = "OLD_VAR" },
+})
+mote.secrets.define({
+  api_key = { backend = "keyring", id = "mote/api_key" },
+})
+"#;
+    let spec = eval_config(source, "secrets.lua").expect("parses");
+    assert_eq!(spec.secrets.len(), 1, "same name → only one entry");
+    let entry = &spec.secrets[0];
+    assert_eq!(entry.backend, "keyring");
+    assert_eq!(
+        entry.params.get("id"),
+        Some(&SecretParam::Str("mote/api_key".to_owned()))
+    );
+}
+
+/// Two `define` calls with different names → both accumulate.
+#[test]
+fn secrets_define_different_names_accumulate() {
+    let source = r#"
+mote.secrets.define({
+  first  = { backend = "env", var = "FIRST" },
+})
+mote.secrets.define({
+  second = { backend = "env", var = "SECOND" },
+})
+"#;
+    let spec = eval_config(source, "secrets.lua").expect("parses");
+    assert_eq!(spec.secrets.len(), 2, "two distinct names → two entries");
+    let names: Vec<&str> = spec.secrets.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"first"));
+    assert!(names.contains(&"second"));
+}
+
+/// A `secrets.lua` that only calls `mote.secrets.define` → `plugins` is empty.
+#[test]
+fn secrets_only_config_gives_empty_plugins() {
+    let source = r#"
+mote.secrets.define({
+  anthropic_key = { backend = "env", var = "ANTHROPIC_API_KEY" },
+})
+"#;
+    let spec = eval_config(source, "secrets.lua").expect("parses");
+    assert!(
+        spec.plugins.is_empty(),
+        "no mote.plugins call → empty plugins"
+    );
+    assert_eq!(spec.secrets.len(), 1);
 }

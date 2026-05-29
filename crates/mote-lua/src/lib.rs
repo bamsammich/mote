@@ -33,11 +33,12 @@
 //!    returned values MUST be read with raw accessors.
 //!
 //! 4. A **restricted config-Lua context** ([`eval_config`]) that evaluates a
-//!    user config chunk (e.g. `plugins.lua`) in a sandboxed state with the same
-//!    hardening as the plugin sandbox but exposing **only** config-capture
-//!    functions (`mote.plugins`, `mote.dev_mode`, `mote.updates.configure`) and
-//!    **no** plugin host API. Returns a typed [`ConfigSpec`] capturing the
-//!    declared plugin set, dev-mode config, and update policy.
+//!    user config chunk (e.g. `plugins.lua` or `secrets.lua`) in a sandboxed
+//!    state with the same hardening as the plugin sandbox but exposing **only**
+//!    config-capture functions (`mote.plugins`, `mote.dev_mode`,
+//!    `mote.updates.configure`, `mote.secrets.define`) and **no** plugin host
+//!    API. Returns a typed [`ConfigSpec`] capturing the declared plugin set,
+//!    dev-mode config, update policy, and raw secret declarations.
 //!
 //! Registry validation of `permissions` / `capabilities` / `consumes`
 //! (Enforcement step 1) and contract conformance (step 3) live in
@@ -51,7 +52,8 @@ mod load;
 mod sandbox;
 
 pub use config::{
-    ConfigError, ConfigSpec, DevModeConfig, PluginEntry, UpdateCadence, UpdatesConfig, eval_config,
+    ConfigError, ConfigSpec, DevModeConfig, PluginEntry, SecretEntry, SecretParam, UpdateCadence,
+    UpdatesConfig, eval_config,
 };
 pub use error::{HookInvokeError, LuaError};
 pub use invoke::{HookTable, call_function_with_deadline, call_hook_with_deadline};

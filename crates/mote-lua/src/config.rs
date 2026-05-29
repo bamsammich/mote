@@ -1,9 +1,10 @@
-//! Restricted config-Lua context for evaluating `plugins.lua`.
+//! Restricted config-Lua context for evaluating `plugins.lua` and
+//! `secrets.lua`.
 //!
 //! This module provides [`eval_config`], which evaluates a user config chunk
-//! (e.g. the contents of `~/.config/mote/plugins.lua`) in a **restricted
-//! sandbox** that is separate from the plugin sandbox
-//! ([`crate::sandbox::new_sandbox`]).
+//! (e.g. the contents of `~/.config/mote/plugins.lua` or
+//! `~/.config/mote/secrets.lua`) in a **restricted sandbox** that is separate
+//! from the plugin sandbox ([`crate::sandbox::new_sandbox`]).
 //!
 //! ## How it differs from the plugin sandbox
 //!
@@ -11,13 +12,14 @@
 //! `ffi`, and all dynamic-loading globals (`load`, `loadstring`, `loadfile`,
 //! `dofile`, `require`) are removed. The config sandbox additionally exposes
 //! **no plugin host API at all** (no `mote.on`, no event hooks, no capability
-//! surface). Instead it exposes only three config-capture functions:
+//! surface). Instead it exposes only four config-capture functions:
 //!
 //! | Function | What it does |
 //! |---|---|
 //! | `mote.plugins({ key = { source = "…", version = "…"? }, … })` | Captures the plugin declarations |
 //! | `mote.dev_mode({ directories = {…}, plugins = {…} })` | Captures dev-mode dirs/plugins |
 //! | `mote.updates.configure({ check_first_party = "weekly"\|"daily"\|"never" })` | Captures update cadence |
+//! | `mote.secrets.define({ name = { backend = "…", … }, … })` | Captures raw secret declarations |
 //!
 //! These functions are Rust closures that record their argument into shared
 //! state; they have **no side effects on the browser** — they only capture.
@@ -135,9 +137,40 @@ pub struct UpdatesConfig {
     pub check_first_party: UpdateCadence,
 }
 
+/// A raw parameter value from a secret entry.
+///
+/// The parser stays backend-agnostic; `mote-secrets` interprets these per
+/// backend. Only string and boolean values are accepted — other Lua types
+/// are rejected at parse time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretParam {
+    /// A string parameter value.
+    Str(String),
+    /// A boolean parameter value.
+    Bool(bool),
+}
+
+/// A single secret declared in `secrets.lua` via `mote.secrets.define({…})`.
+///
+/// `name` is the map key; `backend` and `params` are raw — typed and validated
+/// by `mote-pluginmgr`/`mote-secrets`, not here (mirrors [`PluginEntry`] where
+/// `source` stays raw).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretEntry {
+    /// The secret's logical name as written in the `mote.secrets.define` table.
+    pub name: String,
+    /// The raw backend identifier, e.g. `"env"`, `"keyring"`, `"file"`,
+    /// `"age"`, `"password-manager"`. Validated by downstream crates.
+    pub backend: String,
+    /// All remaining fields from the entry table, captured as raw param values.
+    /// Keys are field names; values are [`SecretParam::Str`] or
+    /// [`SecretParam::Bool`].
+    pub params: std::collections::BTreeMap<String, SecretParam>,
+}
+
 /// The fully-typed result of evaluating a `plugins.lua` config chunk.
 ///
-/// All three config functions contribute to this struct. Fields that were never
+/// All config functions contribute to this struct. Fields that were never
 /// called retain their defaults (see each field's documentation).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigSpec {
@@ -148,6 +181,8 @@ pub struct ConfigSpec {
     pub dev_mode: DevModeConfig,
     /// Update policy. Defaults to `check_first_party = "weekly"`.
     pub updates: UpdatesConfig,
+    /// Secret declarations. Empty if `mote.secrets.define` was never called.
+    pub secrets: Vec<SecretEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +237,24 @@ pub enum ConfigError {
     )]
     InvalidUpdateCadence(String),
 
+    /// An entry in `mote.secrets.define({…})` had a non-table value, or one
+    /// of its parameter fields had an unsupported type (neither string nor bool).
+    #[error("secret entry `{name}` is malformed: {got}")]
+    BadSecretEntry {
+        /// The Lua key of the offending secret entry.
+        name: String,
+        /// Description of the problem (e.g. the unexpected type).
+        got: String,
+    },
+
+    /// An entry in `mote.secrets.define({…})` was missing the required
+    /// `backend` field.
+    #[error("secret entry `{name}` is missing the required `backend` field")]
+    MissingSecretBackend {
+        /// The Lua key of the offending secret entry.
+        name: String,
+    },
+
     /// An unexpected Lua operation failed (e.g. a metamethod error while
     /// reading a field).
     #[error("unexpected Lua error while reading config: {0}")]
@@ -219,6 +272,7 @@ struct Capture {
     plugins: Vec<PluginEntry>,
     dev_mode: DevModeConfig,
     updates: UpdatesConfig,
+    secrets: Vec<SecretEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -398,12 +452,106 @@ fn make_configure_fn(lua: &Lua, capture: &Rc<RefCell<Capture>>) -> Result<Functi
     .map_err(ConfigError::Lua)
 }
 
+/// Builds the `mote.secrets.define` capture closure.
+///
+/// Mirrors `make_plugins_fn`: iterates the outer table (key = secret name);
+/// each value must be a table with a required string `backend`; all other
+/// fields are collected into `params` (`Value::String` → [`SecretParam::Str`],
+/// `Value::Boolean` → [`SecretParam::Bool`]; other types → runtime error).
+/// Same-name-later-wins accumulation mirrors the plugins behaviour.
+fn make_secrets_fn(lua: &Lua, capture: &Rc<RefCell<Capture>>) -> Result<Function, ConfigError> {
+    let cap = Rc::clone(capture);
+    lua.create_function(move |_lua, arg: Value| {
+        let Value::Table(t) = arg else {
+            return Err(mlua::Error::runtime(format!(
+                "`mote.secrets.define` requires a table argument, got {}",
+                arg.type_name()
+            )));
+        };
+        let mut entries = Vec::new();
+        for pair in t.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let name = match &k {
+                Value::String(s) => s.to_str()?.to_owned(),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "secret key must be a string, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let Value::Table(entry_tbl) = v else {
+                return Err(mlua::Error::runtime(format!(
+                    "secret entry `{name}` must be a table, got {}",
+                    v.type_name()
+                )));
+            };
+            // Extract required `backend` field.
+            let backend_val: Value = entry_tbl.get("backend")?;
+            let backend = match backend_val {
+                Value::String(s) => s.to_str()?.to_owned(),
+                Value::Nil => {
+                    return Err(mlua::Error::runtime(format!(
+                        "secret entry `{name}` is missing the required `backend` field"
+                    )));
+                }
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "secret entry `{name}` `backend` must be a string, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            // Collect remaining fields into params.
+            let mut params = std::collections::BTreeMap::new();
+            for field_pair in entry_tbl.pairs::<Value, Value>() {
+                let (fk, fv) = field_pair?;
+                let field_name = match &fk {
+                    Value::String(s) => s.to_str()?.to_owned(),
+                    _ => continue, // non-string keys are ignored
+                };
+                if field_name == "backend" {
+                    continue; // already extracted
+                }
+                let param = match fv {
+                    Value::String(s) => SecretParam::Str(s.to_str()?.to_owned()),
+                    Value::Boolean(b) => SecretParam::Bool(b),
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "secret entry `{name}` param `{field_name}` must be a string or \
+                             boolean, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                params.insert(field_name, param);
+            }
+            entries.push(SecretEntry {
+                name,
+                backend,
+                params,
+            });
+        }
+        // Accumulate with same-name-later-wins (mirrors make_plugins_fn).
+        let mut cap_mut = cap.borrow_mut();
+        for entry in entries {
+            if let Some(existing) = cap_mut.secrets.iter_mut().find(|e| e.name == entry.name) {
+                *existing = entry;
+            } else {
+                cap_mut.secrets.push(entry);
+            }
+        }
+        Ok(())
+    })
+    .map_err(ConfigError::Lua)
+}
+
 // ---------------------------------------------------------------------------
 // API installation
 // ---------------------------------------------------------------------------
 
-/// Installs the `mote.plugins`, `mote.dev_mode`, and `mote.updates.configure`
-/// closures into `lua`, wired to `capture`.
+/// Installs the `mote.plugins`, `mote.dev_mode`, `mote.updates.configure`,
+/// and `mote.secrets.define` closures into `lua`, wired to `capture`.
 ///
 /// All closures are Rust functions (not Lua functions) that validate their
 /// argument and record into `capture`. They have **no side effects on the
@@ -425,6 +573,13 @@ fn install_config_api(lua: &Lua, capture: &Rc<RefCell<Capture>>) -> Result<(), C
         .set("configure", make_configure_fn(lua, capture)?)
         .map_err(ConfigError::Lua)?;
     mote.set("updates", updates_tbl).map_err(ConfigError::Lua)?;
+
+    // mote.secrets is a sub-table with a `define` function.
+    let secrets_tbl: Table = lua.create_table().map_err(ConfigError::Lua)?;
+    secrets_tbl
+        .set("define", make_secrets_fn(lua, capture)?)
+        .map_err(ConfigError::Lua)?;
+    mote.set("secrets", secrets_tbl).map_err(ConfigError::Lua)?;
 
     globals.set("mote", mote).map_err(ConfigError::Lua)?;
     Ok(())
@@ -522,6 +677,29 @@ fn classify_lua_error(err: mlua::Error) -> ConfigError {
         return ConfigError::InvalidUpdateCadence(value);
     }
 
+    // "secret entry `<name>` must be a table, got <type>"
+    // "secret entry `<name>` `backend` must be a string, got <type>"
+    // "secret entry `<name>` param `<field>` must be a string or boolean, got <type>"
+    if msg.contains("secret entry `")
+        && msg.contains("must be")
+        && let Some(name) = extract_key_from_message(&msg, "secret entry `", "`")
+    {
+        let got = msg
+            .split("got ")
+            .last()
+            .unwrap_or("unknown")
+            .trim()
+            .to_owned();
+        return ConfigError::BadSecretEntry { name, got };
+    }
+
+    // "secret entry `<name>` is missing the required `backend` field"
+    if msg.contains("is missing the required `backend` field")
+        && let Some(name) = extract_key_from_message(&msg, "secret entry `", "`")
+    {
+        return ConfigError::MissingSecretBackend { name };
+    }
+
     ConfigError::Evaluate(err)
 }
 
@@ -613,5 +791,6 @@ pub fn eval_config(source: &str, chunk_name: &str) -> Result<ConfigSpec, ConfigE
         plugins: cap.plugins.clone(),
         dev_mode: cap.dev_mode.clone(),
         updates: cap.updates.clone(),
+        secrets: cap.secrets.clone(),
     })
 }
