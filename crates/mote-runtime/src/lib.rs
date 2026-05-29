@@ -97,6 +97,7 @@ pub(crate) mod hostapi;
 pub(crate) mod invoker;
 pub(crate) mod marshal;
 pub(crate) mod runtime;
+pub(crate) mod secrets_router;
 pub(crate) mod value;
 
 pub use approval::{Approval, ApprovalHash, ApprovalPolicy, GrantAsRequested, Narrowing};

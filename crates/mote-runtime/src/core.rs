@@ -415,6 +415,119 @@ impl Core {
         InvokeOutcome::Multi { dispatch, results }
     }
 
+    /// Invokes `function` on the SINGLE fulfiller named `provider`
+    /// (ADR-0009: explicit, no fan-out).
+    ///
+    /// Performs the same capability-in-registry and function-in-contract
+    /// validation as [`invoke_capability`](Self::invoke_capability) — the
+    /// S1 confused-deputy guard is **not** skipped on the targeted path.
+    /// After validation it filters the fulfiller set to the one plugin named
+    /// `provider` and calls only that plugin via
+    /// [`call_api_function`](Self::call_api_function) (the same low-level
+    /// primitive the exclusive/non-exclusive paths use). If `provider` is not
+    /// among the registered fulfillers for `capability`, returns
+    /// [`InvokeOutcome::NoFulfiller`].
+    ///
+    /// This method is **only** for the `secret:provider` route (ADR-0009
+    /// §bounded-scope). Any future targeted caller requires its own recorded
+    /// decision rather than silently reusing this path.
+    pub(crate) fn invoke_capability_on(
+        &self,
+        caller: &PluginName,
+        provider: &PluginName,
+        capability: &str,
+        function: &str,
+        arg: &HostValue,
+        audit: &EventProducer,
+    ) -> InvokeOutcome {
+        // --- capability-in-registry check (same as invoke_capability) ----------
+        let Some(cap_entry) = self.capabilities.get(capability) else {
+            audit.record(
+                AuditEvent::new(
+                    caller.clone(),
+                    format!("{capability}:{function}"),
+                    AuditDecision::Deny,
+                )
+                .with_detail(format!(
+                    "invoked_via ({caller} -> {capability}) targeted on {provider}: \
+                     capability is not in the registry"
+                )),
+            );
+            return InvokeOutcome::NotInContract;
+        };
+
+        // --- function-in-contract check (S1 confused-deputy defence) -----------
+        // This check is performed BEFORE the fulfiller lookup so the targeted
+        // path cannot be used to invoke out-of-contract functions on a specific
+        // plugin either.
+        let in_contract = cap_entry
+            .contract
+            .required_api
+            .iter()
+            .any(|f| f == function);
+        if !in_contract {
+            audit.record(
+                AuditEvent::new(
+                    caller.clone(),
+                    format!("{capability}:{function}"),
+                    AuditDecision::Deny,
+                )
+                .with_detail(format!(
+                    "invoked_via ({caller} -> {capability}) targeted on {provider}: \
+                     function `{function}` is not in the capability contract"
+                )),
+            );
+            return InvokeOutcome::NotInContract;
+        }
+
+        // --- resolve the fulfiller set and filter to the named provider --------
+        let resolved = {
+            let state = self.inner.borrow();
+            // `fulfillers_for` covers both exclusive and non-exclusive caps.
+            let fulfillers = state.capabilities.fulfillers_for(capability);
+            if fulfillers.iter().any(|f| f == provider) {
+                state
+                    .plugins
+                    .get(provider)
+                    .map(|rec| (provider.clone(), rec.lua.clone(), rec.module.clone()))
+            } else {
+                None
+            }
+        };
+
+        let Some((fulfiller, lua, module)) = resolved else {
+            return InvokeOutcome::NoFulfiller;
+        };
+
+        // --- invoke the single fulfiller via the shared primitive --------------
+        let chain = format!("invoked_via ({caller} -> {capability}) targeted on {provider}");
+        let operation = format!("{capability}:{function}");
+
+        match Self::call_api_function(&lua, &module, function, arg) {
+            CallResult::Ok(ret) => {
+                audit.record(
+                    AuditEvent::new(fulfiller, operation, AuditDecision::Allow).with_detail(chain),
+                );
+                InvokeOutcome::Ok(ret)
+            }
+            CallResult::NoSuchFunction => InvokeOutcome::NoSuchFunction,
+            CallResult::Timeout => {
+                audit.record(
+                    AuditEvent::new(fulfiller, operation, AuditDecision::Deny)
+                        .with_detail(format!("{chain}: deadline exceeded, interrupted")),
+                );
+                InvokeOutcome::Timeout
+            }
+            CallResult::Failed(reason) => {
+                audit.record(
+                    AuditEvent::new(fulfiller, operation, AuditDecision::Deny)
+                        .with_detail(format!("{chain}: {reason}")),
+                );
+                InvokeOutcome::Failed
+            }
+        }
+    }
+
     /// Calls `M.api[function](arg)` in `lua` under a deadline.
     ///
     /// This is the shared low-level call primitive used by both

@@ -4,7 +4,7 @@
 //! `password-manager` backend so that `mote-runtime` can implement the
 //! targeted `invoke_capability_on` path without creating a dependency cycle.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, rc::Rc};
 
 use crate::{ResolveError, SecretDef, SecretValue, backend::resolve_backend, def::BackendKind};
 
@@ -14,7 +14,14 @@ use crate::{ResolveError, SecretDef, SecretValue, backend::resolve_backend, def:
 ///
 /// The trait is defined here so `mote-secrets` stays free of any
 /// `mote-runtime` dependency (avoiding a cycle).
-pub trait SecretProviderRouter: std::fmt::Debug + Send + Sync {
+///
+/// # Threading
+///
+/// The runtime core is single-threaded (`Rc<RefCell<…>>`), so this trait
+/// does **not** require `Send + Sync`.  The resolver is used only from the
+/// single Lua-host-API thread; use [`Rc`] rather than `Arc` for the router
+/// field in [`SecretResolver`].
+pub trait SecretProviderRouter: std::fmt::Debug {
     /// Resolve `reference` against the named `provider` plugin.
     ///
     /// # Errors
@@ -34,7 +41,7 @@ pub struct SecretResolver {
     defs: BTreeMap<String, SecretDef>,
     /// Router for `password-manager` secrets. `None` until a PM route is
     /// configured (Task 5).
-    router: Option<Arc<dyn SecretProviderRouter>>,
+    router: Option<Rc<dyn SecretProviderRouter>>,
 }
 
 impl SecretResolver {
@@ -43,7 +50,7 @@ impl SecretResolver {
     #[must_use]
     pub fn new(
         defs: impl IntoIterator<Item = SecretDef>,
-        router: Option<Arc<dyn SecretProviderRouter>>,
+        router: Option<Rc<dyn SecretProviderRouter>>,
     ) -> Self {
         Self {
             defs: defs.into_iter().map(|d| (d.name.clone(), d)).collect(),
@@ -256,12 +263,12 @@ mod tests {
             }
         }
 
-        let router = Arc::new(CapturingRouter {
+        let router = Rc::new(CapturingRouter {
             captured: Mutex::new(None),
         });
         // Keep a typed clone for reading back the captured args after resolve().
-        let router_ref = Arc::clone(&router);
-        let router_dyn: Arc<dyn SecretProviderRouter> = router;
+        let router_ref = Rc::clone(&router);
+        let router_dyn: Rc<dyn SecretProviderRouter> = router;
         let resolver = SecretResolver::new(
             [SecretDef {
                 name: "pm".into(),

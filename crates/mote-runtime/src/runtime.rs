@@ -27,6 +27,7 @@
 //! any step discards the loaded module without ever running it.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use mote_audit::EventProducer;
 use mote_dispatch::{
@@ -36,6 +37,7 @@ use mote_dispatch::{
 use mote_lua::{IdentityScope as ManifestIdentityScope, LoadedPlugin, Manifest, load_plugin};
 use mote_permissions::{EffectiveGrants, GrantSet, GrantSetGatekeeper, Permission};
 use mote_registry::{EventDispatch, Registry};
+use mote_secrets::SecretProviderRouter;
 use mote_storage::{IdentityScope as StorageScope, Store};
 use mote_types::{IdentityId, PluginName};
 
@@ -45,6 +47,7 @@ use crate::core::{Core, PluginRecord};
 use crate::error::{LifecycleError, LoadError};
 use crate::hostapi::{self, HostContext};
 use crate::invoker::RuntimeInvoker;
+use crate::secrets_router::RuntimeSecretRouter;
 
 /// The dispatch engine specialized to the runtime's host payload, the runtime's
 /// core-backed invoker, and a null dispatch audit (the host-API audit trail —
@@ -179,6 +182,21 @@ impl Runtime {
     #[must_use]
     pub const fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Build a [`SecretProviderRouter`] backed by this runtime's
+    /// [`Core::invoke_capability_on`] targeted dispatch (ADR-0009).
+    ///
+    /// Pass the returned `Rc` to
+    /// [`SecretResolver::new`](mote_secrets::SecretResolver::new) so that
+    /// `password-manager` secrets route to the named `secret:provider`
+    /// fulfiller rather than fan-out.  Uses `Rc` because the runtime core is
+    /// single-threaded (`Rc<RefCell<…>>`); the router must be used from the
+    /// same thread as the runtime.  The router holds a cheap clone of the
+    /// shared core handle; keeping it alive does not prevent unloading plugins.
+    #[must_use]
+    pub fn make_secret_router(&self) -> Rc<dyn SecretProviderRouter> {
+        RuntimeSecretRouter::new(self.core.clone(), self.audit.clone()).into_rc()
     }
 
     /// Whether a plugin with `name` is auto-disabled by the dispatch engine

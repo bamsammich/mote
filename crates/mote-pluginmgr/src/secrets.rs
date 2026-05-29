@@ -21,7 +21,7 @@
 //! wires up the optional PM router.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use mote_lua::{SecretEntry, SecretParam};
 use mote_secrets::{BackendKind, SecretDef, SecretProviderRouter, SecretResolver};
@@ -244,7 +244,7 @@ pub fn convert_secret(entry: &SecretEntry) -> Result<SecretDef, SecretConvertErr
 pub fn build_secret_resolver(
     config_dir: &Path,
     identity: Option<&IdentityId>,
-    router: Option<Arc<dyn SecretProviderRouter>>,
+    router: Option<Rc<dyn SecretProviderRouter>>,
 ) -> Result<(SecretResolver, Vec<SecretConvertError>), crate::manager::ManagerError> {
     let entries = composed_secrets_config(config_dir, identity)?;
 

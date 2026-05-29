@@ -20,6 +20,7 @@
 //! 6. A dangling-consumer plugin fails to load.
 //! 7. An exclusive-capability double-claim fails to load.
 
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
@@ -28,8 +29,10 @@ use mote_registry::Registry;
 use mote_runtime::{
     ChainResolution, GrantAsRequested, HostValue, IdentityContext, LoadError, Runtime,
 };
+use mote_secrets::{ResolveError, SecretProviderRouter};
 use mote_storage::Store;
 use mote_types::{IdentityId, PluginName, SchemaVersion};
+use secrecy::ExposeSecret as _;
 
 /// The capability fulfiller: provides `password-manager-form-services`. Its
 /// contract requires `show_autofill_picker` + `inject_isolated` in `M.api` and
@@ -399,6 +402,137 @@ fn two_password_manager_providers_coexist() {
     // Both are simultaneously loaded.
     assert!(runtime.is_loaded(&plugin("pm-provider-a")));
     assert!(runtime.is_loaded(&plugin("pm-provider-b")));
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+// ---------------------------------------------------------------------------
+// Task 5: invoke_capability_on targeted dispatch + SecretProviderRouter impl
+// ---------------------------------------------------------------------------
+
+/// First `secret:provider` fulfiller.  Its `resolve_secret` returns a
+/// distinctive string so the test can prove WHICH provider was reached.
+const SECRET_PROVIDER_A_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "sp-provider-a",
+  version = "1.0.0",
+  permissions = {},
+  capabilities = { "secret:provider" },
+  identity_scope = "global",
+}
+M.api = {
+  resolve_secret = function(reference) return "from-provider-a:" .. reference end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Second `secret:provider` fulfiller.  Returns a DIFFERENT value for the same
+/// reference — proves that only the targeted provider was consulted.
+const SECRET_PROVIDER_B_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "sp-provider-b",
+  version = "1.0.0",
+  permissions = {},
+  capabilities = { "secret:provider" },
+  identity_scope = "global",
+}
+M.api = {
+  resolve_secret = function(reference) return "from-provider-b:" .. reference end,
+}
+function M.setup() end
+return M
+"#;
+
+/// **Targeted-not-other:** `invoke_capability_on` through the runtime's
+/// `SecretProviderRouter` impl hits EXACTLY the named provider; the other
+/// provider is never consulted (proven by the audit log having no record for it).
+///
+/// Also covers: naming an unloaded provider → `ResolveError::ProviderNotLoaded`.
+#[test]
+fn invoke_capability_on_targets_named_provider_only() {
+    let (mut runtime, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+
+    // Load both providers — both must load without error (non-exclusive).
+    runtime
+        .load(SECRET_PROVIDER_A_SRC, identity(), &policy)
+        .expect("sp-provider-a loads");
+    runtime
+        .load(SECRET_PROVIDER_B_SRC, identity(), &policy)
+        .expect("sp-provider-b loads");
+    assert!(runtime.is_loaded(&plugin("sp-provider-a")));
+    assert!(runtime.is_loaded(&plugin("sp-provider-b")));
+
+    // Build the runtime-backed SecretProviderRouter (the Task-5 impl).
+    let router: Rc<dyn SecretProviderRouter> = runtime.make_secret_router();
+
+    // --- targeted: provider A is asked, B must NOT be called ----------------
+    let val_a = router
+        .resolve("sp-provider-a", "myref")
+        .expect("provider-a should resolve");
+    assert_eq!(
+        val_a.expose_secret(),
+        "from-provider-a:myref",
+        "router must return the value from the NAMED provider (A)"
+    );
+
+    // Give the audit thread time to drain then assert B left no trace.
+    drain(&log);
+    let history = log.query().history().expect("audit history");
+    let b_records: Vec<_> = history
+        .iter()
+        .filter(|e| e.plugin.as_str() == "sp-provider-b")
+        .collect();
+    assert!(
+        b_records.is_empty(),
+        "sp-provider-b must NEVER be invoked when A is targeted; \
+         found audit records for B: {b_records:?}"
+    );
+
+    // --- targeted the other way: provider B is asked, A must NOT be called --
+    // Reset log history by flushing and re-reading from a fresh snapshot point.
+    // We can't clear the log, so instead we count ONLY newly-added entries by
+    // snapshotting the length before the second call.
+    let history_before = log.query().history().expect("history before B call");
+    let a_count_before = history_before
+        .iter()
+        .filter(|e| e.plugin.as_str() == "sp-provider-a")
+        .count();
+
+    let val_b = router
+        .resolve("sp-provider-b", "myref")
+        .expect("provider-b should resolve");
+    assert_eq!(
+        val_b.expose_secret(),
+        "from-provider-b:myref",
+        "router must return the value from the NAMED provider (B)"
+    );
+
+    drain(&log);
+    let history_after = log.query().history().expect("history after B call");
+    let a_count_after = history_after
+        .iter()
+        .filter(|e| e.plugin.as_str() == "sp-provider-a")
+        .count();
+    assert_eq!(
+        a_count_before, a_count_after,
+        "sp-provider-a must NOT be invoked when B is targeted; \
+         new A records appeared after targeting B"
+    );
+
+    // --- provider not loaded → ProviderNotLoaded --------------------------
+    let err = router
+        .resolve("nonexistent-pm", "ref")
+        .expect_err("nonexistent provider must return an error");
+    assert!(
+        matches!(err, ResolveError::ProviderNotLoaded { .. }),
+        "unloaded/unknown provider must yield ProviderNotLoaded, got {err:?}"
+    );
 
     log.shutdown().expect("audit log shuts down cleanly");
 }
