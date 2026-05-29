@@ -16,6 +16,7 @@ workspace = true
 mote-types = { path = "../mote-types" }
 mote-lua = { path = "../mote-lua" }
 mote-runtime = { path = "../mote-runtime" }
+mote-secrets = { path = "../mote-secrets" }
 mote-storage = { path = "../mote-storage" }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
@@ -30,3 +31,6 @@ gix = { version = "0.84", default-features = false, features = [
   "sha1",
 ] }
 tempfile = "3"
+
+[dev-dependencies]
+secrecy.workspace = true

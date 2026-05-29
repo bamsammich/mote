@@ -35,6 +35,7 @@ pub mod manager;
 pub mod provenance;
 pub mod resolve;
 pub mod resolved;
+pub mod secrets;
 pub mod source;
 
 pub use approval_store::{ApprovalStore, ApprovalStoreError};
@@ -52,4 +53,7 @@ pub use manager::{
 pub use provenance::Provenance;
 pub use resolve::{PluginSpec, PluginSpecSet, ResolveError, compose, load_order};
 pub use resolved::ResolvedPlugin;
+pub use secrets::{
+    SecretConvertError, build_secret_resolver, composed_secrets_config, convert_secret,
+};
 pub use source::{Source, SourceParseError};
