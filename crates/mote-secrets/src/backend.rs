@@ -8,6 +8,7 @@
 use std::io::Read as _;
 
 use secrecy::SecretString;
+use zeroize::Zeroizing;
 
 use crate::{BackendKind, ResolveError, SecretValue};
 
@@ -104,10 +105,13 @@ fn resolve_age(
     }
 
     // Read the identity file.
-    let id_content = std::fs::read_to_string(id_path).map_err(|e| ResolveError::Io {
-        path: id_path.to_owned(),
-        source: e,
-    })?;
+    // WHY: id_content holds the raw bech32 private key — must zeroize on drop.
+    let id_content: Zeroizing<String> = Zeroizing::new(std::fs::read_to_string(id_path).map_err(
+        |e| ResolveError::Io {
+            path: id_path.to_owned(),
+            source: e,
+        },
+    )?);
 
     // Parse the first X25519 identity from the file, skipping comments/blanks.
     let identity = id_content
@@ -150,7 +154,9 @@ fn resolve_age(
         });
     }
 
-    let mut plaintext = String::new();
+    // WHY: plaintext holds the decrypted secret — must zeroize on drop, including
+    // the partial-read-then-error path where SecretString is never constructed.
+    let mut plaintext: Zeroizing<String> = Zeroizing::new(String::new());
     decryptor
         .decrypt(std::iter::once::<&dyn age::Identity>(&identity))
         .map_err(|e| ResolveError::Decrypt {
@@ -163,7 +169,8 @@ fn resolve_age(
             source: e,
         })?;
 
-    Ok(SecretString::new(plaintext.into()))
+    // Move the inner String out so only SecretString owns (and zeroizes) it.
+    Ok(SecretString::new(std::mem::take(&mut *plaintext).into()))
 }
 
 /// Returns the default `age` identity path: `~/.config/mote/secrets/key.txt`.
