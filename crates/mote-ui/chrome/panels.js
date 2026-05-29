@@ -283,6 +283,62 @@
       card.appendChild(perms);
     }
 
+    // secret access rows: each secret the plugin may read, with the backend
+    // it resolves through and a per-secret revoke keycap. Driven by p.secrets
+    // (not p.actions) so each row carries its own name for the targeted
+    // plugin_revoke_secret op. All plugin-derived strings go through el()'s
+    // textContent path, so a hostile secret name renders as inert text.
+    if (Array.isArray(p.secrets) && p.secrets.length > 0) {
+      var secWrap = el("div", {
+        class: "plugin-secrets",
+        attrs: { "aria-label": "secret access" },
+      });
+      secWrap.appendChild(el("div", {
+        class: "secret-list-label",
+        text: "secret access",
+      }));
+      var secList = el("ul", {
+        class: "secret-list",
+        attrs: { role: "list", "aria-label": "secret access list" },
+      });
+      for (var s = 0; s < p.secrets.length; s++) {
+        var sec = p.secrets[s] || {};
+        var secName = String(sec.name || "");
+        var srow = el("li", { class: "secret-row", attrs: { role: "listitem" } });
+        srow.appendChild(el("span", {
+          class: "secret-dot",
+          attrs: { "aria-hidden": "true" },
+          text: "•",
+        }));
+        srow.appendChild(el("span", { class: "secret-name", text: secName }));
+        srow.appendChild(el("span", {
+          class: "secret-backend",
+          text: String(sec.backend || "unknown"),
+        }));
+        if (sec.last_read) {
+          srow.appendChild(el("span", {
+            class: "secret-last-read",
+            text: String(sec.last_read),
+          }));
+        }
+        var revokeBtn = el("button", {
+          class: "btn btn-ghost secret-revoke",
+          attrs: {
+            type: "button",
+            "aria-label": "revoke secret " + secName + " from " + String(p.name || ""),
+            "data-plugin": String(p.name || ""),
+            "data-secret": secName,
+          },
+          text: "revoke",
+        });
+        revokeBtn.addEventListener("click", secretRevokeDispatcher(p.name, secName));
+        srow.appendChild(revokeBtn);
+        secList.appendChild(srow);
+      }
+      secWrap.appendChild(secList);
+      card.appendChild(secWrap);
+    }
+
     // last-used line
     if (p.last_used) {
       var lu = el("div", { class: "plugin-last-used" });
@@ -346,6 +402,18 @@
       }
       if (!op || !window.mote || !window.mote.invoke) return;
       window.mote.invoke(op, { plugin: String(plugin) }).catch(function () {});
+    };
+  }
+
+  // Per-secret revoke: the targeted analogue of plugin_revoke. Carries both the
+  // plugin and the specific secret name so the shell narrows secret:read down
+  // to the remaining grants (ADR-0009: explicit, never fan-out).
+  function secretRevokeDispatcher(plugin, name) {
+    return function () {
+      if (!window.mote || !window.mote.invoke) return;
+      window.mote
+        .invoke("plugin_revoke_secret", { plugin: String(plugin), name: String(name) })
+        .catch(function () {});
     };
   }
 

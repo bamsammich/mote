@@ -116,6 +116,30 @@
             </ul>
           </div>
 
+          <!-- Secret access: granted secrets + per-secret revoke -->
+          <div class="plugin-secrets" aria-label="secret access">
+            <div class="secret-list-label">secret access</div>
+            <ul class="secret-list" role="list" aria-label="secret access list">
+              <li class="secret-row" role="listitem">
+                <span class="secret-dot" aria-hidden="true">•</span>
+                <span class="secret-name">github_token</span>
+                <span class="secret-backend">keyring</span>
+                <span class="secret-last-read">2 minutes ago</span>
+                <button class="btn btn-ghost secret-revoke" aria-label="revoke secret github_token from password-manager-1password" type="button">
+                  revoke
+                </button>
+              </li>
+              <li class="secret-row" role="listitem">
+                <span class="secret-dot" aria-hidden="true">•</span>
+                <span class="secret-name">openai_api_key</span>
+                <span class="secret-backend">age</span>
+                <button class="btn btn-ghost secret-revoke" aria-label="revoke secret openai_api_key from password-manager-1password" type="button">
+                  revoke
+                </button>
+              </li>
+            </ul>
+          </div>
+
           <div class="plugin-last-used">
             <span class="last-used-label">last used</span>
             <span class="last-used-value">2 minutes ago</span>

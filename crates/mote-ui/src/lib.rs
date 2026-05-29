@@ -845,6 +845,14 @@ mod tests {
             *source = "evil\"</span><script>1</script>".into();
         }
         panel.network_audit[0].detail = Some("</td><script>fetch('//x')</script>".into());
+        // A hostile secret name must survive verbatim through the data model:
+        // the chrome renders it via textContent (buildPluginCard secret rows),
+        // so the literal characters stay inert text and never execute.
+        panel.plugins[0].secrets = vec![SecretAccessRow {
+            name: "</li><script>steal()</script>".into(),
+            backend: "env".into(),
+            last_read: Some("just now".into()),
+        }];
 
         let json = serde_json::to_string(&panel).expect("serialize must succeed");
 
@@ -852,9 +860,14 @@ mod tests {
         // bit-exact through deserialize. The grep tests on PANELS_JS prove the
         // only chrome write path is textContent — so the strings stay inert.
         assert!(json.contains("<script>alert('xss')</script>"));
+        assert!(json.contains("</li><script>steal()</script>"));
         let parsed: IntegrityPanel =
             serde_json::from_str(&json).expect("malicious payload must round-trip");
         assert_eq!(parsed.plugins[0].name, panel.plugins[0].name);
+        assert_eq!(
+            parsed.plugins[0].secrets[0].name,
+            panel.plugins[0].secrets[0].name
+        );
     }
 
     // ---- UiHost seam (in-memory implementor) ----

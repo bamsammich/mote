@@ -260,6 +260,84 @@
   text-decoration: line-through;
 }
 
+/* ---- Secret access list ---- */
+
+.plugin-secrets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plugin-secrets .secret-list-label {
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+}
+
+.secret-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+}
+
+.secret-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-mono-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.secret-row:last-child {
+  border-bottom: none;
+}
+
+.secret-row:nth-child(even) {
+  background: var(--surface-sunk);
+}
+
+.secret-row .secret-dot {
+  color: var(--fg-3);
+  flex: none;
+}
+
+.secret-row .secret-name {
+  color: var(--fg-1);
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* backend badge: env / file / age / keyring / password-manager / unknown */
+.secret-row .secret-backend {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  padding: 1px 6px;
+  flex: none;
+}
+
+.secret-row .secret-last-read {
+  color: var(--fg-3);
+  flex: none;
+}
+
+/* per-secret revoke: compact destructive keycap */
+.secret-row .secret-revoke {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  font: var(--text-micro);
+  font-weight: 500;
+}
+
 /* ---- Last-used timestamp ---- */
 
 .plugin-last-used {
