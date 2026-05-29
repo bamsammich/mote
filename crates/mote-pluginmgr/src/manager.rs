@@ -234,13 +234,6 @@ pub enum ManagerError {
         /// The problematic path.
         path: PathBuf,
     },
-
-    /// The secrets backend is not available in Phase 3.
-    #[error(
-        "secrets backend (mote plugin link) lands in Phase 4; \
-         `mote-secrets` is not yet wired"
-    )]
-    SecretsNotAvailable,
 }
 
 impl ManagerError {
@@ -1828,18 +1821,6 @@ impl PluginManager {
         self.approval.put(name, &hash)?;
         Ok(())
     }
-
-    /// Phase 4 stub: the `mote plugin link <secret>` operation is not available
-    /// until `mote-secrets` lands in Phase 4.
-    ///
-    /// Always returns [`ManagerError::SecretsNotAvailable`].
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`ManagerError::SecretsNotAvailable`].
-    pub const fn link(&self, _secret: &str) -> Result<(), ManagerError> {
-        Err(ManagerError::SecretsNotAvailable)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2964,19 +2945,6 @@ return M
     }
 
     // -----------------------------------------------------------------------
-    // link: Phase 4 stub returns SecretsNotAvailable
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn link_returns_secrets_not_available() {
-        let f = fixture();
-        let result = f.mgr.link("my-secret");
-        assert!(
-            matches!(result, Err(ManagerError::SecretsNotAvailable)),
-            "link must return SecretsNotAvailable before Phase 4"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // import --write regression: appending to a plugins.lua that already
     // declares a different plugin produces the UNION via eval_config
