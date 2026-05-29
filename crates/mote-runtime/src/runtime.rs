@@ -37,7 +37,7 @@ use mote_dispatch::{
 use mote_lua::{IdentityScope as ManifestIdentityScope, LoadedPlugin, Manifest, load_plugin};
 use mote_permissions::{EffectiveGrants, GrantSet, GrantSetGatekeeper, Permission};
 use mote_registry::{EventDispatch, Registry};
-use mote_secrets::SecretProviderRouter;
+use mote_secrets::{SecretProviderRouter, SecretResolver};
 use mote_storage::{IdentityScope as StorageScope, Store};
 use mote_types::{IdentityId, PluginName};
 
@@ -117,6 +117,13 @@ pub struct Runtime {
     engine: Engine,
     core: Core,
     loaded: BTreeMap<PluginName, LoadedRecord>,
+    /// The per-identity secret resolver injected at construction or via
+    /// [`set_secret_resolver`](Self::set_secret_resolver).
+    ///
+    /// Defaults to an empty resolver (no definitions) so the runtime compiles
+    /// and tests can inject their own resolver.  Shell-side wiring of the real
+    /// per-identity resolver is a later phase (not part of Task 6).
+    resolver: Rc<SecretResolver>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -131,6 +138,10 @@ impl std::fmt::Debug for Runtime {
 impl Runtime {
     /// Builds a runtime over a loaded [`Registry`], a [`Store`] for per-plugin
     /// storage, and an audit [`EventProducer`].
+    ///
+    /// The secret resolver defaults to empty (no definitions).  Call
+    /// [`set_secret_resolver`](Self::set_secret_resolver) to supply the real
+    /// per-identity resolver before loading plugins that use `secrets.get`.
     #[must_use]
     pub fn new(registry: Registry, store: Store, audit: EventProducer) -> Self {
         let core = Core::new(registry.capabilities().clone());
@@ -143,7 +154,55 @@ impl Runtime {
             engine,
             core,
             loaded: BTreeMap::new(),
+            resolver: Rc::new(SecretResolver::empty()),
         }
+    }
+
+    /// Replaces the secret resolver used for `secrets.get` in subsequently
+    /// loaded plugins.
+    ///
+    /// Plugins already loaded retain the resolver that was active when they
+    /// were loaded (the `Rc` is cloned into each plugin's closure at load
+    /// time).  Reload the plugin after calling this to pick up the new
+    /// resolver.
+    pub fn set_secret_resolver(&mut self, resolver: Rc<SecretResolver>) {
+        self.resolver = resolver;
+    }
+
+    /// Reads a module-level field from a loaded plugin's Lua state and
+    /// converts it to a `String`.
+    ///
+    /// Returns `None` if the plugin is not loaded or the field cannot be read.
+    /// The conversion rules mirror the test assertions:
+    /// - `nil`   → `Some("")`
+    /// - string  → `Some(value)`
+    /// - integer → `Some(decimal string)`
+    /// - other   → `None`
+    ///
+    /// This method is provided for integration tests; it is not part of the
+    /// public plugin-facing surface.
+    #[must_use]
+    pub fn eval_plugin_field(&self, plugin_name: &str, field: &str) -> Option<String> {
+        let name = PluginName::new(plugin_name).ok()?;
+        self.core.with_mut(|state| {
+            let rec = state.plugins.get(&name)?;
+            let val: mote_lua::Value = rec.module.raw_get(field).ok()?;
+            match val {
+                mote_lua::Value::Nil => Some(String::new()),
+                mote_lua::Value::String(s) => Some(s.to_str().ok()?.to_owned()),
+                mote_lua::Value::Integer(n) => Some(n.to_string()),
+                mote_lua::Value::Number(f) => {
+                    // Display as integer when there is no fractional part.
+                    if f.fract() == 0.0 {
+                        #[allow(clippy::cast_possible_truncation)]
+                        Some((f as i64).to_string())
+                    } else {
+                        Some(f.to_string())
+                    }
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Dispatches a filter-chain hook (`net:intercept_request`, …) through the
@@ -525,6 +584,7 @@ impl Runtime {
             storage: namespace,
             audit: self.audit.clone(),
             core: self.core.clone(),
+            resolver: Rc::clone(&self.resolver),
         };
         hostapi::install(&lua, ctx).map_err(LoadError::HostApi)?;
 

@@ -21,9 +21,9 @@ mote-registry = { version = "0.0.0", path = "../mote-registry" }
 mote-secrets = { version = "0.0.0", path = "../mote-secrets" }
 mote-storage = { version = "0.0.0", path = "../mote-storage" }
 mote-types = { version = "0.0.0", path = "../mote-types" }
+secrecy.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-secrecy.workspace = true
 serde_json = "1.0"

@@ -536,3 +536,218 @@ fn invoke_capability_on_targets_named_provider_only() {
 
     log.shutdown().expect("audit log shuts down cleanly");
 }
+
+// ---------------------------------------------------------------------------
+// Task 6: secrets.get host API gated on secret:read:<name>
+// ---------------------------------------------------------------------------
+
+/// Build a `SecretResolver` backed by a single env-var secret. The env var
+/// must already be set in the test process before calling this.
+fn env_resolver(secret_name: &str, var: &str) -> mote_secrets::SecretResolver {
+    use mote_secrets::{BackendKind, SecretDef};
+    mote_secrets::SecretResolver::new(
+        [SecretDef {
+            name: secret_name.to_owned(),
+            backend: BackendKind::Env {
+                var: var.to_owned(),
+            },
+        }],
+        None,
+    )
+}
+
+/// A plugin granted `secret:read:MY_SECRET` that reads the secret in `setup()`.
+const SECRETS_READER_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-reader",
+  version = "1.0.0",
+  permissions = { "secret:read:MY_SECRET" },
+  identity_scope = "global",
+}
+M.last_value = nil
+function M.setup()
+  M.last_value = secrets.get("MY_SECRET")
+end
+return M
+"#;
+
+/// A plugin WITHOUT `secret:read:MY_SECRET` — secrets.get must return nil.
+const SECRETS_READER_UNGRANTED_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-reader-ungranted",
+  version = "1.0.0",
+  permissions = {},
+  identity_scope = "global",
+}
+M.last_value = "SENTINEL"
+function M.setup()
+  M.last_value = secrets.get("MY_SECRET")
+end
+return M
+"#;
+
+/// A GRANTED plugin reading an undefined name — must return nil, no panic.
+const SECRETS_READER_UNKNOWN_NAME_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-reader-unknown",
+  version = "1.0.0",
+  permissions = { "secret:read:UNDEFINED_KEY" },
+  identity_scope = "global",
+}
+M.last_value = "SENTINEL"
+function M.setup()
+  M.last_value = secrets.get("UNDEFINED_KEY")
+end
+return M
+"#;
+
+/// A plugin that tries to call `secrets.list` and enumerate `secrets` via
+/// `pairs()` — proves no enumeration surface is exposed.
+const SECRETS_NO_ENUMERATE_SRC: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "secrets-no-enumerate",
+  version = "1.0.0",
+  permissions = { "secret:read:MY_SECRET" },
+  identity_scope = "global",
+}
+M.list_result = "SENTINEL"
+M.key_count = -1
+function M.setup()
+  M.list_result = secrets.list
+  local count = 0
+  for _ in pairs(secrets) do count = count + 1 end
+  M.key_count = count
+end
+return M
+"#;
+
+/// Build a runtime pre-loaded with the given resolver.
+fn make_runtime_with_resolver(resolver: mote_secrets::SecretResolver) -> (Runtime, AuditLog) {
+    let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+    let store = Store::open_in_memory().expect("in-memory store");
+    let config = Config {
+        ring_capacity: 256,
+        flush_threshold: 1,
+        flush_interval: Duration::from_millis(5),
+    };
+    let log = AuditLog::new(&store, config).expect("audit log starts");
+    let mut runtime = Runtime::new(registry, store, log.producer());
+    runtime.set_secret_resolver(Rc::new(resolver));
+    (runtime, log)
+}
+
+/// (T6-1) GRANTED plugin reading an env-backed secret gets the resolved value.
+#[test]
+fn secrets_get_granted_returns_value() {
+    let home = std::env::var("HOME").expect("HOME must be set");
+    let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
+    let policy = GrantAsRequested;
+
+    runtime
+        .load(SECRETS_READER_SRC, identity(), &policy)
+        .expect("secrets-reader must load");
+
+    let val = runtime
+        .eval_plugin_field("secrets-reader", "last_value")
+        .expect("last_value must be readable after setup()");
+
+    assert_eq!(
+        val, home,
+        "secrets.get must return the resolved secret value"
+    );
+
+    // Audit: Allow recorded for secret:read:MY_SECRET.
+    drain(&log);
+    let history = log.query().history().expect("audit history");
+    assert!(
+        history.iter().any(|e| e.plugin.as_str() == "secrets-reader"
+            && e.operation == "secret:read:MY_SECRET"
+            && e.decision == AuditDecision::Allow),
+        "a successful secrets.get must record Allow for secret:read:MY_SECRET"
+    );
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// (T6-2) UNGRANTED plugin: secrets.get returns nil and records a Deny.
+#[test]
+fn secrets_get_ungranted_returns_nil_and_denies() {
+    let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
+    let policy = GrantAsRequested;
+
+    runtime
+        .load(SECRETS_READER_UNGRANTED_SRC, identity(), &policy)
+        .expect("secrets-reader-ungranted must load");
+
+    // nil from Lua → empty string from eval_plugin_field.
+    let val = runtime
+        .eval_plugin_field("secrets-reader-ungranted", "last_value")
+        .expect("last_value field must be readable");
+    assert_eq!(val, "", "secrets.get without grant must return nil");
+
+    drain(&log);
+    let history = log.query().history().expect("audit history");
+    assert!(
+        history
+            .iter()
+            .any(|e| e.plugin.as_str() == "secrets-reader-ungranted"
+                && e.operation == "secret:read:MY_SECRET"
+                && e.decision == AuditDecision::Deny),
+        "an ungranted secrets.get must record Deny for secret:read:MY_SECRET"
+    );
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// (T6-3) GRANTED plugin reading an undefined name returns nil — no panic.
+#[test]
+fn secrets_get_undefined_name_returns_nil() {
+    let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
+    let policy = GrantAsRequested;
+
+    runtime
+        .load(SECRETS_READER_UNKNOWN_NAME_SRC, identity(), &policy)
+        .expect("secrets-reader-unknown must load");
+
+    let val = runtime
+        .eval_plugin_field("secrets-reader-unknown", "last_value")
+        .expect("last_value field must be readable");
+    assert_eq!(val, "", "secrets.get for an undefined name must return nil");
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// (T6-4) No enumeration surface: `secrets.list` is nil; `pairs(secrets)`
+/// yields exactly one key (`get`).
+#[test]
+fn secrets_table_has_only_get_no_enumerate() {
+    let (mut runtime, mut log) = make_runtime_with_resolver(env_resolver("MY_SECRET", "HOME"));
+    let policy = GrantAsRequested;
+
+    runtime
+        .load(SECRETS_NO_ENUMERATE_SRC, identity(), &policy)
+        .expect("secrets-no-enumerate must load");
+
+    let list_val = runtime
+        .eval_plugin_field("secrets-no-enumerate", "list_result")
+        .expect("list_result must be readable");
+    assert_eq!(list_val, "", "secrets.list must not exist (nil)");
+
+    let key_count = runtime
+        .eval_plugin_field("secrets-no-enumerate", "key_count")
+        .expect("key_count must be readable");
+    assert_eq!(
+        key_count, "1",
+        "secrets table must have exactly 1 key ('get'), got key_count={key_count}"
+    );
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}

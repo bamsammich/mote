@@ -23,16 +23,24 @@
 //!   `tabs:list`, returning an (empty) list (the real tab table is
 //!   `mote-session`, Phase 2+). Present so the gate-and-audit path has a
 //!   concrete host operation in the e2e proof.
+//! - `mote.secrets.get(name)` → resolves the named secret through the
+//!   per-identity [`mote_secrets::SecretResolver`], gated by
+//!   `secret:read:<name>`. Returns the secret value as a Lua string on success;
+//!   `nil` on denial or resolution failure. No enumeration surface is exposed.
 //!
 //! The same tables are also exposed as bare globals (`permissions`, `events`,
 //! `capabilities`, `storage`, `tabs`) because DESIGN's examples call them
 //! unqualified (`events.emit(...)`, `tabs.list()`, `permissions.effective()`).
 
+use std::rc::Rc;
+
 use mote_audit::{AuditEvent, Decision as AuditDecision, EventProducer};
 use mote_lua::{Lua, Value};
 use mote_permissions::{Decision, Gatekeeper, GrantSetGatekeeper};
+use mote_secrets::SecretResolver;
 use mote_storage::Namespace;
 use mote_types::PluginName;
+use secrecy::ExposeSecret as _;
 
 use crate::core::{Core, InvokeOutcome};
 use crate::value::HostValue;
@@ -52,6 +60,13 @@ pub(crate) struct HostContext {
     pub(crate) audit: EventProducer,
     /// Shared runtime core for inter-plugin emit / capability invocation.
     pub(crate) core: Core,
+    /// The per-identity secret resolver for `mote.secrets.get`.
+    ///
+    /// Uses `Rc` because the runtime core is single-threaded; `unsafe` is
+    /// denied workspace-wide so `Arc` is not an option here.  An empty
+    /// resolver (no defs) is the safe default when the shell has not yet
+    /// supplied the real per-identity resolver.
+    pub(crate) resolver: Rc<SecretResolver>,
 }
 
 /// The gate-and-audit unit cloned into each host closure.
@@ -103,6 +118,7 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
         storage: storage_ns,
         audit,
         core,
+        resolver,
     } = ctx;
 
     let gate = Gate {
@@ -275,7 +291,7 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
     // --- tabs.list() (representative gated read) ----------------------------
     let tabs = lua.create_table().map_err(stringify)?;
     {
-        let g = gate; // last use — move
+        let g = gate.clone();
         let list = lua
             .create_function(move |lua, ()| {
                 if !g.check("tabs", "list", "*", None) {
@@ -287,13 +303,72 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
         tabs.set("list", list).map_err(stringify)?;
     }
 
+    // --- secrets.get(name) (DESIGN §5; gated by secret:read:<name>) ---------
+    //
+    // Only `get` is installed — no `list`, no enumeration surface, by design
+    // (DESIGN §Secret Management: plugins may only pull named secrets they were
+    // granted; they may not discover the set of configured secrets).
+    //
+    // Audit semantics (exactly-once per call):
+    //   - Deny path  → Gate::check records a Deny for `secret:read:<name>`.
+    //                   No second record is emitted here.
+    //   - Allow path → Gate::check records an Allow for `secret:read:<name>`
+    //                   with the backend label as the audit detail.
+    //   - Resolve-failure after Allow → returns nil; the Allow audit already
+    //                   reflects that the grant was given.  A resolution error
+    //                   (undefined name / backend error) is not a second event:
+    //                   the guard already allowed the call; the failure is a
+    //                   runtime/config issue, not a policy event.
+    let secrets = lua.create_table().map_err(stringify)?;
+    {
+        let g = gate; // last use — move
+        let get = lua
+            .create_function(move |lua, name: String| {
+                // Look up the backend label BEFORE the gate check so we can
+                // pass it as the audit detail in the Allow path.  `backend_label`
+                // does NOT resolve the value — it only reads the def map, which
+                // is safe to call at any time.
+                let detail = resolver
+                    .backend_label(&name)
+                    .map(|label| format!("backend:{label}"));
+
+                if !g.check("secret", "read", &name, detail) {
+                    return Ok(Value::Nil);
+                }
+
+                // Gate allowed the call.  Resolve the value; return nil on any
+                // error (undefined name / backend unavailable / I/O error).
+                // The plaintext is unwrapped ONLY at the point of constructing
+                // the Lua string and never bound to a named variable that
+                // outlives that expression.
+                match resolver.resolve(&name) {
+                    Ok(secret) => {
+                        // ExposeSecret unwrap is local to this expression.
+                        // The Lua string owns a copy; `secret` is dropped immediately.
+                        Ok(Value::String(lua.create_string(secret.expose_secret())?))
+                    }
+                    Err(_) => Ok(Value::Nil),
+                }
+            })
+            .map_err(stringify)?;
+        secrets.set("get", get).map_err(stringify)?;
+    }
+
     // Assemble mote.* and expose the bare globals DESIGN's examples use.
-    mote_set(lua, &permissions, &storage, &events, &capabilities, &tabs)?;
+    mote_set(
+        lua,
+        &permissions,
+        &storage,
+        &events,
+        &capabilities,
+        &tabs,
+        &secrets,
+    )?;
 
     Ok(())
 }
 
-/// Wires the five sub-tables into a `mote` table and also into bare globals.
+/// Wires the six sub-tables into a `mote` table and also into bare globals.
 fn mote_set(
     lua: &Lua,
     permissions: &mote_lua::Table,
@@ -301,6 +376,7 @@ fn mote_set(
     events: &mote_lua::Table,
     capabilities: &mote_lua::Table,
     tabs: &mote_lua::Table,
+    secrets: &mote_lua::Table,
 ) -> Result<(), String> {
     let mote = lua.create_table().map_err(stringify)?;
     mote.set("permissions", permissions).map_err(stringify)?;
@@ -308,6 +384,7 @@ fn mote_set(
     mote.set("events", events).map_err(stringify)?;
     mote.set("capabilities", capabilities).map_err(stringify)?;
     mote.set("tabs", tabs).map_err(stringify)?;
+    mote.set("secrets", secrets).map_err(stringify)?;
 
     let globals = lua.globals();
     globals.set("mote", mote).map_err(stringify)?;
@@ -318,6 +395,7 @@ fn mote_set(
         .set("capabilities", capabilities)
         .map_err(stringify)?;
     globals.set("tabs", tabs).map_err(stringify)?;
+    globals.set("secrets", secrets).map_err(stringify)?;
     Ok(())
 }
 
