@@ -235,19 +235,33 @@ mod tests {
 
     #[test]
     fn password_manager_with_router_delegates() {
-        /// Fixture router that always returns a fixed value.
+        use std::sync::Mutex;
+
+        /// Fixture router that captures the exact provider/reference args it
+        /// receives so the test can assert that arg-threading is correct.
+        /// This protects Task 5's real router wiring.
         #[derive(Debug)]
-        struct FixtureRouter;
-        impl SecretProviderRouter for FixtureRouter {
+        struct CapturingRouter {
+            captured: Mutex<Option<(String, String)>>,
+        }
+        impl SecretProviderRouter for CapturingRouter {
             fn resolve(
                 &self,
-                _provider: &str,
-                _reference: &str,
+                provider: &str,
+                reference: &str,
             ) -> Result<SecretValue, ResolveError> {
+                *self.captured.lock().expect("lock") =
+                    Some((provider.to_owned(), reference.to_owned()));
                 Ok(secrecy::SecretString::new("from_router".to_string().into()))
             }
         }
 
+        let router = Arc::new(CapturingRouter {
+            captured: Mutex::new(None),
+        });
+        // Keep a typed clone for reading back the captured args after resolve().
+        let router_ref = Arc::clone(&router);
+        let router_dyn: Arc<dyn SecretProviderRouter> = router;
         let resolver = SecretResolver::new(
             [SecretDef {
                 name: "pm".into(),
@@ -256,10 +270,23 @@ mod tests {
                     reference: "vault/item".into(),
                 },
             }],
-            Some(Arc::new(FixtureRouter)),
+            Some(router_dyn),
         );
         let val = resolver.resolve("pm").expect("router should supply value");
         assert_eq!(val.expose_secret(), "from_router");
+
+        // Assert the router received exactly the provider + reference from the SecretDef.
+        let captured = router_ref
+            .captured
+            .lock()
+            .expect("lock")
+            .take()
+            .expect("router must have been called");
+        assert_eq!(
+            captured,
+            ("bw".to_owned(), "vault/item".to_owned()),
+            "router must receive provider and reference from the SecretDef verbatim"
+        );
     }
 
     // -----------------------------------------------------------------------

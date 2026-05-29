@@ -1,6 +1,6 @@
 [package]
 name = "mote-secrets"
-description = "Secret subsystem — secrets.lua parsing, $secret:<name> resolution at plugin-launch, the keyring/password-manager/age/env/file backends, and per-secret permission enforcement with per-identity override."
+description = "Secret subsystem — typed SecretDef definitions, env/file/age backends (keyring + password-manager are stubs pending Tasks 3/5), SecretResolver dispatch, and the SecretProviderRouter API for targeted password-manager fan-out."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

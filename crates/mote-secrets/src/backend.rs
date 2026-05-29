@@ -57,6 +57,11 @@ fn resolve_env(var: &str) -> Result<SecretValue, ResolveError> {
 // ---------------------------------------------------------------------------
 
 /// Read a plain-text secret file (must be explicitly opted-in).
+///
+/// Path expansion (including `~` → home directory) is the CALLER's
+/// responsibility (mote-pluginmgr / Task 7). The design doc's examples use
+/// `~/…` paths, but this backend passes `path` straight to `std::fs` — it does
+/// not expand tildes or env vars.
 fn resolve_file(path: &std::path::Path, opt_in: bool) -> Result<SecretValue, ResolveError> {
     if !opt_in {
         return Err(ResolveError::FileNotOptedIn {

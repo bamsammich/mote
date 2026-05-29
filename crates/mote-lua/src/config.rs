@@ -763,11 +763,12 @@ fn string_array_field(t: &Table, field: &'static str) -> Result<Vec<String>, mlu
 ///
 /// The sandbox applies the same hardening as the plugin sandbox (no `io`, `os`,
 /// `package`/`require`, `debug`, `ffi`, dynamic code loading) and exposes only
-/// three config-capture functions via a `mote` global:
+/// four config-capture functions via a `mote` global:
 ///
 /// - `mote.plugins({…})` — captures plugin declarations (accumulated across calls; same-key-later-wins).
 /// - `mote.dev_mode({…})` — captures dev-mode dirs/plugins.
 /// - `mote.updates.configure({…})` — captures update cadence.
+/// - `mote.secrets.define({…})` — captures raw secret declarations.
 ///
 /// `chunk_name` is used in Lua error messages and tracebacks.
 ///
