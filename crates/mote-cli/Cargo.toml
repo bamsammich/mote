@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+mote-lua = { path = "../mote-lua" }
 mote-pluginmgr = { path = "../mote-pluginmgr" }
 mote-secrets = { path = "../mote-secrets" }
 mote-storage = { path = "../mote-storage" }
@@ -21,5 +22,4 @@ clap = { version = "4", features = ["derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-mote-lua = { path = "../mote-lua" }
 tempfile = "3"

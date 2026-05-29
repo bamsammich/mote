@@ -80,13 +80,14 @@ impl SecretProviderRouter for RuntimeSecretRouter {
             &self.audit,
         ) {
             InvokeOutcome::Ok(HostValue::Str(s)) => Ok(SecretString::new(s.into())),
-            InvokeOutcome::Ok(other) => {
-                // The fulfiller returned a non-string value.  Map it to a
-                // string for usability (best-effort), or return an error.
+            InvokeOutcome::Ok(_other) => {
+                // The fulfiller returned a non-string value. Do NOT format the value
+                // into the error — it may contain secret material. Describe the
+                // condition only.
                 Err(ResolveError::BackendUnavailable {
                     backend: format!(
-                        "password-manager provider `{provider}` returned \
-                         unexpected value type: {other:?}"
+                        "password-manager provider `{provider}` returned a non-string \
+                         value from resolve_secret"
                     ),
                 })
             }

@@ -510,7 +510,13 @@ impl Core {
                 );
                 InvokeOutcome::Ok(ret)
             }
-            CallResult::NoSuchFunction => InvokeOutcome::NoSuchFunction,
+            CallResult::NoSuchFunction => {
+                audit.record(
+                    AuditEvent::new(fulfiller, operation, AuditDecision::Deny)
+                        .with_detail(format!("{chain}: no such function in M.api")),
+                );
+                InvokeOutcome::NoSuchFunction
+            }
             CallResult::Timeout => {
                 audit.record(
                     AuditEvent::new(fulfiller, operation, AuditDecision::Deny)

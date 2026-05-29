@@ -242,14 +242,14 @@ mod tests {
 
     #[test]
     fn password_manager_with_router_delegates() {
-        use std::sync::Mutex;
+        use std::cell::RefCell;
 
         /// Fixture router that captures the exact provider/reference args it
         /// receives so the test can assert that arg-threading is correct.
         /// This protects Task 5's real router wiring.
         #[derive(Debug)]
         struct CapturingRouter {
-            captured: Mutex<Option<(String, String)>>,
+            captured: RefCell<Option<(String, String)>>,
         }
         impl SecretProviderRouter for CapturingRouter {
             fn resolve(
@@ -257,14 +257,13 @@ mod tests {
                 provider: &str,
                 reference: &str,
             ) -> Result<SecretValue, ResolveError> {
-                *self.captured.lock().expect("lock") =
-                    Some((provider.to_owned(), reference.to_owned()));
+                *self.captured.borrow_mut() = Some((provider.to_owned(), reference.to_owned()));
                 Ok(secrecy::SecretString::new("from_router".to_string().into()))
             }
         }
 
         let router = Rc::new(CapturingRouter {
-            captured: Mutex::new(None),
+            captured: RefCell::new(None),
         });
         // Keep a typed clone for reading back the captured args after resolve().
         let router_ref = Rc::clone(&router);
@@ -285,8 +284,7 @@ mod tests {
         // Assert the router received exactly the provider + reference from the SecretDef.
         let captured = router_ref
             .captured
-            .lock()
-            .expect("lock")
+            .borrow_mut()
             .take()
             .expect("router must have been called");
         assert_eq!(

@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use mote_lua::SecretEntry;
 use mote_pluginmgr::{
     DeltaKind, ImportOutcome, PluginManager, RemoveOutcome, SyncReport, UpdateOutcome,
     composed_secrets_config, convert_secret,
@@ -486,10 +487,37 @@ pub fn dispatch(cmd: &PluginCommand, mgr: &PluginManager) -> ExitCode {
     }
 }
 
+/// Formats the secret list as `name\t<backend-label>` lines — metadata only.
+///
+/// Never resolves, reads, or prints a secret value. Returns `(lines, warnings)`
+/// so the caller emits lines to stdout and per-entry conversion warnings to
+/// stderr.
+fn format_secret_list(entries: &[SecretEntry]) -> (Vec<String>, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in entries {
+        match convert_secret(entry) {
+            Ok(def) => {
+                let label = match &def.backend {
+                    mote_secrets::BackendKind::Keyring { .. } => "keyring",
+                    mote_secrets::BackendKind::Env { .. } => "env",
+                    mote_secrets::BackendKind::File { .. } => "file",
+                    mote_secrets::BackendKind::Age { .. } => "age",
+                    mote_secrets::BackendKind::PasswordManager { .. } => "password-manager",
+                };
+                lines.push(format!("{}\t{}", def.name, label));
+            }
+            Err(e) => warnings.push(format!("warning: {e}")),
+        }
+    }
+    (lines, warnings)
+}
+
 /// Dispatches a `mote secrets` subcommand.
 ///
 /// `config_dir` is the Mote config root (e.g. `~/.config/mote`); used by
 /// `list` to locate `secrets.lua` without resolving secret values.
+/// `_mgr` is retained for Phase 5 vault-picker routing (not yet active).
 fn dispatch_secrets(cmd: &SecretsCommand, _mgr: &PluginManager, config_dir: &Path) -> ExitCode {
     match cmd {
         SecretsCommand::List => {
@@ -509,26 +537,12 @@ fn dispatch_secrets(cmd: &SecretsCommand, _mgr: &PluginManager, config_dir: &Pat
                 return ExitCode::SUCCESS;
             }
 
-            for entry in &entries {
-                // Convert to a typed def so we can print the canonical backend
-                // label (e.g. "env", "file", "keyring", …).
-                match convert_secret(entry) {
-                    Ok(def) => {
-                        let label = match &def.backend {
-                            mote_secrets::BackendKind::Keyring { .. } => "keyring",
-                            mote_secrets::BackendKind::Env { .. } => "env",
-                            mote_secrets::BackendKind::File { .. } => "file",
-                            mote_secrets::BackendKind::Age { .. } => "age",
-                            mote_secrets::BackendKind::PasswordManager { .. } => "password-manager",
-                        };
-                        println!("{}\t{}", def.name, label);
-                    }
-                    Err(e) => {
-                        // Non-fatal: report the conversion error and continue so
-                        // all valid entries are still listed.
-                        eprintln!("warning: {e}");
-                    }
-                }
+            let (lines, warnings) = format_secret_list(&entries);
+            for w in &warnings {
+                eprintln!("{w}");
+            }
+            for line in &lines {
+                println!("{line}");
             }
 
             ExitCode::SUCCESS
@@ -1045,6 +1059,69 @@ return M
             ),
             "mote secrets list must parse to SecretsCommand::List"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // format_secret_list: metadata-only output invariant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_secret_list_env_and_file_entries() {
+        let f = fixture();
+        write_secrets_lua(
+            &f.config_dir,
+            &[
+                ("api_key", "env", r#"var = "MY_API_KEY""#),
+                ("cert", "file", r#"path = "/tmp/cert.pem", opt_in = true"#),
+            ],
+        );
+        let entries = composed_secrets_config(&f.config_dir, None).unwrap();
+        let (mut lines, warnings) = format_secret_list(&entries);
+        // Sort: Lua table iteration order is unspecified.
+        lines.sort();
+        assert_eq!(
+            lines,
+            vec!["api_key\tenv", "cert\tfile"],
+            "list must emit name<TAB>backend-label for env and file entries"
+        );
+        assert!(warnings.is_empty(), "no conversion warnings expected");
+    }
+
+    #[test]
+    fn format_secret_list_password_manager_prints_label_not_reference() {
+        // Regression guard: a password-manager entry must produce the static
+        // label "password-manager", never the reference value.
+        let f = fixture();
+        write_secrets_lua(
+            &f.config_dir,
+            &[
+                ("api_key", "env", r#"var = "MY_API_KEY""#),
+                ("cert", "file", r#"path = "/tmp/cert.pem", opt_in = true"#),
+                (
+                    "op_token",
+                    "password-manager",
+                    r#"provider = "pm-1password", reference = "op://x/y/z""#,
+                ),
+            ],
+        );
+        let entries = composed_secrets_config(&f.config_dir, None).unwrap();
+        let (lines, warnings) = format_secret_list(&entries);
+        // Sort both sides: Lua table iteration order is unspecified.
+        let mut sorted_lines = lines.clone();
+        sorted_lines.sort();
+        assert_eq!(
+            sorted_lines,
+            vec!["api_key\tenv", "cert\tfile", "op_token\tpassword-manager"],
+            "password-manager entry must show label only, never the reference value"
+        );
+        assert!(warnings.is_empty(), "no conversion warnings expected");
+        // Extra guard: confirm the reference string is not present anywhere in output.
+        for line in &lines {
+            assert!(
+                !line.contains("op://"),
+                "reference value must not appear in list output"
+            );
+        }
     }
 
     #[test]
