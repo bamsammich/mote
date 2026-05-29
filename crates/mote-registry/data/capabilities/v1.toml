@@ -90,9 +90,16 @@ required_events = []
 
 [[capability]]
 name = "password-manager:provider"
-composability = "exclusive"
+composability = "non-exclusive"
+# Dispatch shape required by the non-exclusive invariant. The actual invocation
+# path for secret resolution is TARGETED (caller names the fulfiller explicitly
+# via invoke_capability_on — ADR-0009), not broadcast. This "fan-out" field
+# documents the multi-fulfiller listing shape used by Phase-5 autofill
+# (fill_credential / list_credentials across all loaded managers); it does NOT
+# mean secret resolution fans out to all providers simultaneously.
+dispatch = "fan-out"
 critical = false
-description = "The active password manager. Deliberately NOT critical (DESIGN §Critical capabilities)."
+description = "A loaded password manager. Multiple managers may be active simultaneously (ADR-0009: e.g. work + personal). Secret resolution is targeted — the caller names the specific provider; invocation is never fan-out."
 [capability.contract]
 required_api = ["list_credentials", "fill_credential"]
 required_events = []
@@ -134,7 +141,7 @@ name = "secret:provider"
 composability = "non-exclusive"
 dispatch = "fan-out"
 critical = false
-description = "Backs the secret subsystem (typically a password manager, opt-in). Resolution is effectively singular in practice because the active fulfiller is gated by the exclusive password-manager:provider (risk B7)."
+description = "Backs the secret subsystem (typically a password manager, opt-in). Resolution is unambiguous because the caller names the provider — a secrets.lua entry with backend = \"password-manager\" must supply provider = \"<plugin-name>\", and the runtime invokes exactly that fulfiller (ADR-0009)."
 [capability.contract]
 required_api = ["resolve_secret"]
 required_events = []

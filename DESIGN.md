@@ -357,12 +357,12 @@ ui:download_handler             # exclusive
 ui:bookmarks_provider           # exclusive
 ui:history_provider             # exclusive
 workspace:provider              # exclusive
-password-manager:provider       # exclusive
+password-manager:provider       # non-exclusive (ADR-0009); multiple managers may be active simultaneously
 
 theme:provider                  # non-exclusive; runtime stacks stylesheets in priority order
 adblock:rule_source             # non-exclusive; runtime concatenates rule sets
 mcp:server                      # non-exclusive; tools namespaced under <plugin-name>.<tool>, exposed at one endpoint
-secret:provider                 # non-exclusive; password managers etc. opt in to back the secret subsystem
+secret:provider                 # non-exclusive; resolution is targeted — caller names the provider (ADR-0009)
 ```
 
 ### Inter-plugin communication
@@ -491,7 +491,7 @@ return M
 graph TB
     PM1["password-manager-1password"]
     PMF["password-manager-form-services-plugin"]
-    PMP[/"password-manager:provider<br/>exclusive capability"/]
+    PMP[/"password-manager:provider<br/>non-exclusive capability (ADR-0009)"/]
     PMFC[/"password-manager-form-services<br/>capability contract"/]
 
     subgraph PM1_perms["Permissions: password-manager-1password"]
@@ -1297,7 +1297,9 @@ The plugin sees only the secrets it requested by name. It cannot enumerate other
 
 The `password-manager` backend is the interesting integration. A plugin fulfilling `password-manager:provider` *may* additionally fulfill `secret:provider` — this is opt-in. Plugin authors of password managers decide whether to expose this surface; minimal password managers can skip it.
 
-When opted in, the password manager parses its own reference syntax (`op://...`, `bw://...`, etc.) — the secret subsystem does not abstract over vendor reference formats. Because `password-manager:provider` is exclusive (only one active at a time), there's only one password manager plugin to ask, so routing is unambiguous.
+When opted in, the password manager parses its own reference syntax (`op://...`, `bw://...`, etc.) — the secret subsystem does not abstract over vendor reference formats. Routing is unambiguous because the caller names the provider: a `secrets.lua` entry with `backend = "password-manager"` must supply `provider = "<plugin-name>"`, and the runtime invokes `resolve_secret` on exactly that fulfiller via `invoke_capability_on` — never fan-out (ADR-0009). A missing or unloaded named provider is a clear error.
+
+<!-- Deferred: mote.plugin_config / $secret: launch-time resolution is not yet implemented (out of scope Phase 4). -->
 
 The security contract is preserved end to end:
 - The requesting plugin has only `secret:read:<name>`, not any `password-manager:*` access.
@@ -1766,7 +1768,7 @@ Twelve plugins ship with the browser, in three tiers. **First-party plugins are 
 - `password-manager-1password` — fulfills `password-manager:provider`; consumes `password-manager-form-services`. Talks to 1Password via the Rust SDK (when stable) or Connect REST API. Never shells out to `op`.
 - `password-manager-bitwarden` — fulfills `password-manager:provider`; consumes `password-manager-form-services`. Talks to Bitwarden via SDK or REST. Never shells out to `bw`.
 
-The two vendor plugins both fulfill the exclusive `password-manager:provider` capability — the user enables exactly one at a time. Both consume the same `password-manager-form-services` capability, which any plugin (the first-party form-services plugin or a community alternative) can fulfill.
+The two vendor plugins both fulfill `password-manager:provider`, which is non-exclusive (ADR-0009) — the user may have both active simultaneously (e.g. work and personal). Both consume the same `password-manager-form-services` capability, which any plugin (the first-party form-services plugin or a community alternative) can fulfill.
 
 **Tier 2 — magnetic, enabled by default:**
 
@@ -1844,11 +1846,11 @@ The posture: **build for yourself, ship in public, accept help if it comes, neve
 ## Glossary
 
 - **Permission**: a fine-grained, resource-scoped grant from the browser to a plugin. Approved by the user at install time. Examples: `http:fetch:https://*.1password.com/*`, `page:inject_script:*`.
-- **Capability**: a role a plugin fulfills in the ecosystem. Other plugins reference these roles to compose behavior. Examples: `password-manager:provider` (exclusive), `theme:provider` (non-exclusive).
+- **Capability**: a role a plugin fulfills in the ecosystem. Other plugins reference these roles to compose behavior. Examples: `password-manager:provider` (non-exclusive — ADR-0009), `theme:provider` (non-exclusive), `ui:urlbar_provider` (exclusive).
 - **Consumes**: a manifest field declaring capabilities this plugin needs *some* other plugin to fulfill. Resolved at load time; if no plugin currently fulfills a consumed capability, the consumer fails to load with a clear error.
 - **Capability invocation**: synchronous call into a capability's API surface, routed by the runtime to whichever plugin currently fulfills the capability. Executes under the fulfiller's permissions, not the caller's.
 - **Requires**: a manifest field declaring dependencies on other plugins, with semver constraints. Imports the dependency's exported API for code reuse; couples with event-bus contracts.
-- **Exclusive capability**: a capability only one plugin fulfills at a time. Examples: `ui:urlbar_provider`, `password-manager:provider`. A second plugin claiming the same exclusive capability fails to load.
+- **Exclusive capability**: a capability only one plugin fulfills at a time. Examples: `ui:urlbar_provider`, `ui:bookmarks_provider`, `workspace:provider`. A second plugin claiming the same exclusive capability fails to load.
 - **Non-exclusive capability**: a capability multiple plugins can fulfill simultaneously. How the runtime treats multiple fulfillers is specified per-capability in the registry. Examples: `theme:provider` (stacks stylesheets), `mcp:server` (namespaces tools under one endpoint).
 - **Critical capability**: a capability tagged as critical-path for basic browser functionality. Critical capabilities get extended schema-migration deprecation windows. Examples: `workspace:provider`, `ui:urlbar_provider`, `ui:bookmarks_provider`, `ui:history_provider`. First-party plugins fulfilling these capabilities ship via the `bundled` source so the browser is functional from first launch.
 - **Permission Registry**: versioned, browser-defined list of valid permission names. Plugin manifests must reference only known names.

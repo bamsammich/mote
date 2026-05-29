@@ -476,6 +476,26 @@ mod tests {
         );
     }
 
+    /// ADR-0009: `password-manager:provider` is non-exclusive so that work and
+    /// personal managers (or two vendors) can coexist as active fulfillers.
+    /// A second claim must NOT be rejected as an exclusive-capability conflict.
+    #[test]
+    fn password_manager_provider_is_non_exclusive() {
+        let r = v1();
+        let cap = r.capabilities().get("password-manager:provider").unwrap();
+        assert_eq!(
+            cap.composability,
+            Composability::NonExclusive,
+            "ADR-0009: password-manager:provider must be non-exclusive"
+        );
+        // Non-exclusive caps must declare a dispatch shape; assert it is present
+        // (the from_toml invariant already enforces this, but make it explicit).
+        assert!(
+            cap.dispatch.is_some(),
+            "non-exclusive capability must have a dispatch shape"
+        );
+    }
+
     #[test]
     fn composability_and_dispatch_shapes_match_design() {
         let r = v1();
@@ -490,6 +510,12 @@ mod tests {
         let urlbar = r.capabilities().get("ui:urlbar_provider").unwrap();
         assert_eq!(urlbar.composability, Composability::Exclusive);
         assert_eq!(urlbar.dispatch, None);
+
+        // ADR-0009: password-manager:provider is non-exclusive; multiple managers
+        // (e.g. work + personal) may be active simultaneously.
+        let pm = r.capabilities().get("password-manager:provider").unwrap();
+        assert_eq!(pm.composability, Composability::NonExclusive);
+        assert_eq!(pm.dispatch, Some(Dispatch::FanOut));
     }
 
     // --- event registry is a separate namespace (risk C1/G6) ---------------
