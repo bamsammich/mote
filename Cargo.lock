@@ -3549,6 +3549,7 @@ dependencies = [
  "clap",
  "mote-lua",
  "mote-pluginmgr",
+ "mote-secrets",
  "mote-storage",
  "mote-types",
  "tempfile",

@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 mote-pluginmgr = { path = "../mote-pluginmgr" }
+mote-secrets = { path = "../mote-secrets" }
 mote-storage = { path = "../mote-storage" }
 mote-types = { path = "../mote-types" }
 clap = { version = "4", features = ["derive"] }

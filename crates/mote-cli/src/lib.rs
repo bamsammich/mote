@@ -41,7 +41,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use mote_pluginmgr::{
-    DeltaKind, ImportOutcome, ManagerError, PluginManager, RemoveOutcome, SyncReport, UpdateOutcome,
+    DeltaKind, ImportOutcome, PluginManager, RemoveOutcome, SyncReport, UpdateOutcome,
+    composed_secrets_config, convert_secret,
 };
 use mote_storage::Store;
 use mote_types::{PluginName, PluginNameError};
@@ -159,13 +160,21 @@ pub enum PluginCommand {
     },
 }
 
-/// `mote secrets <subcommand>` (Phase 4 stub).
+/// `mote secrets <subcommand>`.
 #[derive(Debug, Subcommand)]
 #[non_exhaustive]
 pub enum SecretsCommand {
-    /// Map a secret name to a vault item (Phase 4; not yet implemented).
+    /// List every configured secret's name and backend kind.
+    ///
+    /// Operates on `SecretDef` metadata only — **never** resolves or prints
+    /// a secret value.
+    List,
+    /// Map a secret name to a vault item.
+    ///
+    /// Phase 5 providers are not yet available; this prints an informational
+    /// message and exits successfully.
     Link {
-        /// The secret name.
+        /// The secret name to map.
         name: String,
     },
 }
@@ -478,25 +487,60 @@ pub fn dispatch(cmd: &PluginCommand, mgr: &PluginManager) -> ExitCode {
 }
 
 /// Dispatches a `mote secrets` subcommand.
-fn dispatch_secrets(cmd: &SecretsCommand, mgr: &PluginManager) -> ExitCode {
+///
+/// `config_dir` is the Mote config root (e.g. `~/.config/mote`); used by
+/// `list` to locate `secrets.lua` without resolving secret values.
+fn dispatch_secrets(cmd: &SecretsCommand, _mgr: &PluginManager, config_dir: &Path) -> ExitCode {
     match cmd {
-        SecretsCommand::Link { name } => match mgr.link(name) {
-            Ok(()) => {
-                println!("Linked secret {name}");
-                ExitCode::SUCCESS
+        SecretsCommand::List => {
+            // Compose the raw entries from config files. This is metadata only
+            // (name + backend locator) — SecretResolver::resolve is NEVER called
+            // here and no secret value is read, printed, or returned.
+            let entries = match composed_secrets_config(config_dir, None) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("error reading secrets config: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            if entries.is_empty() {
+                println!("no secrets defined");
+                return ExitCode::SUCCESS;
             }
-            Err(ManagerError::SecretsNotAvailable) => {
-                eprintln!(
-                    "mote secrets link: the secrets backend lands in Phase 4 — \
-                     `mote-secrets` is not yet wired."
-                );
-                ExitCode::FAILURE
+
+            for entry in &entries {
+                // Convert to a typed def so we can print the canonical backend
+                // label (e.g. "env", "file", "keyring", …).
+                match convert_secret(entry) {
+                    Ok(def) => {
+                        let label = match &def.backend {
+                            mote_secrets::BackendKind::Keyring { .. } => "keyring",
+                            mote_secrets::BackendKind::Env { .. } => "env",
+                            mote_secrets::BackendKind::File { .. } => "file",
+                            mote_secrets::BackendKind::Age { .. } => "age",
+                            mote_secrets::BackendKind::PasswordManager { .. } => "password-manager",
+                        };
+                        println!("{}\t{}", def.name, label);
+                    }
+                    Err(e) => {
+                        // Non-fatal: report the conversion error and continue so
+                        // all valid entries are still listed.
+                        eprintln!("warning: {e}");
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        },
+
+            ExitCode::SUCCESS
+        }
+
+        SecretsCommand::Link { name } => {
+            println!(
+                "no active password manager; vault linking arrives with Phase 5 providers\n\
+                 (secret: {name})"
+            );
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -581,7 +625,7 @@ pub fn run_with_dirs(command: &TopCommand, config_dir: &Path, cache_dir: &Path) 
 
     match command {
         TopCommand::Plugin { cmd } => dispatch(cmd, &mgr),
-        TopCommand::Secrets { cmd } => dispatch_secrets(cmd, &mgr),
+        TopCommand::Secrets { cmd } => dispatch_secrets(cmd, &mgr, config_dir),
     }
 }
 
@@ -921,19 +965,85 @@ return M
         );
     }
 
+    // -----------------------------------------------------------------------
+    // secrets list / link headless tests
+    // -----------------------------------------------------------------------
+
+    /// Write a `secrets.lua` under `config_dir` with the given entries.
+    ///
+    /// Each entry is `(name, backend, params_lua)` where `params_lua` is
+    /// the key = value pairs inside the `{}`, e.g. `var = "MY_VAR"`.
+    fn write_secrets_lua(config_dir: &Path, entries: &[(&str, &str, &str)]) {
+        let body = entries
+            .iter()
+            .map(|(name, backend, params)| {
+                format!(r#"  {name} = {{ backend = "{backend}", {params} }},"#)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lua = format!("mote.secrets.define({{\n{body}\n}})\n");
+        fs::write(config_dir.join("secrets.lua"), lua).unwrap();
+    }
+
     #[test]
-    fn dispatch_secrets_link_returns_failure_with_stub_message() {
+    fn dispatch_secrets_list_two_secrets_prints_names_and_backends() {
+        let f = fixture();
+        write_secrets_lua(
+            &f.config_dir,
+            &[
+                ("api_key", "env", r#"var = "MY_API_KEY""#),
+                ("cert", "file", r#"path = "/tmp/cert.pem", opt_in = true"#),
+            ],
+        );
+
+        let code = dispatch_secrets(&SecretsCommand::List, &f.mgr, &f.config_dir);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "list over a valid secrets.lua must succeed"
+        );
+    }
+
+    #[test]
+    fn dispatch_secrets_list_empty_config_prints_friendly_message() {
+        let f = fixture();
+        // No secrets.lua written — config dir is empty.
+        let code = dispatch_secrets(&SecretsCommand::List, &f.mgr, &f.config_dir);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "list over an empty config must succeed"
+        );
+    }
+
+    #[test]
+    fn dispatch_secrets_link_returns_success_with_informational_message() {
         let f = fixture();
         let code = dispatch_secrets(
             &SecretsCommand::Link {
                 name: "my-vault-secret".to_owned(),
             },
             &f.mgr,
+            &f.config_dir,
         );
         assert_eq!(
             code,
-            ExitCode::FAILURE,
-            "Phase 3 secrets link stub must return failure"
+            ExitCode::SUCCESS,
+            "secrets link at Phase 4 must return success with an informational message"
+        );
+    }
+
+    #[test]
+    fn parse_secrets_list() {
+        let cli = Cli::try_parse_from(["mote", "secrets", "list"]).unwrap();
+        assert!(
+            matches!(
+                cli.command,
+                TopCommand::Secrets {
+                    cmd: SecretsCommand::List
+                }
+            ),
+            "mote secrets list must parse to SecretsCommand::List"
         );
     }
 
