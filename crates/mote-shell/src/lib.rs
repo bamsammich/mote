@@ -80,7 +80,7 @@ use mote_ui::{ApprovalRequest, Compositor, IntegrityPanel, PixelFormat, Viewport
 use crate::picker::{PickerEntry, PickerState};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton as WinitMouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -1855,19 +1855,19 @@ impl ShellApp {
         match click_target(self.chrome_overlay_capturing_input(), page_local) {
             ClickTarget::Chrome => {
                 self.set_focus_owner(FocusOwner::Chrome);
-                self.bridge.page().send_mouse_button(
-                    MousePosition { x, y },
-                    mb,
-                    action,
-                    1,
-                    self.modifiers,
-                );
+                let pos = self.to_view_dip(MousePosition { x, y });
+                self.bridge
+                    .page()
+                    .send_mouse_button(pos, mb, action, 1, self.modifiers);
             }
             ClickTarget::ContentPage => {
                 self.set_focus_owner(FocusOwner::Page);
                 // page_local is Some(_) when ClickTarget::ContentPage is returned.
-                if let (Some(pos), Some(page)) = (page_local, self.active_page()) {
-                    page.send_mouse_button(pos, mb, action, 1, self.modifiers);
+                if let Some(pos) = page_local {
+                    let pos = self.to_view_dip(pos);
+                    if let Some(page) = self.active_page() {
+                        page.send_mouse_button(pos, mb, action, 1, self.modifiers);
+                    }
                 }
             }
         }
@@ -1882,15 +1882,62 @@ impl ShellApp {
         let page_local = self.page_local(x, y);
         match click_target(self.chrome_overlay_capturing_input(), page_local) {
             ClickTarget::Chrome => {
+                let pos = self.to_view_dip(MousePosition { x, y });
                 self.bridge
                     .page()
-                    .send_mouse_move(MousePosition { x, y }, self.modifiers, false);
+                    .send_mouse_move(pos, self.modifiers, false);
             }
             ClickTarget::ContentPage => {
                 if let (Some(pos), Some(page)) = (page_local, self.active_page()) {
-                    page.send_mouse_move(pos, self.modifiers, false);
+                    page.send_mouse_move(self.to_view_dip(pos), self.modifiers, false);
                 }
             }
+        }
+    }
+
+    /// Route a mouse-wheel scroll to whichever surface the cursor is over — the
+    /// same chrome-overlay-capture gate and DIP coordinate mapping as
+    /// [`Self::route_mouse_move`]. winit line deltas are scaled to pixel deltas
+    /// ([`WHEEL_STEP_PX`] per line); pixel deltas pass through. Positive
+    /// `delta_y` scrolls the page up (CEF convention).
+    fn route_wheel(&self, delta: MouseScrollDelta) {
+        let (dx, dy) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => (
+                wheel_delta(f64::from(x) * WHEEL_STEP_PX),
+                wheel_delta(f64::from(y) * WHEEL_STEP_PX),
+            ),
+            MouseScrollDelta::PixelDelta(p) => (wheel_delta(p.x), wheel_delta(p.y)),
+        };
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        let (x, y) = self.cursor;
+        let page_local = self.page_local(x, y);
+        match click_target(self.chrome_overlay_capturing_input(), page_local) {
+            ClickTarget::Chrome => {
+                let pos = self.to_view_dip(MousePosition { x, y });
+                self.bridge
+                    .page()
+                    .send_mouse_wheel(pos, dx, dy, self.modifiers);
+            }
+            ClickTarget::ContentPage => {
+                if let (Some(pos), Some(page)) = (page_local, self.active_page()) {
+                    page.send_mouse_wheel(self.to_view_dip(pos), dx, dy, self.modifiers);
+                }
+            }
+        }
+    }
+
+    /// Convert a window-physical-pixel position to the CEF page's view (DIP)
+    /// coordinate space. CEF lays both the chrome and content OSR documents out
+    /// at logical size (`physical / scale`) and scales the paint buffer by the
+    /// device scale (issue #7); mouse events are injected in that view space, so
+    /// raw winit physical pixels must be divided by the scale or every pointer
+    /// event lands `scale`× off-target.
+    fn to_view_dip(&self, p: MousePosition) -> MousePosition {
+        MousePosition {
+            x: physical_to_dip(p.x, self.scale_factor),
+            y: physical_to_dip(p.y, self.scale_factor),
         }
     }
 
@@ -2151,6 +2198,9 @@ impl ApplicationHandler for ShellApp {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.route_click(button, state);
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.route_wheel(delta);
+            }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = map_modifiers(mods.state());
             }
@@ -2292,6 +2342,30 @@ const fn px(v: u32) -> f32 {
 )]
 const fn cursor_px(v: f64) -> i32 {
     v as i32
+}
+
+/// Pixels scrolled per wheel "line" (winit [`MouseScrollDelta::LineDelta`]).
+/// Matches the common desktop default so one notch scrolls a few text lines.
+const WHEEL_STEP_PX: f64 = 40.0;
+
+/// Round a (possibly fractional) scroll delta to integer page pixels.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "scroll deltas are small pixel values; rounding to the nearest pixel is intended"
+)]
+const fn wheel_delta(px: f64) -> i32 {
+    px.round() as i32
+}
+
+/// Divide a window-physical pixel coordinate by the display `scale` to get the
+/// CEF view's logical (DIP) coordinate. `scale` is winit's `scale_factor`
+/// (always `> 0`); a scale of `1.0` is the identity.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "DIP coords are small positive pixel values; rounding to the nearest pixel is intended"
+)]
+fn physical_to_dip(physical: i32, scale: f64) -> i32 {
+    (f64::from(physical) / scale).round() as i32
 }
 
 /// The window→page hit-test (plan §1.3).
@@ -2497,6 +2571,27 @@ mod tests {
         assert_eq!(scale_inset(44, 1.25), 55);
         // A sub-1.0 scale never shrinks below the logical inset.
         assert_eq!(scale_inset(316, 0.5), 316);
+    }
+
+    #[test]
+    fn physical_to_dip_maps_pointer_coords_into_the_view() {
+        // At 1.0 the DIP coordinate is the physical one (identity).
+        assert_eq!(physical_to_dip(640, 1.0), 640);
+        // At 1.25 a physical pointer coord divides down into the logical (DIP)
+        // space CEF lays the OSR page out in. This is the #7 input regression:
+        // the live miss sent physical 663 verbatim where the view wanted 530
+        // (~133px off), and 19 where the view wanted 15.
+        assert_eq!(physical_to_dip(663, 1.25), 530);
+        assert_eq!(physical_to_dip(19, 1.25), 15);
+        // A sub-1.0 scale maps the other way (physical < DIP).
+        assert_eq!(physical_to_dip(100, 0.5), 200);
+    }
+
+    #[test]
+    fn wheel_delta_rounds_to_whole_pixels() {
+        assert_eq!(wheel_delta(WHEEL_STEP_PX), 40);
+        assert_eq!(wheel_delta(-WHEEL_STEP_PX * 2.0), -80);
+        assert_eq!(wheel_delta(0.4), 0);
     }
 
     #[test]
