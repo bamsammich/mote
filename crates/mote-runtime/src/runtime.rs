@@ -144,7 +144,7 @@ impl Runtime {
     /// per-identity resolver before loading plugins that use `secrets.get`.
     #[must_use]
     pub fn new(registry: Registry, store: Store, audit: EventProducer) -> Self {
-        let core = Core::new(registry.capabilities().clone());
+        let core = Core::new(registry.capabilities().clone(), registry.events().clone());
         let invoker = RuntimeInvoker::new(core.clone());
         let engine = DispatchEngine::new(invoker, NullAudit);
         Self {
@@ -253,6 +253,28 @@ impl Runtime {
     #[must_use]
     pub fn emit_event(&self, name: &str, payload: &crate::value::HostValue) -> usize {
         self.core.emit(name, payload)
+    }
+
+    /// Collects contributions from every subscriber of a **collector** `event`
+    /// (ADR-0010), returning each subscriber's marshalled return value. This is
+    /// the host-side seam over [`Core::collect`]: it is how an exclusive
+    /// provider (e.g. history's urlbar) gathers contributions from subscriber
+    /// plugins.
+    ///
+    /// Only events whose registry dispatch shape is `Collector` are
+    /// collectable; collection on an unknown or non-collector event yields an
+    /// empty `Vec` (default-deny). The whole collection runs under a single
+    /// shared inter-plugin deadline; a slow or failing subscriber is isolated
+    /// (dropped + audited under the subscriber) without aborting the rest.
+    #[must_use]
+    pub fn collect_event(
+        &self,
+        name: &str,
+        payload: &crate::value::HostValue,
+    ) -> Vec<crate::value::HostValue> {
+        self.core
+            .collect(name, payload, &self.audit)
+            .unwrap_or_default()
     }
 
     /// **Loads a plugin through the full four-step pipeline.** On success the

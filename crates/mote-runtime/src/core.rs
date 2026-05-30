@@ -22,7 +22,7 @@ use mote_audit::{AuditEvent, Decision as AuditDecision, EventProducer};
 use mote_lua::{
     HookInvokeError, HookTable, Lua, Table, call_function_with_deadline, call_hook_with_deadline,
 };
-use mote_registry::{CapabilityRegistry, Composability, Dispatch};
+use mote_registry::{CapabilityRegistry, Composability, Dispatch, EventDispatch, EventRegistry};
 use mote_types::PluginName;
 
 use crate::capability::CapabilityMap;
@@ -37,6 +37,16 @@ use crate::value::HostValue;
 /// `M.api` function runs under [`call_function_with_deadline`], so a fulfiller
 /// that loops is interrupted with a timeout rather than wedging the runtime.
 const INTER_PLUGIN_BUDGET: Duration = Duration::from_millis(100);
+
+/// The per-subscriber slice of the shared collector deadline (ADR-0010).
+///
+/// Collector dispatch ([`Core::collect`]) runs N subscribers under ONE shared
+/// deadline (`INTER_PLUGIN_BUDGET`), capping each individual subscriber at
+/// `min(remaining, PER_SUBSCRIBER_CAP)` so a single slow contributor cannot
+/// consume the whole budget and starve the rest. At 25ms several subscribers
+/// comfortably fit inside the 100ms shared window. This value is **tuning, not
+/// contract** (ADR-0010 §Scope) — only the shared-deadline rule is normative.
+const PER_SUBSCRIBER_CAP: Duration = Duration::from_millis(25);
 
 /// One live plugin's runtime record, as seen by inter-plugin host calls.
 #[derive(Debug)]
@@ -68,10 +78,15 @@ pub(crate) struct CoreState {
 /// conformance contract — specifically its `required_api` — to reject any
 /// function not named in the contract before reaching into the fulfiller's
 /// `M.api` (S1: confused-deputy defence).
+///
+/// Also holds the event registry (an `Rc`) so [`collect`](Core::collect) can
+/// consult an event's declared dispatch shape and reject collection on any
+/// event that is not a `Collector` (ADR-0010).
 #[derive(Debug, Clone)]
 pub(crate) struct Core {
     inner: Rc<RefCell<CoreState>>,
     capabilities: Rc<CapabilityRegistry>,
+    events: Rc<EventRegistry>,
 }
 
 /// The result of an inter-plugin host call that may be denied or error.
@@ -133,13 +148,33 @@ enum CallResult {
     Failed(String),
 }
 
+/// Why a [`collect`](Core::collect) request was refused before any subscriber
+/// ran.
+///
+/// `collect` is defined only for `Collector`-dispatch events (ADR-0010). The
+/// host layer (`mote.events.collect`) maps this to the default-deny empty
+/// result; the distinct variant lets callers/tests assert *why* nothing was
+/// gathered without conflating it with "a collector event that had zero
+/// subscribers".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CollectError {
+    /// The event is unknown to the registry, so its dispatch shape — and thus
+    /// whether it is a collector surface — cannot be established.
+    UnknownEvent,
+    /// The event exists but its declared dispatch is not `Collector`. Only an
+    /// exclusive provider's internal collector surface may be collected from.
+    NotCollector,
+}
+
 impl Core {
-    /// Builds a core over the capability registry the runtime loaded. The
-    /// registry is shared (an `Rc`) across every clone of this handle.
-    pub(crate) fn new(capabilities: CapabilityRegistry) -> Self {
+    /// Builds a core over the capability and event registries the runtime
+    /// loaded. Both registries are shared (an `Rc`) across every clone of this
+    /// handle.
+    pub(crate) fn new(capabilities: CapabilityRegistry, events: EventRegistry) -> Self {
         Self {
             inner: Rc::new(RefCell::new(CoreState::default())),
             capabilities: Rc::new(capabilities),
+            events: Rc::new(events),
         }
     }
 
@@ -183,6 +218,116 @@ impl Core {
             delivered += 1;
         }
         delivered
+    }
+
+    /// Gathers contributions from every subscriber of a **collector** `event`,
+    /// returning each subscriber's marshalled return value (ADR-0010). This is
+    /// the collecting counterpart to [`emit`](Self::emit): where `emit`
+    /// discards handler returns (broadcast), `collect` captures them so an
+    /// exclusive provider (e.g. history's urlbar) can merge contributions.
+    ///
+    /// # Dispatch gate
+    ///
+    /// Only events whose registry dispatch shape is
+    /// [`EventDispatch::Collector`] may be collected from. An unknown event or
+    /// a non-collector event is refused with a [`CollectError`] before any
+    /// subscriber runs; the host layer turns this into the default-deny empty
+    /// result.
+    ///
+    /// # Deadline budgeting (the load-bearing safety contract)
+    ///
+    /// The entire collection runs under a **single shared deadline**
+    /// (`INTER_PLUGIN_BUDGET` from now). Subscribers are invoked in
+    /// deterministic name-sorted order; each runs under
+    /// `min(remaining, PER_SUBSCRIBER_CAP)`. Once the shared deadline is
+    /// exhausted, the remaining subscribers are **not invoked** and contribute
+    /// nothing this round. Total latency is therefore bounded by the caller's
+    /// budget irrespective of subscriber count.
+    ///
+    /// # Failure isolation
+    ///
+    /// A subscriber that errors, times out, or returns an unmarshallable value
+    /// is dropped from the results and (for errors/timeouts) audit-logged under
+    /// the **subscriber** — mirroring `emit`'s broadcast isolation and the
+    /// capability-invoke failure-audit pattern. One bad contributor never
+    /// aborts the collection.
+    pub(crate) fn collect(
+        &self,
+        event: &str,
+        payload: &HostValue,
+        audit: &EventProducer,
+    ) -> Result<Vec<HostValue>, CollectError> {
+        // Dispatch gate: only collector events may be gathered from (ADR-0010).
+        match self.events.get(event) {
+            None => return Err(CollectError::UnknownEvent),
+            Some(entry) if entry.dispatch != EventDispatch::Collector => {
+                return Err(CollectError::NotCollector);
+            }
+            Some(_) => {}
+        }
+
+        // Collect the subscriber set first (like `emit`) so we do not hold the
+        // borrow across a Lua call, then sort by plugin name for deterministic
+        // ordering (ADR-0010: order only affects which contributors may be
+        // dropped under deadline pressure, never correctness).
+        let mut subscribers: Vec<(PluginName, Lua, Table)> = {
+            let state = self.inner.borrow();
+            state
+                .plugins
+                .iter()
+                .filter(|(_, rec)| rec.event_keys.iter().any(|k| k == event))
+                .map(|(name, rec)| (name.clone(), rec.lua.clone(), rec.module.clone()))
+                .collect()
+        };
+        subscribers.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+        // ONE shared deadline for the whole collection (ADR-0010).
+        let shared = Instant::now() + INTER_PLUGIN_BUDGET;
+
+        let mut results = Vec::with_capacity(subscribers.len());
+        for (subscriber, lua, module) in subscribers {
+            // Shared budget exhausted → remaining subscribers contribute nothing.
+            if Instant::now() >= shared {
+                break;
+            }
+            // Each subscriber runs under min(remaining, PER_SUBSCRIBER_CAP).
+            let per = (Instant::now() + PER_SUBSCRIBER_CAP).min(shared);
+
+            let Ok(arg) = payload.to_lua(&lua) else {
+                // Cannot even marshal the argument into this state — skip it.
+                continue;
+            };
+
+            match call_hook_with_deadline(&lua, &module, HookTable::Events, event, arg, per) {
+                Ok(ret) => {
+                    // DEADLINE CONTRACT: protections are lifted on return; read
+                    // with raw accessors only (which `from_lua` does).
+                    if let Ok(hv) = HostValue::from_lua(&ret) {
+                        results.push(hv);
+                    }
+                    // A subscriber whose return cannot be marshalled (too deep /
+                    // cyclic) contributes nothing; not a policy event.
+                }
+                Err(HookInvokeError::Timeout) => {
+                    // Isolated: dropped from results, audited under the subscriber.
+                    audit.record(
+                        AuditEvent::new(subscriber, event.to_owned(), AuditDecision::Deny)
+                            .with_detail(format!(
+                                "collect {event}: deadline exceeded, interrupted"
+                            )),
+                    );
+                }
+                Err(e) => {
+                    // Isolated: dropped from results, audited under the subscriber.
+                    audit.record(
+                        AuditEvent::new(subscriber, event.to_owned(), AuditDecision::Deny)
+                            .with_detail(format!("collect {event}: {e}")),
+                    );
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Routes `capabilities.invoke(capability, function, arg)` to the
