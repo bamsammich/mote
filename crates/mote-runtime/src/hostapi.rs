@@ -10,9 +10,11 @@
 //! the `mote.*` examples scattered through the doc):
 //!
 //! - `mote.permissions.effective()` → array of effective permission strings.
-//! - `mote.storage.get/set/delete(key[, value])` → the plugin's own
+//! - `mote.storage.get/set/delete/list_keys(key[, value])` → the plugin's own
 //!   [`mote_storage::Namespace`], honoring `identity_scope`. Gated by
-//!   `storage:persistent`.
+//!   `storage:persistent`. `list_keys()` returns a Lua array of the plugin's
+//!   storage keys in lexicographic order; returns an empty table on denial or
+//!   error.
 //! - `mote.events.emit(name, payload)` → fan out to other plugins' declarative
 //!   `M.events` handlers (broadcast). Gated by `events:emit`.
 //! - `mote.capabilities.invoke(capability, fn, arg)` → route to the current
@@ -142,7 +144,7 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
         permissions.set("effective", f).map_err(stringify)?;
     }
 
-    // --- storage.get / set / delete ----------------------------------------
+    // --- storage.get / set / list_keys / delete ----------------------------
     let storage = lua.create_table().map_err(stringify)?;
     {
         let ns = storage_ns.clone();
@@ -181,6 +183,25 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
             })
             .map_err(stringify)?;
         storage.set("set", set).map_err(stringify)?;
+    }
+    {
+        let ns = storage_ns.clone();
+        let g = gate.clone();
+        let list_keys = lua
+            .create_function(move |lua, ()| {
+                let arr = lua.create_table()?;
+                if !g.check("storage", "persistent", "*", None) {
+                    return Ok(arr);
+                }
+                if let Ok(keys) = ns.list_keys() {
+                    for (i, key) in keys.into_iter().enumerate() {
+                        arr.set(i + 1, key)?;
+                    }
+                }
+                Ok(arr)
+            })
+            .map_err(stringify)?;
+        storage.set("list_keys", list_keys).map_err(stringify)?;
     }
     {
         let ns = storage_ns; // last use — move
