@@ -2367,4 +2367,171 @@ return M
             "undefined secret must have backend label `unknown`"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task C2: urlbar_query — invoke_capability path (shell-side handler logic)
+    //
+    // The eval_js → chrome push cannot be unit-tested without a live CEF engine
+    // (real CEF dependency; the integration seam is live-verified as part of D1
+    // + ydotool). These tests cover the assertable intermediate state:
+    // invoke_capability correctly resolves the ui:urlbar_provider, and the
+    // HostValue result serialises to valid JSON — the exact bytes the shell
+    // passes to eval_js.
+    // -----------------------------------------------------------------------
+
+    /// Boot a host with the bundled plugins loaded (no path plugins; rely on
+    /// the auto-grant bundled pass). Returns the host and two tempdirs whose
+    /// lifetimes cover the test.
+    fn boot_host_with_bundled_plugins() -> (PluginHost, tempfile::TempDir, tempfile::TempDir) {
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let mut host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        host.run_initial_load_pass();
+        let loaded: Vec<&str> = host.loaded.iter().map(|r| r.name.as_str()).collect();
+        assert!(
+            loaded.contains(&"history"),
+            "bundled history must load for these tests: {loaded:?}"
+        );
+        (host, config, cache)
+    }
+
+    /// Seed a visit via `ui:history_provider` → `record_visit`.
+    fn seed_visit(host: &PluginHost, url: &str, title: &str) {
+        use std::collections::BTreeMap;
+
+        use mote_runtime::HostValue;
+
+        let mut m = BTreeMap::new();
+        m.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        m.insert("title".to_owned(), HostValue::Str(title.to_owned()));
+        host.runtime
+            .invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(m))
+            .expect("record_visit must succeed when history is loaded");
+    }
+
+    /// After seeding a history visit, the shell's `invoke_capability` path
+    /// (Task C2) returns a non-empty list and the JSON string is a valid JSON
+    /// array of suggestion objects — this is the exact payload pushed to chrome
+    /// via `eval_js`.
+    ///
+    /// The history plugin's `query(text)` function accepts a plain string
+    /// argument; the shell passes `HostValue::Str(text)` directly (matching the
+    /// pattern established by `host_invoke_capability.rs` Task C1 tests).
+    ///
+    /// NOTE: The `eval_js` → chrome render is the live-verification gap flagged
+    /// for D1; this test covers the assertable intermediate state.
+    #[test]
+    fn urlbar_query_op_produces_suggestions() {
+        use mote_runtime::{HostValue, host_to_json};
+
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        seed_visit(&host, "https://example.com/foo", "Foo Page");
+        seed_visit(&host, "https://example.com/foo", "Foo Page");
+        seed_visit(&host, "https://other.example/bar", "Bar");
+
+        // The shell passes text as a plain Str (the Lua function signature is
+        // `query(text)` — a string, not a map).
+        let arg = HostValue::Str("foo".to_owned());
+
+        let suggestions = host
+            .runtime
+            .invoke_capability("ui:urlbar_provider", "query", &arg)
+            .unwrap_or_else(|| HostValue::List(vec![]));
+
+        // Must be a non-empty list.
+        match &suggestions {
+            HostValue::List(items) => assert!(
+                !items.is_empty(),
+                "query('foo') must return at least one suggestion"
+            ),
+            other => panic!("expected HostValue::List; got {other:?}"),
+        }
+
+        // Serialise exactly as the shell handler does.
+        let payload_json = serde_json::to_string(&host_to_json(&suggestions))
+            .expect("HostValue must serialise to JSON");
+
+        // The payload must be a valid JSON array.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload_json).expect("payload must be valid JSON");
+        assert!(
+            parsed.is_array(),
+            "urlbar_suggestions payload must be a JSON array; got {payload_json}"
+        );
+        assert!(
+            !parsed.as_array().unwrap().is_empty(),
+            "urlbar_suggestions payload must not be empty for 'foo' query"
+        );
+    }
+
+    /// Empty text → history plugin's `query("")` early-exits returning `{}` (an
+    /// empty Lua table). The runtime marshals that as `HostValue::Map({})` rather
+    /// than `HostValue::List([])` (Lua cannot distinguish the two at the empty
+    /// boundary). The shell normalises any non-List result to an empty List, so
+    /// the final payload pushed to chrome is always `[]`.
+    ///
+    /// NOTE: The `eval_js` → chrome render is the live-verification gap flagged
+    /// for D1; this test covers the assertable intermediate state.
+    #[test]
+    fn urlbar_query_empty_text_pushes_empty_or_valid_list() {
+        use mote_runtime::{HostValue, host_to_json};
+
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        // No visits seeded — empty text hits the fast-path in the Lua function.
+        let arg = HostValue::Str(String::new());
+
+        // Mirror the shell's normalisation: only a List passes through; anything
+        // else (including the Map({}) the Lua empty-table becomes) → empty list.
+        let raw = host
+            .runtime
+            .invoke_capability("ui:urlbar_provider", "query", &arg);
+        let suggestions = match raw {
+            Some(HostValue::List(items)) => HostValue::List(items),
+            _ => HostValue::List(vec![]),
+        };
+
+        let payload_json = serde_json::to_string(&host_to_json(&suggestions))
+            .expect("HostValue must serialise to JSON");
+
+        // After normalisation the payload must be the JSON empty array.
+        assert_eq!(
+            payload_json, "[]",
+            "empty-text query must produce `[]` after List normalisation; got {payload_json}"
+        );
+    }
+
+    /// When no provider is loaded, `invoke_capability` returns `None`; the shell
+    /// falls back to `HostValue::List(vec![])` and serialises it as `[]`. The
+    /// chrome receives `applyOp('urlbar_suggestions', [])` so the dropdown clears.
+    ///
+    /// NOTE: The `eval_js` → chrome render is the live-verification gap flagged
+    /// for D1; this test covers the assertable intermediate state.
+    #[test]
+    fn urlbar_query_with_no_provider_pushes_empty_list() {
+        use mote_runtime::{HostValue, host_to_json};
+
+        // Boot WITHOUT running the load pass → no plugins loaded, no fulfiller.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        // Deliberately NOT calling run_initial_load_pass.
+
+        let arg = HostValue::Str("foo".to_owned());
+
+        // None → falls back to empty list (the handler's unwrap_or_else).
+        let suggestions = host
+            .runtime
+            .invoke_capability("ui:urlbar_provider", "query", &arg)
+            .unwrap_or_else(|| HostValue::List(vec![]));
+
+        let payload_json = serde_json::to_string(&host_to_json(&suggestions))
+            .expect("HostValue::List(vec![]) must serialise to JSON");
+
+        assert_eq!(
+            payload_json, "[]",
+            "no-provider fallback must serialise to the JSON empty array `[]`"
+        );
+    }
 }

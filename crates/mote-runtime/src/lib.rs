@@ -104,6 +104,7 @@ pub(crate) mod value;
 pub use approval::{Approval, ApprovalHash, ApprovalPolicy, GrantAsRequested, Narrowing};
 pub use capability::{CapabilityMap, ClaimError};
 pub use error::{LifecycleError, LoadError};
+pub use json::host_to_json;
 pub use runtime::{IdentityContext, RunningPlugin, Runtime};
 pub use value::HostValue;
 

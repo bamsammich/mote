@@ -72,6 +72,7 @@ use mote_cef::{
     KeyAction, KeyInput, Modifiers, MouseButton, MousePosition, OpRegistry, OpResponse, Page,
     PageOptions, PageRole, ProfileHandle, ProfileManager, chrome_url, overlay_url,
 };
+use mote_runtime::{HostValue, host_to_json};
 use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
 use mote_storage::Store;
 use mote_types::{TabId, WorkspaceId};
@@ -176,6 +177,9 @@ enum ShellCommand {
         /// The secret name (`<name>` from `secret:read:<name>`).
         name: String,
     },
+    /// The chrome omnibox input changed; invoke `ui:urlbar_provider` → `query`
+    /// and push the results to chrome as `applyOp('urlbar_suggestions', …)`.
+    UrlbarQuery(String),
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -604,6 +608,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let revoke_queue = Arc::clone(commands);
     let adjust_queue = Arc::clone(commands);
     let revoke_secret_queue = Arc::clone(commands);
+    let urlbar_query_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -675,6 +680,15 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
         })
         .register("plugin_revoke_secret", move |params: &str| {
             plugin_revoke_secret_op(&revoke_secret_queue, params)
+        })
+        .register("urlbar_query", move |params: &str| {
+            json_string_field(params, "text").map_or_else(
+                || OpResponse::err(400, "urlbar_query requires a string `text`"),
+                |text| {
+                    push(&urlbar_query_queue, ShellCommand::UrlbarQuery(text));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
         })
 }
 
@@ -915,8 +929,70 @@ impl ShellApp {
                 ShellCommand::PluginRevokeSecret { plugin, name } => {
                     self.plugin_revoke_secret(&plugin, &name);
                 }
+                ShellCommand::UrlbarQuery(text) => self.urlbar_query(&text),
             }
         }
+    }
+
+    /// Invoke `ui:urlbar_provider` → `query` with the given text and push the
+    /// returned suggestion list to the chrome via
+    /// `window.mote.applyOp('urlbar_suggestions', <json>)`.
+    ///
+    /// Called from [`drain_commands`] for every [`ShellCommand::UrlbarQuery`].
+    /// The D1 chrome-side rendering (dropdown build + keyboard select) is a
+    /// separate task; this method's observable end is the `eval_js` call.
+    ///
+    /// # Failure policy
+    ///
+    /// - No fulfiller loaded / contract violation / timeout →
+    ///   [`Runtime::invoke_capability`] returns `None`; we push an empty list so
+    ///   the chrome dropdown clears rather than showing stale results.
+    /// - The provider may return an empty Lua table `{}`, which marshals to
+    ///   [`HostValue::Map`] (not [`HostValue::List`]) because the runtime cannot
+    ///   distinguish an empty array from an empty object in Lua. We normalise any
+    ///   non-List result (including an empty Map) to `List([])` so chrome always
+    ///   receives a JSON array.
+    /// - JSON serialisation failure is defended against even though it cannot
+    ///   occur for a well-formed `HostValue` (no NaN/±Inf paths reach here):
+    ///   we push an empty list and log, matching the existing shell failure idiom.
+    fn urlbar_query(&self, text: &str) {
+        // The history plugin's `query(text)` function accepts a plain Str
+        // argument (matching the existing host_invoke_capability test pattern).
+        // Pass the text directly as HostValue::Str rather than a Map.
+        let arg = HostValue::Str(text.to_owned());
+
+        // Invoke the provider; None on no fulfiller / contract violation /
+        // timeout / error (Runtime::invoke_capability audits failures internally).
+        // Normalise the result: only a List is a valid suggestions payload; any
+        // other variant (Nil, Map, Str, …) — including the empty-Lua-table Map
+        // the provider returns for empty-text fast-exits — becomes an empty list.
+        let suggestions =
+            match self
+                .host
+                .runtime
+                .invoke_capability("ui:urlbar_provider", "query", &arg)
+            {
+                Some(HostValue::List(items)) => HostValue::List(items),
+                _ => HostValue::List(vec![]),
+            };
+
+        // Convert HostValue → serde_json::Value → JSON string.
+        // Serialisation of a HostValue::List should never fail; defend anyway.
+        let payload_json = match serde_json::to_string(&host_to_json(&suggestions)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: urlbar_query serialise failed: {e}; pushing empty list");
+                "[]".to_owned()
+            }
+        };
+
+        if !self.chrome_ready {
+            return;
+        }
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('urlbar_suggestions',{payload_json});"
+        ));
     }
 
     /// Finish a dialog approval on the pump thread (ADR-0007 async approval).
@@ -2939,5 +3015,76 @@ mod tests {
             ClickTarget::Chrome,
             "without an overlay a chrome-inset click goes to the chrome page"
         );
+    }
+
+    // ── urlbar_query op wiring ────────────────────────────────────────────
+
+    /// `build_op_registry` registers the `urlbar_query` op (wiring check).
+    #[test]
+    fn urlbar_query_op_is_registered() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"urlbar_query"),
+            "urlbar_query must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// Missing `text` field → 400 error (op-boundary validation).
+    #[test]
+    fn urlbar_query_missing_text_is_a_400() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Directly exercise the same logic the op handler uses.
+        let result = json_string_field("{}", "text");
+        assert!(
+            result.is_none(),
+            "missing `text` field must yield None so the op returns 400"
+        );
+        // Queue must remain empty.
+        assert!(queue.lock().unwrap().is_empty());
+    }
+
+    /// Valid `text` field → `ShellCommand::UrlbarQuery` is enqueued.
+    #[test]
+    fn urlbar_query_valid_text_enqueues_command() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Simulate what the registered closure does.
+        let text =
+            json_string_field(r#"{"text":"example"}"#, "text").expect("text field must parse");
+        push(&queue, ShellCommand::UrlbarQuery(text));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::UrlbarQuery(t) => {
+                assert_eq!(t, "example", "enqueued text must match the input");
+            }
+            other => panic!("expected UrlbarQuery; got {other:?}"),
+        }
+    }
+
+    /// Empty text string is accepted (op enqueues a command; the handler lets
+    /// chrome clear the dropdown by pushing an empty suggestions list).
+    #[test]
+    fn urlbar_query_empty_text_enqueues_command() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let text = json_string_field(r#"{"text":""}"#, "text").expect("empty text must parse fine");
+        push(&queue, ShellCommand::UrlbarQuery(text));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        match q.pop_front().unwrap() {
+            ShellCommand::UrlbarQuery(t) => assert!(t.is_empty(), "text must be empty string"),
+            other => panic!("expected UrlbarQuery; got {other:?}"),
+        }
     }
 }

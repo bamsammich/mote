@@ -42,8 +42,17 @@ use crate::value::HostValue;
 /// Numbers that are integer-valued are emitted as integers where possible
 /// (`serde_json` preserves the distinction so round-trips are exact for values
 /// within the integer range).
+///
+/// # Visibility note
+///
+/// This function is `pub` (not `pub(crate)`) so that the shell crate can
+/// serialise a [`HostValue`] returned by
+/// [`Runtime::invoke_capability`] into a JSON string for the
+/// `eval_js` → `applyOp` push (Task C2, Phase 5a). The shell already
+/// depends on `mote-runtime`; re-exporting one conversion helper creates
+/// less new surface than duplicating the mapping logic there.
 #[must_use]
-pub(crate) fn host_to_json(v: &HostValue) -> Json {
+pub fn host_to_json(v: &HostValue) -> Json {
     match v {
         HostValue::Nil => Json::Null,
         HostValue::Bool(b) => Json::Bool(*b),
