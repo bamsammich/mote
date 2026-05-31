@@ -207,17 +207,30 @@ M.api = {
     return true
   end,
 
-  --- query_history(filter)
-  ---   filter = optional substring string (nil or "" = no filter)
+  --- query_history(payload)
+  ---   payload = optional Lua table with fields:
+  ---     filter  = string (nil or "" = no filter; case-insensitive ASCII match)
+  ---     limit   = number (positive integer cap; default 20; ≤0 returns {})
+  ---     sort    = "relevance" | "recent"  (unknown values → "relevance")
   ---
-  --- Returns a 1-indexed Lua array of visit records, ranked descending by:
-  ---   score = visit_count * 1_000_000 + last_visited
-  --- High visit_count wins ties; last_visited (recency) breaks equal-count
-  --- ties.  Results are capped at 20.
+  --- Defaults preserve the original query_history(filter_string) behavior:
+  ---   limit=20, sort="relevance" (visit_count * 1_000_000 + last_visited desc).
+  ---
+  --- sort="recent": last_visited descending (pure recency view; sidebar use).
+  ---
+  --- Non-table / nil payload is treated as {} (all defaults).
+  --- Passing a plain string is NOT supported by this interface; callers must
+  --- migrate to the table form (see DESIGN brief 2026-05-31).
   ---
   --- Case-insensitive ASCII substring matching is used for the filter (see
   --- NOTE in file header regarding unicode).
-  query_history = function(filter)
+  query_history = function(payload)
+    payload = (type(payload) == "table") and payload or {}
+    local filter = (type(payload.filter) == "string") and payload.filter or ""
+    local limit  = (type(payload.limit)  == "number") and math.floor(payload.limit) or 20
+    if limit <= 0 then return {} end
+    local sort   = (payload.sort == "recent") and "recent" or "relevance"
+
     local keys = storage.list_keys()
     local records = {}
 
@@ -235,8 +248,8 @@ M.api = {
     end
 
     -- Apply optional substring filter.
-    if filter ~= nil and filter ~= "" then
-      local f = tostring(filter):lower()
+    if filter ~= "" then
+      local f = filter:lower()
       local filtered = {}
       for _, rec in ipairs(records) do
         local url_lc   = (rec.url   or ""):lower()
@@ -248,16 +261,24 @@ M.api = {
       records = filtered
     end
 
-    -- Sort by score = visit_count * 1_000_000 + last_visited, descending.
-    table.sort(records, function(a, b)
-      local sa = (a.visit_count or 0) * 1000000 + (a.last_visited or 0)
-      local sb = (b.visit_count or 0) * 1000000 + (b.last_visited or 0)
-      return sa > sb
-    end)
+    -- Sort by requested strategy.
+    if sort == "recent" then
+      -- Pure recency: last_visited descending.
+      table.sort(records, function(a, b)
+        return (a.last_visited or 0) > (b.last_visited or 0)
+      end)
+    else
+      -- Relevance: score = visit_count * 1_000_000 + last_visited, descending.
+      table.sort(records, function(a, b)
+        local sa = (a.visit_count or 0) * 1000000 + (a.last_visited or 0)
+        local sb = (b.visit_count or 0) * 1000000 + (b.last_visited or 0)
+        return sa > sb
+      end)
+    end
 
-    -- Cap at 20 results.
+    -- Cap at limit results.
     local result = {}
-    for i = 1, math.min(#records, 20) do
+    for i = 1, math.min(#records, limit) do
       result[i] = records[i]
     end
     return result

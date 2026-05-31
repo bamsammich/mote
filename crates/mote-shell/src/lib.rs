@@ -1121,19 +1121,14 @@ impl ShellApp {
         ));
     }
 
-    /// Invoke `ui:history_provider` → `query_history` with an empty filter and
-    /// push the result to chrome as
+    /// Invoke `ui:history_provider` → `query_history` with
+    /// `{filter="", limit=200, sort="recent"}` and push the result to chrome as
     /// `applyOp('history_list', {rows, count, truncated})`.
     ///
-    /// The shell caps the pushed rows at 200. When the plugin returns more than 200
-    /// results the `truncated` flag is `true` and only the first 200 are pushed.
-    ///
-    /// # Sorting
-    ///
-    /// Results are returned by the plugin already ranked by
-    /// `visit_count * 1_000_000 + last_visited` descending. The shell re-sorts by
-    /// `last_visited` descending (recency first) as specified for the history panel
-    /// — a pure recency view rather than visit-count ranking.
+    /// The plugin applies `sort="recent"` (`last_visited` descending) and caps its
+    /// output at 200. The shell defensively truncates to 200 if the plugin returns
+    /// more (the caps are identical, so `truncated` will always be `false` in
+    /// normal operation; it exists as a safety net).
     ///
     /// # Failure policy
     ///
@@ -1141,7 +1136,11 @@ impl ShellApp {
     pub(crate) fn push_history_list(&self) {
         const HISTORY_CAP: usize = 200;
 
-        let arg = HostValue::Str(String::new());
+        let mut payload = BTreeMap::new();
+        payload.insert("filter".to_owned(), HostValue::Str(String::new()));
+        payload.insert("limit".to_owned(), HostValue::Number(200.0));
+        payload.insert("sort".to_owned(), HostValue::Str("recent".to_owned()));
+        let arg = HostValue::Map(payload);
         let raw = self
             .host
             .runtime
@@ -1152,25 +1151,8 @@ impl ShellApp {
             _ => vec![],
         };
 
-        // Re-sort by last_visited desc (recency — the panel is a reverse-chrono view).
-        items.sort_by(|a, b| {
-            let lv_a = match a {
-                HostValue::Map(m) => match m.get("last_visited") {
-                    Some(HostValue::Number(f)) => *f,
-                    _ => 0.0,
-                },
-                _ => 0.0,
-            };
-            let lv_b = match b {
-                HostValue::Map(m) => match m.get("last_visited") {
-                    Some(HostValue::Number(f)) => *f,
-                    _ => 0.0,
-                },
-                _ => 0.0,
-            };
-            lv_b.partial_cmp(&lv_a).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
+        // The plugin already applies sort="recent" (last_visited descending) and
+        // caps at limit=200; the shell defensively truncates to the same cap.
         let original_count = items.len();
         let truncated = original_count > HISTORY_CAP;
         if truncated {
@@ -2937,14 +2919,22 @@ pub(crate) fn build_bookmark_list_json(host: &runtime::PluginHost) -> Option<Str
 /// performing the `eval_js` push.
 ///
 /// This is the testable intermediate-state seam for the history TDD tests.
+/// Mirrors [`ShellApp::push_history_list`] exactly: passes
+/// `{filter="", limit=200, sort="recent"}` to the plugin.
 /// The payload shape is `{"rows":[...],"count":N,"truncated":bool}`.
 ///
 /// Returns `None` when the `ui:history_provider` capability is unavailable.
 #[cfg(test)]
 pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<String> {
+    use std::collections::BTreeMap;
+
     const HISTORY_CAP: usize = 200;
 
-    let arg = HostValue::Str(String::new());
+    let mut map = BTreeMap::new();
+    map.insert("filter".to_owned(), HostValue::Str(String::new()));
+    map.insert("limit".to_owned(), HostValue::Number(200.0));
+    map.insert("sort".to_owned(), HostValue::Str("recent".to_owned()));
+    let arg = HostValue::Map(map);
     let raw = host
         .runtime
         .invoke_capability("ui:history_provider", "query_history", &arg)?;
@@ -2954,20 +2944,8 @@ pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<Stri
         _ => vec![],
     };
 
-    // Re-sort by last_visited desc (per push_history_list).
-    items.sort_by(|a, b| {
-        let lv = |v: &HostValue| match v {
-            HostValue::Map(m) => match m.get("last_visited") {
-                Some(HostValue::Number(f)) => *f,
-                _ => 0.0,
-            },
-            _ => 0.0,
-        };
-        lv(b)
-            .partial_cmp(&lv(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
+    // The plugin already sorts by last_visited desc (sort="recent") and caps at
+    // limit=200; the shell defensively truncates to the same cap.
     let original_count = items.len();
     let truncated = original_count > HISTORY_CAP;
     if truncated {

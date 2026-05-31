@@ -69,7 +69,7 @@ const HISTORY_SRC: &str = include_str!("../../../plugins/history/init.lua");
 // ---------------------------------------------------------------------------
 
 /// Consumer: calls `record_visit` twice for the same URL, then calls
-/// `query_history(nil)` and returns the `visit_count` of the first result.
+/// `query_history({})` and returns the `visit_count` of the first result.
 const CONSUMER_DEDUPE: &str = r#"
 local M = {}
 M.manifest = {
@@ -86,7 +86,7 @@ M.hooks = {
       { url = "https://example.com", title = "Example" })
     capabilities.invoke("ui:history_provider", "record_visit",
       { url = "https://example.com", title = "Example" })
-    local results = capabilities.invoke("ui:history_provider", "query_history", nil)
+    local results = capabilities.invoke("ui:history_provider", "query_history", {})
     local count = 0
     if results ~= nil and results[1] ~= nil then
       count = results[1].visit_count or 0
@@ -119,7 +119,7 @@ M.hooks = {
     -- visit with no title — must NOT overwrite "B"
     capabilities.invoke("ui:history_provider", "record_visit",
       { url = "https://title-test.com" })
-    local results = capabilities.invoke("ui:history_provider", "query_history", nil)
+    local results = capabilities.invoke("ui:history_provider", "query_history", {})
     local title = ""
     if results ~= nil and results[1] ~= nil then
       title = results[1].title or ""
@@ -150,7 +150,7 @@ M.hooks = {
       { url = "https://example.com", title = "Example" })
     capabilities.invoke("ui:history_provider", "record_visit",
       { url = "https://github.com", title = "GitHub" })
-    local results = capabilities.invoke("ui:history_provider", "query_history", "rust")
+    local results = capabilities.invoke("ui:history_provider", "query_history", { filter = "rust" })
     local count = 0
     if results ~= nil then count = #results end
     return { action = "modify", payload = tostring(count) }
@@ -185,7 +185,7 @@ M.hooks = {
     -- B gets 1 visit after A — so B has a higher last_visited seq
     capabilities.invoke("ui:history_provider", "record_visit",
       { url = "https://b.com", title = "B" })
-    local results = capabilities.invoke("ui:history_provider", "query_history", nil)
+    local results = capabilities.invoke("ui:history_provider", "query_history", {})
     local first_url = ""
     if results ~= nil and results[1] ~= nil then
       first_url = results[1].url or ""
@@ -219,7 +219,7 @@ M.hooks = {
     -- B visited after A (higher seq number = more recent)
     capabilities.invoke("ui:history_provider", "record_visit",
       { url = "https://b-recency.com", title = "B" })
-    local results = capabilities.invoke("ui:history_provider", "query_history", nil)
+    local results = capabilities.invoke("ui:history_provider", "query_history", {})
     local first_url = ""
     if results ~= nil and results[1] ~= nil then
       first_url = results[1].url or ""
@@ -266,7 +266,7 @@ M.manifest = {
 }
 M.hooks = {
   ["net:intercept_request"] = function(req)
-    local results = capabilities.invoke("ui:history_provider", "query_history", nil)
+    local results = capabilities.invoke("ui:history_provider", "query_history", {})
     local count = 0
     if results ~= nil then count = #results end
     return { action = "modify", payload = tostring(count) }
@@ -689,6 +689,299 @@ fn query_empty_text_returns_empty() {
     assert_eq!(
         payload, "count=0",
         "query with empty text must return an empty list; got payload={payload:?}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+// ---------------------------------------------------------------------------
+// New payload-shape tests (2026-05-31)
+// ---------------------------------------------------------------------------
+
+/// Consumer: seeds 3 URLs so `visit_count` and `last_visited` diverge:
+///   - A: 5 visits (seq 1-5), high `visit_count`, oldest `last_visited`
+///   - C: 2 visits (seq 6-7), mid `visit_count`, mid `last_visited`
+///   - B: 1 visit  (seq 8),   low `visit_count`, newest `last_visited`
+///
+/// `sort="relevance"` → A first (score = 5*1M + 5 beats all others).
+/// `sort="recent"`    → B first (`last_visited`=8 is highest).
+const CONSUMER_SORT_RELEVANCE: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- A: 5 visits (seq 1..5)
+    for _ = 1, 5 do
+      capabilities.invoke("ui:history_provider", "record_visit",
+        { url = "https://a-sort.test", title = "A" })
+    end
+    -- C: 2 visits (seq 6..7)
+    for _ = 1, 2 do
+      capabilities.invoke("ui:history_provider", "record_visit",
+        { url = "https://c-sort.test", title = "C" })
+    end
+    -- B: 1 visit (seq 8) — most recent
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://b-sort.test", title = "B" })
+    -- Relevance sort: A first
+    local r = capabilities.invoke("ui:history_provider", "query_history",
+      { sort = "relevance" })
+    local first = (r ~= nil and r[1] ~= nil) and (r[1].url or "") or ""
+    return { action = "modify", payload = first }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+const CONSUMER_SORT_RECENT: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- A: 5 visits (seq 1..5)
+    for _ = 1, 5 do
+      capabilities.invoke("ui:history_provider", "record_visit",
+        { url = "https://a-sort.test", title = "A" })
+    end
+    -- C: 2 visits (seq 6..7)
+    for _ = 1, 2 do
+      capabilities.invoke("ui:history_provider", "record_visit",
+        { url = "https://c-sort.test", title = "C" })
+    end
+    -- B: 1 visit (seq 8) — most recent
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://b-sort.test", title = "B" })
+    -- Recent sort: B first (last_visited=8)
+    local r = capabilities.invoke("ui:history_provider", "query_history",
+      { sort = "recent" })
+    local first = (r ~= nil and r[1] ~= nil) and (r[1].url or "") or ""
+    return { action = "modify", payload = first }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// `sort="relevance"` and `sort="recent"` produce different orderings when
+/// `visit_count` and `last_visited` diverge.
+#[test]
+fn query_history_sort_recent_orders_by_last_visited() {
+    // Relevance: A first (5 visits, oldest last_visited wins on score).
+    {
+        let (mut rt, mut log) = make_runtime();
+        load_pair(&mut rt, CONSUMER_SORT_RELEVANCE);
+        let first = dispatch_and_read(&mut rt);
+        assert_eq!(
+            first, "https://a-sort.test",
+            "sort=relevance: A (5 visits) must rank first; got {first:?}"
+        );
+        drain(&log);
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+
+    // Recent: B first (last_visited is highest seq).
+    {
+        let (mut rt, mut log) = make_runtime();
+        load_pair(&mut rt, CONSUMER_SORT_RECENT);
+        let first = dispatch_and_read(&mut rt);
+        assert_eq!(
+            first, "https://b-sort.test",
+            "sort=recent: B (most recent visit) must rank first; got {first:?}"
+        );
+        drain(&log);
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+}
+
+/// Query-only consumer: queries with no limit (default 20) and returns count.
+const CONSUMER_QUERY_DEFAULT_LIMIT: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    local r = capabilities.invoke("ui:history_provider", "query_history", {})
+    local n = (r ~= nil) and #r or 0
+    return { action = "modify", payload = tostring(n) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Query-only consumer: queries with limit=5.
+const CONSUMER_QUERY_LIMIT_FIVE: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    local r = capabilities.invoke("ui:history_provider", "query_history", { limit = 5 })
+    local n = (r ~= nil) and #r or 0
+    return { action = "modify", payload = tostring(n) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Query-only consumer: queries with limit=100.
+const CONSUMER_QUERY_LIMIT_HUNDRED: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    local r = capabilities.invoke("ui:history_provider", "query_history", { limit = 100 })
+    local n = (r ~= nil) and #r or 0
+    return { action = "modify", payload = tostring(n) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Seed N visits via `invoke_capability` directly (Rust-side, no hook budget consumed).
+fn seed_n_visits(rt: &Runtime, n: usize) {
+    use std::collections::BTreeMap;
+    for i in 0..n {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "url".to_owned(),
+            HostValue::Str(format!("https://limit-test.test/page-{i:03}")),
+        );
+        m.insert("title".to_owned(), HostValue::Str(format!("Page {i}")));
+        rt.invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(m))
+            .expect("record_visit must succeed");
+    }
+}
+
+/// `limit` param overrides the default 20-result cap.
+///
+/// Seeding is done via Rust-side `invoke_capability` (not inside the consumer
+/// hook) to avoid exhausting the 100ms inter-plugin budget with 30 calls.
+#[test]
+fn query_history_limit_overrides_default() {
+    // Default limit (20): 30 seeded → 20 returned.
+    {
+        let (mut rt, mut log) = make_runtime();
+        load_pair(&mut rt, CONSUMER_QUERY_DEFAULT_LIMIT);
+        seed_n_visits(&rt, 30);
+        let count = dispatch_and_read(&mut rt);
+        assert_eq!(count, "20", "default limit must cap at 20; got {count:?}");
+        drain(&log);
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+
+    // Explicit limit=5: 30 seeded → 5 returned.
+    {
+        let (mut rt, mut log) = make_runtime();
+        load_pair(&mut rt, CONSUMER_QUERY_LIMIT_FIVE);
+        seed_n_visits(&rt, 30);
+        let count = dispatch_and_read(&mut rt);
+        assert_eq!(count, "5", "limit=5 must cap at 5; got {count:?}");
+        drain(&log);
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+
+    // limit=100 with only 30 seeded → all 30 returned.
+    {
+        let (mut rt, mut log) = make_runtime();
+        load_pair(&mut rt, CONSUMER_QUERY_LIMIT_HUNDRED);
+        seed_n_visits(&rt, 30);
+        let count = dispatch_and_read(&mut rt);
+        assert_eq!(
+            count, "30",
+            "limit=100 with 30 entries must return all 30; got {count:?}"
+        );
+        drain(&log);
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+}
+
+/// Consumer: seeds visits, queries with `sort="bogus"` — must fall back to
+/// relevance ordering (same ranking as explicit `sort="relevance"`).
+const CONSUMER_SORT_BOGUS: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- A: 5 visits (older)
+    for _ = 1, 5 do
+      capabilities.invoke("ui:history_provider", "record_visit",
+        { url = "https://bogus-a.test", title = "A" })
+    end
+    -- B: 1 visit (newer)
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://bogus-b.test", title = "B" })
+    -- sort="bogus" must silently fall back to relevance → A first
+    local r = capabilities.invoke("ui:history_provider", "query_history",
+      { sort = "bogus" })
+    local first = (r ~= nil and r[1] ~= nil) and (r[1].url or "") or ""
+    -- Also check relevance explicitly matches
+    local r2 = capabilities.invoke("ui:history_provider", "query_history",
+      { sort = "relevance" })
+    local first2 = (r2 ~= nil and r2[1] ~= nil) and (r2[1].url or "") or ""
+    return { action = "modify", payload = first .. "==" .. first2 }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// `sort="bogus"` falls back silently to `"relevance"`.
+#[test]
+fn query_history_unknown_sort_falls_back_to_relevance() {
+    let (mut rt, mut log) = make_runtime();
+    load_pair(&mut rt, CONSUMER_SORT_BOGUS);
+
+    let payload = dispatch_and_read(&mut rt);
+    // Both sort="bogus" and sort="relevance" must produce the same first URL.
+    assert_eq!(
+        payload, "https://bogus-a.test==https://bogus-a.test",
+        "sort='bogus' must fall back to relevance (same as sort='relevance'); \
+         got payload={payload:?}"
     );
 
     drain(&log);
