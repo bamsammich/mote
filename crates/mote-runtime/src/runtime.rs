@@ -28,6 +28,7 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use mote_audit::EventProducer;
 use mote_dispatch::{
@@ -43,7 +44,7 @@ use mote_types::{IdentityId, PluginName};
 
 use crate::approval::{Approval, ApprovalHash, ApprovalPolicy};
 use crate::capability::ClaimError;
-use crate::core::{Core, PluginRecord};
+use crate::core::{Core, InvokeOutcome, PluginRecord};
 use crate::error::{LifecycleError, LoadError};
 use crate::hostapi::{self, HostContext};
 use crate::invoker::RuntimeInvoker;
@@ -275,6 +276,75 @@ impl Runtime {
         self.core
             .collect(name, payload, &self.audit)
             .unwrap_or_default()
+    }
+
+    /// Invokes an **exclusive** capability provider's `M.api[function]` from
+    /// Rust host code (e.g. the shell omnibox, bookmark wiring, history
+    /// recording on navigate).
+    ///
+    /// This is the Rust mirror of the existing Lua `mote.capabilities.invoke`
+    /// call — it delegates directly to [`Core::invoke_capability`] with a
+    /// constant pseudo-caller name (`"shell-subsystem"`) that identifies the
+    /// host as the initiator in the audit trail.
+    ///
+    /// **For exclusive UI providers only** (`ui:urlbar_provider`,
+    /// `ui:bookmarks_provider`, `ui:history_provider`, `workspace:provider`).
+    /// This method routes to the single fulfiller of the named capability and
+    /// returns the fulfiller's result.  For the targeted secret route, see
+    /// [`make_secret_router`](Self::make_secret_router) (ADR-0009's bounded
+    /// `invoke_capability_on` path, which requires an explicit provider name).
+    ///
+    /// # Mapping from [`InvokeOutcome`](crate::core::InvokeOutcome)
+    ///
+    /// | `Core::invoke_capability` outcome | this method returns |
+    /// |-----------------------------------|---------------------|
+    /// | `Ok(value)` — exclusive fulfiller ran and returned `value` | `Some(value)` |
+    /// | `NoFulfiller` — no plugin claims the capability | `None` |
+    /// | `NotInContract` — `function` is not in the capability's `required_api` (S1 guard fired; already audited) | `None` |
+    /// | `NoSuchFunction` — fulfiller's `M.api` does not contain `function` | `None` |
+    /// | `Timeout` — fulfiller exceeded the 100ms `INTER_PLUGIN_BUDGET`; already audited | `None` |
+    /// | `Failed` — fulfiller raised a Lua error; already audited | `None` |
+    /// | `Multi{..}` — capability is non-exclusive (fan-out / aggregate / stack); this method is not the right path | `None` |
+    ///
+    /// Every non-`Ok` outcome that involves a fulfiller is already audited
+    /// under the fulfiller's name by `Core::invoke_capability`. The caller
+    /// receives `None` as the universal default-deny signal and never panics.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic in practice. The one `expect` call initialises the static
+    /// `"shell-subsystem"` [`PluginName`] via [`OnceLock`]; the string is a
+    /// valid plugin-name literal so the initialiser cannot fail. The `expect`
+    /// is unreachable after the first call.
+    #[must_use]
+    pub fn invoke_capability(
+        &self,
+        capability: &str,
+        function: &str,
+        arg: &crate::value::HostValue,
+    ) -> Option<crate::value::HostValue> {
+        // A constant pseudo-caller name that appears in the audit trail for
+        // every host-initiated capability invocation. Initialised once per
+        // process; `expect` is safe because "shell-subsystem" is a valid
+        // plugin-name grammar string and the `OnceLock` initialiser runs
+        // exactly once.
+        static SHELL_CALLER: OnceLock<PluginName> = OnceLock::new();
+        let caller = SHELL_CALLER
+            .get_or_init(|| PluginName::new("shell-subsystem").expect("valid plugin name"));
+
+        match self
+            .core
+            .invoke_capability(caller, capability, function, arg, &self.audit)
+        {
+            InvokeOutcome::Ok(value) => Some(value),
+            // All other variants (NoFulfiller, NotInContract, NoSuchFunction,
+            // Timeout, Failed, Multi) surface as None — default-deny. The
+            // underlying call already audited any failure that involved a
+            // fulfiller. Multi is included here because this method is
+            // exclusive-only; a non-exclusive capability has no single result
+            // to return, so None is the safe default.
+            _ => None,
+        }
     }
 
     /// **Loads a plugin through the full four-step pipeline.** On success the
