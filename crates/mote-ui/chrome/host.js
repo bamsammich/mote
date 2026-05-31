@@ -171,12 +171,18 @@
       if (window.mote && window.mote.invoke) {
         window.mote.invoke("navigate", { url: url }).catch(function () {});
       }
+      // Blur after committing — keyboard-first expectation: Enter returns focus
+      // to the page so the next ⌘K (or click) re-opens the bar with select-all.
+      input.blur();
     });
 
     // Report focus ownership so the shell can route keyboard input to the
     // chrome (omnibox) vs the focused page (plan §1.3).
     input.addEventListener("focus", function () {
       if (omni) omni.classList.add("is-focused");
+      // Select-all on focus — standard browser address-bar behavior so a click
+      // followed by typing replaces the URL rather than inserting into it.
+      input.select();
       if (window.mote && window.mote.invoke) {
         window.mote.invoke("focus_changed", { owner: "chrome" }).catch(function () {});
       }
@@ -252,12 +258,18 @@
 
       if (ev.key === "Escape") {
         if (isOpen && selectedIndex(dropdown) >= 0) {
-          // Clear selection only; leave dropdown open and input focused.
+          // First Esc with a selection: clear selection only; stays open + focused.
           setSelection(dropdown, input, -1);
           ev.preventDefault();
+          return;
         }
-        // No selection (or dropdown closed): fall through to existing Esc
-        // behavior (omnibox blur, handled by the browser/form).
+        // No selection (or dropdown closed): blur the input per the omnibox
+        // spec ("Esc blurs the omnibox without committing").  Text inputs don't
+        // blur on Esc natively in browsers, so it's explicit here.  Two-stage
+        // Esc: first clears selection, second blurs.
+        closeCompletions(dropdown, input, omni);
+        input.blur();
+        ev.preventDefault();
         return;
       }
 
