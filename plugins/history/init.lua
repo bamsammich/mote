@@ -229,17 +229,99 @@ M.api = {
 
   --- query(text) — urlbar provider contract.
   ---
-  --- Returns an array of suggestion records for display in the omnibox.
-  --- Stub only in this commit; real B3 implementation collects contributor
-  --- suggestions via mote.events.collect("urlbar:suggest", {text=text})
-  --- and merges them with history's own visit-log matches.
-  --
-  -- TODO(B3): implement urlbar query via
-  --   mote.events.collect("urlbar:suggest", {text=text})
-  -- merged with own history matches; history owns the merge policy
-  -- (DESIGN.md:862).
-  query = function(_text)
-    return {}
+  --- Returns a 1-indexed Lua array of suggestion records for display in the
+  --- omnibox.  Each record is { url, title, source } where source identifies
+  --- the contributor ("history" for own visit-log matches, or the source tag
+  --- returned by a contributing plugin such as "bookmark").
+  ---
+  --- v0.1 merge policy (history owns this — DESIGN.md:862):
+  ---   1. Gather own visit-log matches: scan list_keys(), filter "v:" prefix,
+  ---      case-insensitive ASCII substring match on url+title, rank by
+  ---      visit_count*1_000_000 + last_visited (same formula as query_history).
+  ---      Tag every record with source="history".
+  ---   2. Collect contributions: call mote.events.collect("urlbar:suggest",
+  ---      {text=text}); each element of the returned table is one subscriber's
+  ---      contribution array (a list of suggestion records already tagged with
+  ---      their own source field).
+  ---   3. Merge: history matches first (already ranked), then flatten all
+  ---      subscriber contributions in collector order.  Cap total at 10.
+  ---
+  --- This policy is intentionally simple for v0.1 — tune as ranking signals
+  --- improve (e.g. add visit frequency to bookmark scoring, cross-source
+  --- deduplication, recency decay).  The merge point stays here; contributors
+  --- slot in via the collector with zero changes to this function.
+  ---
+  --- Empty text (nil or "") → return {} immediately (cheap path; no storage
+  --- scan, no collect call).
+  query = function(text)
+    -- Early-exit: empty text produces no suggestions.
+    if text == nil or text == "" then
+      return {}
+    end
+
+    local filter = tostring(text):lower()
+
+    -- -----------------------------------------------------------------------
+    -- Step 1: own history matches, ranked by visit_count * 1e6 + last_visited
+    -- -----------------------------------------------------------------------
+    local keys = storage.list_keys()
+    local history_records = {}
+    for _, key in ipairs(keys) do
+      if key:sub(1, 2) == "v:" then
+        local raw = storage.get(key)
+        if raw ~= nil then
+          local rec = mote.json.decode(raw)
+          if rec ~= nil then
+            local url_lc   = (rec.url   or ""):lower()
+            local title_lc = (rec.title or ""):lower()
+            if url_lc:find(filter, 1, true) or title_lc:find(filter, 1, true) then
+              history_records[#history_records + 1] = rec
+            end
+          end
+        end
+      end
+    end
+
+    -- Sort by score = visit_count * 1_000_000 + last_visited, descending.
+    table.sort(history_records, function(a, b)
+      local sa = (a.visit_count or 0) * 1000000 + (a.last_visited or 0)
+      local sb = (b.visit_count or 0) * 1000000 + (b.last_visited or 0)
+      return sa > sb
+    end)
+
+    -- Build the suggestion list from history matches, tagged source="history".
+    local suggestions = {}
+    for _, rec in ipairs(history_records) do
+      suggestions[#suggestions + 1] = {
+        url    = rec.url,
+        title  = rec.title or "",
+        source = "history",
+      }
+    end
+
+    -- -----------------------------------------------------------------------
+    -- Step 2: collect contributions from subscribers (e.g. bookmarks).
+    --   Each element of `extras` is ONE subscriber's return — itself a Lua
+    --   array of suggestion records (each already carrying a source tag).
+    --   Graceful degradation: if no subscribers are loaded, extras = {}.
+    -- -----------------------------------------------------------------------
+    local extras = mote.events.collect("urlbar:suggest", { text = text }) or {}
+    for _, contrib in ipairs(extras) do
+      if type(contrib) == "table" then
+        for _, rec in ipairs(contrib) do
+          suggestions[#suggestions + 1] = rec
+        end
+      end
+    end
+
+    -- -----------------------------------------------------------------------
+    -- Step 3: cap at 10 results.
+    -- -----------------------------------------------------------------------
+    local result = {}
+    for i = 1, math.min(#suggestions, 10) do
+      result[i] = suggestions[i]
+    end
+    return result
   end,
 }
 

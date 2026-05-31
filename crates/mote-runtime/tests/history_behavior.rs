@@ -440,3 +440,257 @@ fn history_survives_reload() {
         log.shutdown().expect("session-2 audit shuts down");
     }
 }
+
+// ---------------------------------------------------------------------------
+// B3 tests — history's `query` collects + merges (Commit 2)
+// ---------------------------------------------------------------------------
+
+/// The bundled bookmarks plugin source (for the mixed-load tests).
+const BOOKMARKS_SRC: &str = include_str!("../../../plugins/bookmarks/init.lua");
+
+/// Consumer: records a visit to `<https://alpha.test>` (title "Alpha") and one
+/// to `<https://zzz.test>` (title "Zzz"), then calls `query("alpha")` and
+/// reports "count=N,source0=first-source" so the test can inspect the result.
+/// "zzz.test" does not contain "alpha" so only the first visit should match.
+const CONSUMER_QUERY_HISTORY_ONLY: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider", "ui:urlbar_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://alpha.test", title = "Alpha" })
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://zzz.test", title = "Zzz" })
+    local results = capabilities.invoke("ui:urlbar_provider", "query", "alpha")
+    local n = 0
+    local src0 = "none"
+    if type(results) == "table" then
+      n = #results
+      if n > 0 and type(results[1]) == "table" then
+        src0 = tostring(results[1].source or "none")
+      end
+    end
+    return { action = "modify", payload = "count=" .. tostring(n) .. ",source0=" .. src0 }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Consumer: seeds visits AND bookmarks, then calls `query("foo")` and
+/// reports the count of results, the distinct sources present (as a sorted
+/// comma-separated string), and whether the total is ≤ 10.
+const CONSUMER_QUERY_MERGED: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider", "ui:urlbar_provider", "ui:bookmarks_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- Seed a history visit for a URL that contains "foo"
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://foo-history.example", title = "Foo History" })
+    -- Seed a bookmark for a URL that contains "foo" (different URL)
+    capabilities.invoke("ui:bookmarks_provider", "add_bookmark",
+      { url = "https://foo-bookmark.example", title = "Foo Bookmark" })
+    -- Seed a history visit that does NOT contain "foo" (should be filtered)
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://nomatch.example", title = "No Match" })
+
+    local results = capabilities.invoke("ui:urlbar_provider", "query", "foo")
+    local n = 0
+    local has_history = false
+    local has_bookmark = false
+    if type(results) == "table" then
+      n = #results
+      for _, rec in ipairs(results) do
+        if type(rec) == "table" then
+          if rec.source == "history"  then has_history  = true end
+          if rec.source == "bookmark" then has_bookmark = true end
+        end
+      end
+    end
+    local sources = ""
+    if has_history  then sources = sources .. "history,"  end
+    if has_bookmark then sources = sources .. "bookmark," end
+    -- Strip trailing comma
+    if #sources > 0 then sources = sources:sub(1, #sources - 1) end
+    local capped = tostring(n <= 10)
+    return {
+      action  = "modify",
+      payload = "count=" .. tostring(n)
+             .. ",sources=" .. sources
+             .. ",capped=" .. capped,
+    }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Consumer: loads history ONLY (no bookmarks), calls `query("alpha")` and
+/// reports the count and source of the first result. With no bookmarks loaded,
+/// `collect` returns no contributions; history-only results should still be
+/// returned.
+const CONSUMER_QUERY_ZERO_SUBSCRIBERS: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider", "ui:urlbar_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://alpha.test", title = "Alpha" })
+    local results = capabilities.invoke("ui:urlbar_provider", "query", "alpha")
+    local n = 0
+    local src0 = "none"
+    if type(results) == "table" then
+      n = #results
+      if n > 0 and type(results[1]) == "table" then
+        src0 = tostring(results[1].source or "none")
+      end
+    end
+    return { action = "modify", payload = "count=" .. tostring(n) .. ",source0=" .. src0 }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Consumer: calls `query("")` — empty text must return `{}` immediately.
+const CONSUMER_QUERY_EMPTY_TEXT: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "hist-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider", "ui:urlbar_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://a.example", title = "A" })
+    local results = capabilities.invoke("ui:urlbar_provider", "query", "")
+    local n = 0
+    if type(results) == "table" then n = #results end
+    return { action = "modify", payload = "count=" .. tostring(n) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// B3-hist-1: `query(text)` returns history matches tagged `source="history"`.
+/// Only entries whose url/title contain the filter are returned; non-matching
+/// entries are excluded.
+#[test]
+fn query_returns_history_matches() {
+    let (mut rt, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+    rt.load(HISTORY_SRC, identity(), &policy)
+        .expect("history plugin loads");
+    rt.load(CONSUMER_QUERY_HISTORY_ONLY, identity(), &policy)
+        .expect("consumer loads");
+
+    let payload = dispatch_and_read(&mut rt);
+    // "a.example" matches "a"; "other.example" does not. Exactly 1 result,
+    // tagged source="history".
+    assert_eq!(
+        payload, "count=1,source0=history",
+        "query must return only the matching history entry tagged source=history; \
+         got payload={payload:?}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// B3-hist-2: `query(text)` with both history and bookmarks loaded returns
+/// results from both sources; all results are capped at 10; both `source` tags
+/// are present.
+#[test]
+fn query_merges_history_and_collected_bookmarks() {
+    let (mut rt, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+    rt.load(HISTORY_SRC, identity(), &policy)
+        .expect("history plugin loads");
+    rt.load(BOOKMARKS_SRC, identity(), &policy)
+        .expect("bookmarks plugin loads");
+    rt.load(CONSUMER_QUERY_MERGED, identity(), &policy)
+        .expect("consumer loads");
+
+    let payload = dispatch_and_read(&mut rt);
+    // Expect 2 results (1 history match + 1 bookmark match), both sources present,
+    // capped=true (2 <= 10).
+    assert_eq!(
+        payload, "count=2,sources=history,bookmark,capped=true",
+        "query must merge history and bookmark contributions; got payload={payload:?}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// B3-hist-3: `query(text)` with only history loaded (no bookmarks) returns
+/// history-only results without error. `collect` returns zero contributions;
+/// history's own matches stand alone.
+#[test]
+fn query_degrades_with_zero_subscribers() {
+    let (mut rt, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+    rt.load(HISTORY_SRC, identity(), &policy)
+        .expect("history plugin loads");
+    rt.load(CONSUMER_QUERY_ZERO_SUBSCRIBERS, identity(), &policy)
+        .expect("consumer loads");
+
+    let payload = dispatch_and_read(&mut rt);
+    // 1 history entry matches "a", tagged source="history".
+    assert_eq!(
+        payload, "count=1,source0=history",
+        "query with no subscribers must return history-only results; \
+         got payload={payload:?}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// B3-hist-4: `query("")` (empty text) returns an empty list immediately,
+/// without scanning storage or collecting.
+#[test]
+fn query_empty_text_returns_empty() {
+    let (mut rt, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+    rt.load(HISTORY_SRC, identity(), &policy)
+        .expect("history plugin loads");
+    rt.load(CONSUMER_QUERY_EMPTY_TEXT, identity(), &policy)
+        .expect("consumer loads");
+
+    let payload = dispatch_and_read(&mut rt);
+    assert_eq!(
+        payload, "count=0",
+        "query with empty text must return an empty list; got payload={payload:?}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
