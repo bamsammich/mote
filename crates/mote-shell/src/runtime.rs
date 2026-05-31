@@ -1337,7 +1337,9 @@ mod tests {
     #[test]
     fn bundled_loaded_row_kind_integrity_actions() {
         // A bundled plugin maps to Bundled kind/integrity and update+revoke.
-        let rp = resolved("urlbar", Provenance::Bundled, MgrIntegrity::Bundled);
+        // Using bookmarks as a representative bundled plugin (urlbar was removed
+        // in Phase 5a; history owns ui:urlbar_provider from this point on).
+        let rp = resolved("bookmarks", Provenance::Bundled, MgrIntegrity::Bundled);
         let kind = provenance_to_kind(rp.provenance, &rp.dir);
         assert!(matches!(kind, PluginKind::Bundled));
         assert_eq!(mgr_integrity_to_ui(&rp.integrity), IntegrityStatus::Bundled);
@@ -1457,15 +1459,17 @@ mod tests {
 
     #[test]
     fn render_panel_html_includes_loaded_plugins() {
+        // Using bookmarks as a representative bundled plugin (urlbar was removed
+        // in Phase 5a; history owns ui:urlbar_provider from this point on).
         let panel = IntegrityPanel {
             plugins: vec![PluginRow {
-                name: "urlbar".into(),
+                name: "bookmarks".into(),
                 version: "0.1.0".into(),
-                fulfills: vec!["ui:urlbar_provider".into()],
+                fulfills: vec!["ui:bookmarks_provider".into()],
                 consumes: vec![],
                 permissions: vec![PermissionRow {
-                    requested: "events:emit".into(),
-                    effective: "events:emit".into(),
+                    requested: "storage:persistent".into(),
+                    effective: "storage:persistent".into(),
                     narrowed: false,
                     denied: false,
                 }],
@@ -1480,8 +1484,8 @@ mod tests {
             denials: vec![],
         };
         let html = render_panel_html(&panel);
-        assert!(html.contains("urlbar"));
-        assert!(html.contains("ui:urlbar_provider"));
+        assert!(html.contains("bookmarks"));
+        assert!(html.contains("ui:bookmarks_provider"));
         assert!(html.contains("v0.1.0"));
         assert!(html.contains("bundled"));
         // No sample data leaked in.
@@ -1599,8 +1603,8 @@ return M
         );
         assert!(loaded.contains(&"approved-plugin"), "got {loaded:?}");
         assert!(
-            loaded.contains(&"urlbar"),
-            "bundled urlbar loaded: {loaded:?}"
+            loaded.contains(&"bookmarks"),
+            "bundled bookmarks loaded: {loaded:?}"
         );
         assert!(
             loaded.contains(&"workspace-manager"),
@@ -1687,12 +1691,12 @@ return M
         );
         // Bundled defaults still auto-grant + load regardless.
         assert!(
-            loaded.contains(&"urlbar"),
-            "bundled still loads: {loaded:?}"
+            loaded.contains(&"bookmarks"),
+            "bundled bookmarks still loads: {loaded:?}"
         );
         assert!(
             loaded.contains(&"workspace-manager"),
-            "bundled still loads: {loaded:?}"
+            "bundled workspace-manager still loads: {loaded:?}"
         );
     }
 

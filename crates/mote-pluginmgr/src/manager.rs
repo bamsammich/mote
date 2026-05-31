@@ -2011,10 +2011,12 @@ return M
         );
 
         // Bundled first-party defaults are seeded (none were declared).
-        let urlbar = by_name.get("urlbar").expect("urlbar seeded");
-        assert_eq!(urlbar.provenance, Provenance::Bundled);
-        assert_eq!(urlbar.integrity, IntegrityStatus::Bundled);
-        assert!(!urlbar.init_source.is_empty());
+        // urlbar was removed in Phase 5a; history owns ui:urlbar_provider.
+        // Use bookmarks as a representative bundled plugin.
+        let bm = by_name.get("bookmarks").expect("bookmarks seeded");
+        assert_eq!(bm.provenance, Provenance::Bundled);
+        assert_eq!(bm.integrity, IntegrityStatus::Bundled);
+        assert!(!bm.init_source.is_empty());
         let wsm = by_name
             .get("workspace-manager")
             .expect("workspace-manager seeded");
@@ -2042,7 +2044,7 @@ return M
             "plugin with unparsable source must be omitted: {names:?}"
         );
         assert!(
-            names.contains(&"urlbar"),
+            names.contains(&"bookmarks"),
             "bundled defaults must still seed when a sibling fails: {names:?}"
         );
         assert!(
@@ -2055,21 +2057,23 @@ return M
     fn resolved_set_does_not_seed_when_a_bundled_default_is_declared() {
         let f = fixture();
         // Declaring even one bundled default suppresses auto-seeding.
-        write_plugins_lua(&f.config_dir, &[("urlbar", "bundled")]);
+        // Use bookmarks as a representative bundled plugin (urlbar was removed
+        // in Phase 5a; history owns ui:urlbar_provider from this point on).
+        write_plugins_lua(&f.config_dir, &[("bookmarks", "bundled")]);
 
         let resolved = f.mgr.resolved_set(None).unwrap();
         let names: Vec<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
 
-        assert!(names.contains(&"urlbar"), "declared urlbar present");
+        assert!(names.contains(&"bookmarks"), "declared bookmarks present");
         assert!(
             !names.contains(&"workspace-manager"),
             "workspace-manager must NOT be auto-seeded once a bundled default is declared"
         );
-        let urlbar = resolved
+        let bm = resolved
             .iter()
-            .find(|r| r.name.as_str() == "urlbar")
+            .find(|r| r.name.as_str() == "bookmarks")
             .unwrap();
-        assert_eq!(urlbar.provenance, Provenance::Bundled);
+        assert_eq!(bm.provenance, Provenance::Bundled);
     }
 
     // -----------------------------------------------------------------------

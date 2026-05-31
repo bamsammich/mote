@@ -1,8 +1,8 @@
 //! Conformance test for the bundled first-party provider plugins.
 //!
-//! Loads `plugins/urlbar/init.lua`, `plugins/workspace-manager/init.lua`, and
-//! `plugins/bookmarks/init.lua` through the runtime's full four-step load
-//! pipeline against the real v1 registry, asserting:
+//! Loads `plugins/workspace-manager/init.lua`, `plugins/bookmarks/init.lua`,
+//! and (after commit B1) `plugins/history/init.lua` through the runtime's full
+//! four-step load pipeline against the real v1 registry, asserting:
 //!
 //! 1. Step-1 (schema validation): every declared permission, capability, and
 //!    consumes term is known to the registry.
@@ -14,6 +14,10 @@
 //! `Runtime::load` with the `GrantAsRequested` approval policy, proving the
 //! plugins load end-to-end without errors.
 //!
+//! NOTE: The standalone `urlbar` plugin has been removed. History owns
+//! `ui:urlbar_provider` from Phase 5a onwards. There is no `urlbar` entry in
+//! this test file; searching for "urlbar" plugin by name here should find none.
+//!
 //! These plugins are the navigation/workspace POLICY floor (docs/plans/
 //! 02-browser-shell.md §8). The shell owns the mechanism; these own the policy.
 
@@ -24,10 +28,6 @@ use mote_registry::Registry;
 use mote_runtime::{GrantAsRequested, IdentityContext, Runtime};
 use mote_storage::Store;
 use mote_types::{IdentityId, PluginName, SchemaVersion};
-
-/// The bundled urlbar provider plugin source.
-/// Embedded at compile time so the test binary is self-contained.
-const URLBAR_SRC: &str = include_str!("../../../plugins/urlbar/init.lua");
 
 /// The bundled workspace-manager provider plugin source.
 const WORKSPACE_MANAGER_SRC: &str = include_str!("../../../plugins/workspace-manager/init.lua");
@@ -54,36 +54,6 @@ fn plugin(name: &str) -> PluginName {
 
 const fn identity() -> IdentityContext {
     IdentityContext::new(IdentityId::new(1))
-}
-
-/// The urlbar plugin loads through the full four-step pipeline and passes
-/// step-1 (schema validation) and step-3 (contract conformance) against the
-/// real v1 registry.
-#[test]
-fn urlbar_provider_loads_and_conforms() {
-    let (mut runtime, mut log) = make_runtime();
-    let policy = GrantAsRequested;
-
-    let running = runtime
-        .load(URLBAR_SRC, identity(), &policy)
-        .expect("urlbar plugin must load cleanly through the four-step pipeline");
-
-    // The plugin loaded with the correct name.
-    assert_eq!(running.name, plugin("urlbar"));
-
-    // It fulfills the `ui:urlbar_provider` capability.
-    assert!(
-        running
-            .capabilities
-            .contains(&"ui:urlbar_provider".to_owned()),
-        "urlbar must claim ui:urlbar_provider; got: {:?}",
-        running.capabilities
-    );
-
-    // It is tracked as loaded.
-    assert!(runtime.is_loaded(&plugin("urlbar")));
-
-    log.shutdown().expect("audit log shuts down cleanly");
 }
 
 /// The workspace-manager plugin loads through the full four-step pipeline and
@@ -113,30 +83,6 @@ fn workspace_manager_provider_loads_and_conforms() {
     assert!(runtime.is_loaded(&plugin("workspace-manager")));
 
     log.shutdown().expect("audit log shuts down cleanly");
-}
-
-/// Step-1 + step-3 can be exercised in isolation (without running `setup()`)
-/// using `mote_lua::load_plugin` + `Registry` directly — the same path the
-/// `mote-registry` conformance tests use. This proves the two steps pass for
-/// each plugin without any side effects.
-#[test]
-fn urlbar_passes_step1_and_step3_in_isolation() {
-    use mote_lua::load_plugin;
-
-    let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
-    let loaded = load_plugin(URLBAR_SRC, "plugins/urlbar/init.lua")
-        .expect("urlbar module loads without error");
-    let m = loaded.manifest();
-
-    // Step 1.
-    registry
-        .validate_schema(&m.permissions, &m.capabilities, &m.consumes)
-        .expect("urlbar: step-1 schema validation must pass");
-
-    // Step 3.
-    registry
-        .check_conformance(&loaded)
-        .expect("urlbar: step-3 contract conformance must pass");
 }
 
 #[test]
@@ -212,25 +158,30 @@ fn bookmarks_passes_step1_and_step3_in_isolation() {
         .expect("bookmarks: step-3 contract conformance must pass");
 }
 
-/// Both bundled providers can coexist in a single runtime without
-/// exclusive-capability conflicts (they fulfill DIFFERENT exclusive capabilities).
+/// Multiple bundled providers can coexist in a single runtime without
+/// exclusive-capability conflicts when they fulfill DIFFERENT exclusive
+/// capabilities.
+///
+/// NOTE: The standalone urlbar plugin has been removed (history owns
+/// `ui:urlbar_provider`). This test uses bookmarks + workspace-manager as a
+/// representative pair of distinct exclusive-capability fulfillers.
 #[test]
-fn both_providers_coexist_in_single_runtime() {
+fn multiple_providers_coexist_in_single_runtime() {
     let (mut runtime, mut log) = make_runtime();
     let policy = GrantAsRequested;
 
-    let urlbar = runtime
-        .load(URLBAR_SRC, identity(), &policy)
-        .expect("urlbar loads");
+    let bm = runtime
+        .load(BOOKMARKS_SRC, identity(), &policy)
+        .expect("bookmarks loads");
 
     let wm = runtime
         .load(WORKSPACE_MANAGER_SRC, identity(), &policy)
-        .expect("workspace-manager loads alongside urlbar (different exclusive capabilities)");
+        .expect("workspace-manager loads alongside bookmarks (different exclusive capabilities)");
 
-    assert_eq!(urlbar.name, plugin("urlbar"));
+    assert_eq!(bm.name, plugin("bookmarks"));
     assert_eq!(wm.name, plugin("workspace-manager"));
 
-    assert!(runtime.is_loaded(&plugin("urlbar")));
+    assert!(runtime.is_loaded(&plugin("bookmarks")));
     assert!(runtime.is_loaded(&plugin("workspace-manager")));
 
     log.shutdown().expect("audit log shuts down cleanly");

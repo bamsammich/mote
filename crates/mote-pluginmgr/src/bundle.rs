@@ -167,10 +167,14 @@ mod tests {
     #[test]
     fn bundle_contains_first_party_plugins() {
         let names = bundled_names().unwrap();
-        // The repo ships at least the urlbar + workspace-manager first-party
-        // plugins; assert they materialise as bundled names.
+        // history owns ui:urlbar_provider from Phase 5 onwards; the standalone
+        // urlbar plugin is removed.  Assert the current bundled set.
         let strs: Vec<&str> = names.iter().map(PluginName::as_str).collect();
-        assert!(strs.contains(&"urlbar"), "got {strs:?}");
+        assert!(
+            !strs.contains(&"urlbar"),
+            "urlbar must NOT be bundled (history owns ui:urlbar_provider); got {strs:?}"
+        );
+        assert!(strs.contains(&"bookmarks"), "got {strs:?}");
         assert!(strs.contains(&"workspace-manager"), "got {strs:?}");
     }
 
@@ -187,7 +191,9 @@ mod tests {
     #[test]
     fn unpacks_bundled_plugin_to_cache_offline() {
         let (_c, _p, cache) = cache_fixture();
-        let name = PluginName::new("urlbar").unwrap();
+        // Use bookmarks as the representative bundled plugin (urlbar was removed;
+        // history arrives in the next commit).
+        let name = PluginName::new("bookmarks").unwrap();
         let key = unpack_into_cache(&name, &cache).unwrap();
         assert_eq!(key.commit, bundled_version());
 
@@ -204,7 +210,8 @@ mod tests {
     #[test]
     fn unpack_is_idempotent() {
         let (_c, _p, cache) = cache_fixture();
-        let name = PluginName::new("urlbar").unwrap();
+        // Use workspace-manager as a stable bundled plugin representative.
+        let name = PluginName::new("workspace-manager").unwrap();
         let k1 = unpack_into_cache(&name, &cache).unwrap();
         let k2 = unpack_into_cache(&name, &cache).unwrap();
         assert_eq!(k1, k2);
