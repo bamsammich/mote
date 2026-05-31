@@ -2534,4 +2534,171 @@ return M
             "no-provider fallback must serialise to the JSON empty array `[]`"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task F2: navigate_records_visit — verify the record_visit invocation
+    // path that navigate_active wires.
+    //
+    // ShellApp is not constructible headlessly (requires a live CEF engine +
+    // window), so these tests exercise PluginHost::runtime.invoke_capability
+    // directly — the exact call that navigate_active adds.  The integration
+    // seam (navigate_active *actually* calling record_visit) is verified by the
+    // live in-app smoke test flagged in the plan as "live verification required"
+    // for F2.
+    // -----------------------------------------------------------------------
+
+    /// After `navigate_active` fires `record_visit` for a URL, querying
+    /// `query_history` returns that URL in the result set.
+    ///
+    /// The call shape mirrors the exact code added to `navigate_active`:
+    ///   `HostValue::Map({"url" → HostValue::Str(url)})`
+    /// per lessons.md L2 (Lua `record_visit` takes a payload table, not a bare
+    /// `Str`) and the history plugin's `record_visit` signature.
+    #[test]
+    fn navigate_records_visit() {
+        use std::collections::BTreeMap;
+
+        use mote_runtime::HostValue;
+
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        // Simulate what navigate_active will call after F2.
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert(
+            "url".to_owned(),
+            HostValue::Str("https://example.test".to_owned()),
+        );
+        let arg = HostValue::Map(arg_map);
+        let result = host
+            .runtime
+            .invoke_capability("ui:history_provider", "record_visit", &arg);
+        assert!(
+            result.is_some(),
+            "record_visit must return Some when history is loaded"
+        );
+
+        // Query history with the URL substring — must find the recorded visit.
+        let query_arg = HostValue::Str("example.test".to_owned());
+        let raw =
+            host.runtime
+                .invoke_capability("ui:history_provider", "query_history", &query_arg);
+
+        let items = match raw {
+            Some(HostValue::List(v)) => v,
+            other => panic!("query_history must return HostValue::List; got {other:?}"),
+        };
+        assert_eq!(
+            items.len(),
+            1,
+            "expected exactly one history record; got {items:?}"
+        );
+
+        // Verify the recorded URL.
+        let record = match &items[0] {
+            HostValue::Map(m) => m,
+            other => panic!("history record must be a Map; got {other:?}"),
+        };
+        let url_val = record.get("url").expect("record must have 'url' field");
+        assert_eq!(
+            url_val,
+            &HostValue::Str("https://example.test".to_owned()),
+            "recorded URL must match the navigated URL"
+        );
+    }
+
+    /// Navigating to the same URL twice increments `visit_count` to 2 rather
+    /// than creating a duplicate record (history deduplicates by URL per B2).
+    #[test]
+    fn navigate_increments_visit_count_on_repeat() {
+        use std::collections::BTreeMap;
+
+        use mote_runtime::HostValue;
+
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        let url = "https://example.test/page";
+
+        // First navigation.
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        let arg = HostValue::Map(arg_map.clone());
+        host.runtime
+            .invoke_capability("ui:history_provider", "record_visit", &arg)
+            .expect("first record_visit must succeed");
+
+        // Second navigation to the same URL.
+        let arg2 = HostValue::Map(arg_map);
+        host.runtime
+            .invoke_capability("ui:history_provider", "record_visit", &arg2)
+            .expect("second record_visit must succeed");
+
+        // Query — must return exactly one record (deduped) with visit_count = 2.
+        let query_arg = HostValue::Str("example.test".to_owned());
+        let raw = host
+            .runtime
+            .invoke_capability("ui:history_provider", "query_history", &query_arg)
+            .expect("query_history must return Some");
+
+        let items = match raw {
+            HostValue::List(v) => v,
+            other => panic!("query_history must return HostValue::List; got {other:?}"),
+        };
+        assert_eq!(
+            items.len(),
+            1,
+            "repeated navigate must deduplicate to one history record; got {items:?}"
+        );
+
+        let record = match &items[0] {
+            HostValue::Map(m) => m,
+            other => panic!("history record must be a Map; got {other:?}"),
+        };
+
+        // visit_count is stored as a JSON number; HostValue::Number(f64).
+        let visit_count = record
+            .get("visit_count")
+            .expect("record must have 'visit_count'");
+        match visit_count {
+            HostValue::Number(f) => assert!(
+                (*f - 2.0_f64).abs() < f64::EPSILON,
+                "visit_count must be 2.0 after two navigations; got {f}"
+            ),
+            other => panic!("visit_count must be HostValue::Number; got {other:?}"),
+        }
+    }
+
+    /// When no history plugin is loaded, `invoke_capability` returns `None` and
+    /// `navigate_active` absorbs the result with `let _ = ...` — no panic.
+    ///
+    /// The shell must continue normally when the history provider is absent.
+    #[test]
+    fn navigate_without_history_plugin_does_not_panic() {
+        use std::collections::BTreeMap;
+
+        use mote_runtime::HostValue;
+
+        // Boot WITHOUT running the load pass → no plugins, no history fulfiller.
+        let config = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let host = PluginHost::boot_in(store, config.path(), cache.path()).unwrap();
+        // Deliberately NOT calling run_initial_load_pass.
+
+        // Simulate the navigate_active call: must not panic, result is None.
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert(
+            "url".to_owned(),
+            HostValue::Str("https://example.test".to_owned()),
+        );
+        let arg = HostValue::Map(arg_map);
+        let result = host
+            .runtime
+            .invoke_capability("ui:history_provider", "record_visit", &arg);
+
+        // The shell absorbs this with `let _ = ...`; no panic is the assertion.
+        assert!(
+            result.is_none(),
+            "invoke_capability must return None when history provider is not loaded"
+        );
+    }
 }

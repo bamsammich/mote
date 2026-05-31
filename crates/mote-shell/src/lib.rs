@@ -62,7 +62,7 @@ mod approval;
 mod picker;
 mod runtime;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -1147,6 +1147,34 @@ impl ShellApp {
             stab.url = url.to_string();
             stab.title = None;
         }
+
+        // Record this navigation in the history store so urlbar suggestions
+        // reflect real browsing data (F2 — phase5a plan §Group F).
+        //
+        // The payload is a Map with "url" so record_visit's Lua signature
+        // (`payload.url`) is satisfied — per lessons.md L2 the arg must be a
+        // table, not a bare Str.
+        //
+        // Title is intentionally omitted here: page titles are resolved
+        // asynchronously via CEF callbacks (on_title_change / on_load_end).
+        // A follow-up task should call record_visit again with the resolved
+        // title once that callback fires (likely in the CEF event handler
+        // in mote-cef or the shell's on_load_end path).  record_visit treats
+        // a missing/empty title as "don't overwrite", so the URL is recorded
+        // correctly now and the title will be filled in later.
+        //
+        // The result is silently discarded: invoke_capability already audits
+        // failures (no fulfiller, contract violation, timeout, plugin error
+        // all surface as None and are logged by Core::invoke_capability).
+        // The shell continues regardless of whether history is loaded.
+        let mut record_visit_arg = BTreeMap::new();
+        record_visit_arg.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        let _ = self.host.runtime.invoke_capability(
+            "ui:history_provider",
+            "record_visit",
+            &HostValue::Map(record_visit_arg),
+        );
+
         self.persist_and_push();
     }
 
