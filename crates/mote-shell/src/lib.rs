@@ -1369,6 +1369,9 @@ impl ShellApp {
     /// session and push the new tab list into the chrome so the tab strip shows
     /// the real page title instead of the URL fallback.
     fn sync_active_title(&mut self) {
+        // --- Phase 1: read-only; capture owned values before any mutable borrow.
+        // `invoke_capability` requires an immutable borrow of `self.host.runtime`,
+        // so all `&mut self` accesses must be dropped before we call it.
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
@@ -1379,12 +1382,45 @@ impl ShellApp {
             return;
         }
         let id = tab.id;
+        let url = tab.url.clone();
+        // Clone the title string now; the mutable-borrow sections below move
+        // `title` into the tab/session fields, leaving us needing an owned copy
+        // for the history call and for push_state_to_chrome's tab-list walk.
+        let title_for_history = title.clone();
+
+        // --- Phase 2: mutable updates (each borrow is a separate statement so
+        // NLL drops it before the next one begins).
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.title = Some(title.clone());
         }
         if let Some(stab) = self.session.tab_mut(id) {
             stab.title = Some(title);
         }
+
+        // --- Phase 3: title-on-load follow-up for history (immutable borrow ok).
+        //
+        // `record_visit` was called at navigate time with the URL only (F2,
+        // navigate_active). Now that CEF has resolved the real page title via
+        // on_title_change, we call `update_title` so urlbar suggestions show the
+        // title column instead of leaving it blank.
+        //
+        // `update_title` is a no-op when no prior record exists (e.g. restored
+        // tabs where navigate_active was never called in this session).
+        // visit_count and last_visited are unchanged — title resolution is not
+        // a new user navigation.
+        //
+        // Failure is silently discarded: invoke_capability logs internally
+        // (no fulfiller, contract violation, timeout, plugin error all surface
+        // as None). The shell continues regardless.
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert("url".to_owned(), HostValue::Str(url));
+        arg_map.insert("title".to_owned(), HostValue::Str(title_for_history));
+        let _ = self.host.runtime.invoke_capability(
+            "ui:history_provider",
+            "update_title",
+            &HostValue::Map(arg_map),
+        );
+
         // No session flush here: title is cosmetic and changes frequently; it is
         // captured on the next structural flush (open/close/switch/navigate).
         self.push_state_to_chrome();

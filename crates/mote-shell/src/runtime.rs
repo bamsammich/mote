@@ -2701,4 +2701,159 @@ return M
             "invoke_capability must return None when history provider is not loaded"
         );
     }
+
+    // Task F2 follow-up: title-on-load — verify that `update_title` updates the
+    // cosmetic title field without re-counting the visit.
+    //
+    // The shell calls `record_visit({url})` at navigate time (F2), then calls
+    // `update_title({url, title})` when `sync_active_title` fires with the
+    // resolved title.  The invariants:
+    //   • title is populated after `update_title`.
+    //   • `visit_count` remains 1 — `update_title` is not a re-visit.
+    //   • `last_visited` is unchanged — only the title field is overwritten.
+    //   • Calling `update_title` for a URL with no prior record is a no-op.
+
+    /// Query history and return the single record for `filter`. Panics if the
+    /// result is not exactly one `Map`.
+    fn query_one_record(
+        host: &PluginHost,
+        filter: &str,
+    ) -> std::collections::BTreeMap<String, mote_runtime::HostValue> {
+        use mote_runtime::HostValue;
+        let raw = host
+            .runtime
+            .invoke_capability(
+                "ui:history_provider",
+                "query_history",
+                &HostValue::Str(filter.to_owned()),
+            )
+            .expect("query_history must return Some");
+        let items = match raw {
+            HostValue::List(v) => v,
+            other => panic!("query_history must return List; got {other:?}"),
+        };
+        assert_eq!(
+            items.len(),
+            1,
+            "expected exactly one record for filter {filter:?}; got {items:?}"
+        );
+        match items.into_iter().next().unwrap() {
+            HostValue::Map(m) => m,
+            other => panic!("history record must be a Map; got {other:?}"),
+        }
+    }
+
+    /// `update_title` resolves the async page title without incrementing
+    /// `visit_count` or touching `last_visited`.
+    ///
+    /// Flow mirrors the production path:
+    ///   1. `record_visit({url})` — F2 navigate (URL only, no title yet).
+    ///   2. `update_title({url, title})` — title-on-load (`sync_active_title`).
+    ///
+    /// Asserts: title populated; `visit_count` stays 1.0; `last_visited`
+    /// unchanged; `update_title` on a never-visited URL creates no phantom record.
+    #[test]
+    fn update_title_resolves_title_without_recounting_visit() {
+        use std::collections::BTreeMap;
+
+        use mote_runtime::HostValue;
+
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        let url = "https://example.test/async-title";
+
+        // Step 1: F2 navigate path — record_visit with URL only.
+        let mut arg = BTreeMap::new();
+        arg.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        host.runtime
+            .invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(arg))
+            .expect("record_visit must succeed when history is loaded");
+
+        // Capture baseline: title empty, visit_count == 1, record last_visited.
+        let rec = query_one_record(&host, "async-title");
+        let last_visited_before = match rec.get("last_visited").expect("must have last_visited") {
+            HostValue::Number(f) => *f,
+            other => panic!("last_visited must be Number; got {other:?}"),
+        };
+        match rec.get("visit_count").expect("must have visit_count") {
+            HostValue::Number(f) => assert!(
+                (*f - 1.0_f64).abs() < f64::EPSILON,
+                "visit_count must be 1.0 after record_visit; got {f}"
+            ),
+            other => panic!("visit_count must be Number; got {other:?}"),
+        }
+        match rec.get("title").expect("must have title") {
+            HostValue::Str(s) => assert!(
+                s.is_empty(),
+                "title must be empty after URL-only record_visit"
+            ),
+            other => panic!("title must be Str; got {other:?}"),
+        }
+
+        // Step 2: title-on-load path — update_title with url + title.
+        let mut arg = BTreeMap::new();
+        arg.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        arg.insert(
+            "title".to_owned(),
+            HostValue::Str("Example Title".to_owned()),
+        );
+        assert!(
+            host.runtime
+                .invoke_capability("ui:history_provider", "update_title", &HostValue::Map(arg))
+                .is_some(),
+            "update_title must return Some when history is loaded and record exists"
+        );
+
+        // Assert all invariants after update_title.
+        let rec = query_one_record(&host, "async-title");
+        match rec.get("title").expect("must have title") {
+            HostValue::Str(s) => assert_eq!(s, "Example Title", "title must be populated"),
+            other => panic!("title must be Str; got {other:?}"),
+        }
+        match rec.get("visit_count").expect("must have visit_count") {
+            HostValue::Number(f) => assert!(
+                (*f - 1.0_f64).abs() < f64::EPSILON,
+                "visit_count must remain 1.0 after update_title; got {f}"
+            ),
+            other => panic!("visit_count must be Number; got {other:?}"),
+        }
+        match rec.get("last_visited").expect("must have last_visited") {
+            HostValue::Number(f) => assert!(
+                (*f - last_visited_before).abs() < f64::EPSILON,
+                "last_visited must be unchanged after update_title; got {f}, was {last_visited_before}"
+            ),
+            other => panic!("last_visited must be Number; got {other:?}"),
+        }
+
+        // Step 3: update_title on a never-visited URL must be a no-op.
+        let mut arg = BTreeMap::new();
+        arg.insert(
+            "url".to_owned(),
+            HostValue::Str("https://never-visited.test".to_owned()),
+        );
+        arg.insert("title".to_owned(), HostValue::Str("Ghost".to_owned()));
+        let _ = host.runtime.invoke_capability(
+            "ui:history_provider",
+            "update_title",
+            &HostValue::Map(arg),
+        );
+
+        // An empty Lua `{}` decodes as Map({}) or List([]); both mean no records.
+        let raw = host
+            .runtime
+            .invoke_capability(
+                "ui:history_provider",
+                "query_history",
+                &HostValue::Str("never-visited".to_owned()),
+            )
+            .expect("query_history must return Some");
+        let is_empty = match &raw {
+            HostValue::List(v) => v.is_empty(),
+            HostValue::Map(m) => m.is_empty(),
+            other => panic!("expected empty result; got {other:?}"),
+        };
+        assert!(
+            is_empty,
+            "update_title on a never-visited URL must not create a phantom record"
+        );
+    }
 }

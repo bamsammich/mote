@@ -171,6 +171,42 @@ M.api = {
     return true
   end,
 
+  --- update_title(payload)
+  ---   payload = { url = <string>, title = <string> }
+  ---
+  --- Resolves the asynchronous page title for an existing visit record WITHOUT
+  --- counting a re-visit.  This is the title-on-load seam: `record_visit` is
+  --- called at navigate time (counting the user navigation), then `update_title`
+  --- is called when the CEF `on_title_change` callback fires with the resolved
+  --- title.  The two responsibilities are intentionally separated so that
+  --- `visit_count` reflects real user navigations, not internal load events.
+  ---
+  --- Semantics:
+  ---   • url missing/empty            → return false (no-op).
+  ---   • no existing record for url   → return false (no phantom record created).
+  ---   • title nil/empty              → return false (nothing to update).
+  ---   • otherwise: overwrite title, leave visit_count and last_visited unchanged.
+  ---   • Returns true on success.
+  update_title = function(payload)
+    if payload == nil or payload.url == nil or payload.url == "" then
+      return false
+    end
+    local title = payload.title
+    if title == nil or tostring(title) == "" then
+      return false
+    end
+    local url = tostring(payload.url)
+    local existing = read_record(url)
+    if existing == nil then
+      -- No prior visit for this URL — do not create a phantom record.
+      return false
+    end
+    existing.title = tostring(title)
+    -- visit_count and last_visited are intentionally left unchanged.
+    write_record(existing)
+    return true
+  end,
+
   --- query_history(filter)
   ---   filter = optional substring string (nil or "" = no filter)
   ---

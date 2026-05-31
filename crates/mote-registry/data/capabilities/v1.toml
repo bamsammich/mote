@@ -65,7 +65,7 @@ composability = "exclusive"
 critical = true
 description = "Owns browsing-history storage and retrieval."
 [capability.contract]
-required_api = ["query_history", "record_visit"]
+required_api = ["query_history", "record_visit", "update_title"]
 required_events = []
 
 # --- exclusive, non-critical ------------------------------------------------
