@@ -95,6 +95,7 @@ pub(crate) mod core;
 pub(crate) mod error;
 pub(crate) mod hostapi;
 pub(crate) mod invoker;
+pub(crate) mod json;
 pub(crate) mod marshal;
 pub(crate) mod runtime;
 pub(crate) mod secrets_router;

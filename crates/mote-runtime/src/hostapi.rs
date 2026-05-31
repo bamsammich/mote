@@ -34,6 +34,20 @@
 //!   per-identity [`mote_secrets::SecretResolver`], gated by
 //!   `secret:read:<name>`. Returns the secret value as a Lua string on success;
 //!   `nil` on denial or resolution failure. No enumeration surface is exposed.
+//! - `mote.json.encode(value)` → serializes a Lua value to a JSON string via
+//!   `serde_json`. Returns `nil` on unencodable input (functions, userdata, or
+//!   any type `HostValue::from_lua` maps to `HostValue::Nil`). Never raises a
+//!   Lua error. **No permission gate** — this is a pure data utility with no
+//!   I/O, no side effect, and no information disclosure (the plugin already owns
+//!   the input). Array vs. object disambiguation follows `HostValue::from_lua`:
+//!   a contiguous 1-indexed sequence → JSON array; a string-keyed table → JSON
+//!   object.
+//! - `mote.json.decode(s)` → parses a JSON string and returns the equivalent
+//!   Lua value (objects → tables with string keys; arrays → 1-indexed Lua
+//!   sequences; scalars → their Lua equivalents; `null` → `nil`). Returns `nil`
+//!   on any failure (non-string input, malformed JSON, depth cap exceeded).
+//!   Never raises a Lua error. **No permission gate** (same rationale as
+//!   `encode`).
 //!
 //! The same tables are also exposed as bare globals (`permissions`, `events`,
 //! `capabilities`, `storage`, `tabs`) because DESIGN's examples call them
@@ -50,6 +64,7 @@ use mote_types::PluginName;
 use secrecy::ExposeSecret as _;
 
 use crate::core::{Core, InvokeOutcome};
+use crate::json::{host_to_json, json_to_host};
 use crate::value::HostValue;
 
 /// Everything the `mote.*` closures need, owned per plugin and consumed by
@@ -283,6 +298,70 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
         events.set("collect", collect).map_err(stringify)?;
     }
 
+    // --- json.encode(value) / json.decode(s) ----------------------------------
+    //
+    // Pure data utility backed by `serde_json`. No permission gate is required
+    // or recorded: this call has no I/O, no side effect, and discloses no
+    // information the plugin does not already hold (the plugin supplied the
+    // input). Adding a gate here by reflex would be wrong — consult the module
+    // doc before changing this.
+    //
+    // Both closures follow the universal host-API idiom: return `nil` on any
+    // failure, never raise a Lua error.
+    let json = lua.create_table().map_err(stringify)?;
+    {
+        let encode = lua
+            .create_function(move |lua, value: Value| {
+                // Unrepresentable Lua types (functions, userdata, threads) are
+                // mapped to `HostValue::Nil` by `from_lua`, which then encodes
+                // as JSON `null`. To honour the "return nil for unencodable
+                // input" contract we treat a `Nil` result from a non-nil Lua
+                // input as "unencodable" and return nil.
+                let hv = HostValue::from_lua(&value).unwrap_or(HostValue::Nil);
+                // A Lua nil *input* is valid — `null` is the correct output.
+                // Any other Lua type that collapses to HostValue::Nil (functions,
+                // userdata, threads) must return nil instead.
+                let is_lua_nil = matches!(value, Value::Nil);
+                if matches!(hv, HostValue::Nil) && !is_lua_nil {
+                    return Ok(Value::Nil);
+                }
+                let json_val = host_to_json(&hv);
+                serde_json::to_string(&json_val).map_or_else(
+                    |_| Ok(Value::Nil),
+                    |s| {
+                        lua.create_string(&s).map_or_else(
+                            // OOM or other Lua-level error: return nil gracefully.
+                            |_| Ok(Value::Nil),
+                            |ls| Ok(Value::String(ls)),
+                        )
+                    },
+                )
+            })
+            .map_err(stringify)?;
+        json.set("encode", encode).map_err(stringify)?;
+    }
+    {
+        let decode = lua
+            .create_function(move |lua, value: Value| {
+                // Only string inputs are valid; any other type returns nil.
+                let s = match &value {
+                    Value::String(s) => match s.to_str() {
+                        Ok(s) => s.to_owned(),
+                        Err(_) => return Ok(Value::Nil),
+                    },
+                    _ => return Ok(Value::Nil),
+                };
+                let json_val: serde_json::Value = match serde_json::from_str(&s) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(Value::Nil),
+                };
+                let hv = json_to_host(&json_val);
+                Ok(hv.to_lua(lua).unwrap_or(Value::Nil))
+            })
+            .map_err(stringify)?;
+        json.set("decode", decode).map_err(stringify)?;
+    }
+
     // --- capabilities.invoke(capability, fn, arg) --------------------------
     let capabilities = lua.create_table().map_err(stringify)?;
     {
@@ -430,12 +509,18 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
         &capabilities,
         &tabs,
         &secrets,
+        &json,
     )?;
 
     Ok(())
 }
 
-/// Wires the six sub-tables into a `mote` table and also into bare globals.
+/// Wires the seven sub-tables into a `mote` table and also into bare globals.
+///
+/// `json` is wired into `mote.json` only — no bare global is added because
+/// `json` is not part of DESIGN's unqualified-global examples and adding one
+/// would risk shadowing any plugin-defined local named `json`.
+#[allow(clippy::too_many_arguments)]
 fn mote_set(
     lua: &Lua,
     permissions: &mote_lua::Table,
@@ -444,6 +529,7 @@ fn mote_set(
     capabilities: &mote_lua::Table,
     tabs: &mote_lua::Table,
     secrets: &mote_lua::Table,
+    json: &mote_lua::Table,
 ) -> Result<(), String> {
     let mote = lua.create_table().map_err(stringify)?;
     mote.set("permissions", permissions).map_err(stringify)?;
@@ -452,6 +538,7 @@ fn mote_set(
     mote.set("capabilities", capabilities).map_err(stringify)?;
     mote.set("tabs", tabs).map_err(stringify)?;
     mote.set("secrets", secrets).map_err(stringify)?;
+    mote.set("json", json).map_err(stringify)?;
 
     let globals = lua.globals();
     globals.set("mote", mote).map_err(stringify)?;
