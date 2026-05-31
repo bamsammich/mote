@@ -164,9 +164,41 @@ M.api = {
   end,
 }
 
--- `M.events` — the urlbar:suggest subscriber is added in B3.
--- Declared empty now so the loader sees the table.
-M.events = {}
+-- ---------------------------------------------------------------------------
+-- `M.events` — collector contributor for the urlbar:suggest surface.
+-- ---------------------------------------------------------------------------
+
+M.events = {
+  --- urlbar:suggest contributor (ADR-0010, Task B3).
+  ---
+  --- Called by the `collect` path when an exclusive urlbar provider (history)
+  --- gathers contributions.  Returns a 1-indexed Lua array of suggestion
+  --- records, each tagged `source="bookmark"`, or an empty table when the
+  --- text is empty or nothing matches.
+  ---
+  --- Matching inherits `list_bookmarks`'s case-sensitive substring search
+  --- (both url and title).  Case-sensitivity is a known v0.1 limitation —
+  --- a future mote.text host API can add Unicode folding; changing it here
+  --- requires no history change (the collector pattern is open by design).
+  ["urlbar:suggest"] = function(payload)
+    local text = payload and payload.text or ""
+    if text == "" then
+      return {}
+    end
+    -- Delegate to the plugin's own list_bookmarks for filtering — avoids
+    -- duplicating the key-prefix and codec logic.
+    local matches = M.api.list_bookmarks(text)
+    local result = {}
+    for _, rec in ipairs(matches) do
+      result[#result + 1] = {
+        url    = rec.url,
+        title  = rec.title,
+        source = "bookmark",
+      }
+    end
+    return result
+  end,
+}
 
 -- `M.hooks` is empty.
 M.hooks = {}
