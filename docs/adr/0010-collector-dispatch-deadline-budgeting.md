@@ -67,12 +67,16 @@ inter-plugin deadline** (DISCIPLINES §3).
 
 Implement collector dispatch as a **synchronous, deadline-bounded gather**:
 
-- **Host API.** `mote.events.collect(event, payload) -> { contribution, ... }`, available **only**
-  for events whose registry dispatch shape is `Collector` (calling it on a `Broadcast`/
-  `FilterChain` event errors). Gated by the **`events:emit`** permission (the caller owns/emits
-  the collector surface). Returns a Lua array, one entry per *contributing* subscriber, each the
-  subscriber's return marshalled to a `HostValue`. Default-deny: missing permission or a
-  non-collector event → empty result.
+- **Host API.** `mote.events.collect(event, payload) -> { contribution, ... }`, valid **only**
+  for events whose registry dispatch shape is `Collector`. Gated by the **`events:emit`**
+  permission (the caller owns/emits the collector surface). Returns a Lua array, one entry per
+  *contributing* subscriber, each the subscriber's return marshalled to a `HostValue`.
+  **Default-deny is the uniform failure mode:** missing permission, unknown event, non-collector
+  event, or a payload-marshalling failure all return an **empty result** — the host API never
+  raises into the plugin sandbox. This matches the codebase's universal default-deny idiom
+  (e.g. `storage.get` returns `nil` on deny). The distinct rejection conditions remain
+  observable to tests and audit via the runtime's `CollectError` typed return inside
+  `Core::collect`; they just don't surface as Lua errors to the calling plugin.
 - **Subscriber contract.** A contributor declares an `events[<collector-event>]` handler that
   **returns** its contributions. (Broadcast handlers' returns remain discarded; only the
   collecting path captures them.) Subscribing requires **`events:on`**.
