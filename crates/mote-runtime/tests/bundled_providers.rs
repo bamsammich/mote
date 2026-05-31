@@ -1,8 +1,8 @@
-//! Conformance test for the two bundled first-party provider plugins.
+//! Conformance test for the bundled first-party provider plugins.
 //!
-//! Loads `plugins/urlbar/init.lua` and `plugins/workspace-manager/init.lua`
-//! through the runtime's full four-step load pipeline against the real v1
-//! registry, asserting:
+//! Loads `plugins/urlbar/init.lua`, `plugins/workspace-manager/init.lua`, and
+//! `plugins/bookmarks/init.lua` through the runtime's full four-step load
+//! pipeline against the real v1 registry, asserting:
 //!
 //! 1. Step-1 (schema validation): every declared permission, capability, and
 //!    consumes term is known to the registry.
@@ -31,6 +31,9 @@ const URLBAR_SRC: &str = include_str!("../../../plugins/urlbar/init.lua");
 
 /// The bundled workspace-manager provider plugin source.
 const WORKSPACE_MANAGER_SRC: &str = include_str!("../../../plugins/workspace-manager/init.lua");
+
+/// The bundled bookmarks provider plugin source.
+const BOOKMARKS_SRC: &str = include_str!("../../../plugins/bookmarks/init.lua");
 
 fn make_runtime() -> (Runtime, AuditLog) {
     let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
@@ -154,6 +157,59 @@ fn workspace_manager_passes_step1_and_step3_in_isolation() {
     registry
         .check_conformance(&loaded)
         .expect("workspace-manager: step-3 contract conformance must pass");
+}
+
+/// The bookmarks plugin loads through the full four-step pipeline and passes
+/// step-1 (schema validation) and step-3 (contract conformance) against the
+/// real v1 registry.
+#[test]
+fn bookmarks_provider_loads_and_conforms() {
+    let (mut runtime, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+
+    let running = runtime
+        .load(BOOKMARKS_SRC, identity(), &policy)
+        .expect("bookmarks plugin must load cleanly through the four-step pipeline");
+
+    // The plugin loaded with the correct name.
+    assert_eq!(running.name, plugin("bookmarks"));
+
+    // It fulfills the `ui:bookmarks_provider` capability.
+    assert!(
+        running
+            .capabilities
+            .contains(&"ui:bookmarks_provider".to_owned()),
+        "bookmarks must claim ui:bookmarks_provider; got: {:?}",
+        running.capabilities
+    );
+
+    // It is tracked as loaded.
+    assert!(runtime.is_loaded(&plugin("bookmarks")));
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// Step-1 + step-3 can be exercised in isolation (without running `setup()`)
+/// using `mote_lua::load_plugin` + `Registry` directly. This proves the two
+/// steps pass for the bookmarks plugin without any side effects.
+#[test]
+fn bookmarks_passes_step1_and_step3_in_isolation() {
+    use mote_lua::load_plugin;
+
+    let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+    let loaded = load_plugin(BOOKMARKS_SRC, "plugins/bookmarks/init.lua")
+        .expect("bookmarks module loads without error");
+    let m = loaded.manifest();
+
+    // Step 1.
+    registry
+        .validate_schema(&m.permissions, &m.capabilities, &m.consumes)
+        .expect("bookmarks: step-1 schema validation must pass");
+
+    // Step 3.
+    registry
+        .check_conformance(&loaded)
+        .expect("bookmarks: step-3 contract conformance must pass");
 }
 
 /// Both bundled providers can coexist in a single runtime without
