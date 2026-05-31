@@ -30,7 +30,6 @@
 //!      records the new active id.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -483,15 +482,4 @@ return M
 
     drain(&log);
     log.shutdown().expect("audit log shuts down cleanly");
-}
-
-// ---------------------------------------------------------------------------
-// Arc<Mutex> helper used only if needed — kept as dead_code to show the
-// alternative pattern from the brief.  The synchronous Lua stash approach
-// used above is simpler and equally correct since emit is synchronous within
-// the runtime's single-threaded Lua execution model.
-// ---------------------------------------------------------------------------
-#[allow(dead_code)]
-fn _unused_mutex_pattern() -> Arc<Mutex<String>> {
-    Arc::new(Mutex::new(String::new()))
 }
