@@ -116,3 +116,86 @@
 .omni.mode-find .cursor {
   background: var(--info);
 }
+
+/* ---- omnibar-row: anchor for the completion popup ---- */
+/* position: relative so .omni-completions can use absolute positioning from
+ * the form's bottom edge, overlaying the page area. */
+.omnibar-row {
+  position: relative;
+}
+
+/* ---- completion popup -------------------------------------------------- */
+/* Anchored beneath .omni when .omni.has-completions. Shares an edge with the
+ * omnibox (rule 5: shadows on floating surfaces — completion popup is named
+ * explicitly). */
+
+.omni.has-completions {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.omni-completions {
+  display: none;                                    /* shown via .is-open */
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 700;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-top: 0;                                    /* shared edge */
+  border-radius: 0 0 var(--radius-3) var(--radius-3);
+  box-shadow: var(--shadow-2);
+  font: var(--text-mono);
+  max-height: calc(10 * 32px);                      /* hard cap = merge cap */
+  overflow-y: auto;
+  /* terminal-grid: column gaps; padding lives on rows */
+}
+
+.omni-completions.is-open { display: block; }
+
+.omni-completion-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;             /* url | title | source */
+  align-items: center;
+  gap: 16px;
+  height: 32px;
+  padding: 0 14px;
+  color: var(--fg-1);
+  cursor: pointer;
+}
+
+.omni-completion-row .url {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.omni-completion-row .url b {
+  color: var(--accent);
+  font-weight: inherit;                             /* matched substring */
+}
+
+.omni-completion-row .title {
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+.omni-completion-row .source {
+  color: var(--fg-2);
+  justify-self: end;
+  min-width: 10ch;
+  text-align: right;                                /* fixed to fit [bookmark] */
+}
+
+.omni-completion-row .source .br   { color: var(--fg-2); }
+.omni-completion-row .source .name { color: var(--fg-2); }
+
+.omni-completion-row.is-sel {
+  background: var(--surface-2);
+  color: var(--fg);
+}

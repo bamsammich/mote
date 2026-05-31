@@ -92,6 +92,10 @@
               autocomplete="off"
               aria-label="address"
               placeholder="enter a url"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-controls="omnibox-completions"
+              aria-expanded="false"
             />
             <!-- urlbar-inline: urlbar-extension elements nest here -->
             <div class="right" data-slot="urlbar-inline">
@@ -105,6 +109,14 @@
           </div>
         </div>
       </form>
+      <div
+        id="omnibox-completions"
+        class="omni-completions"
+        role="listbox"
+        aria-label="url suggestions"
+      >
+        <!-- rows are appended by host.js via DOM-build (never innerHTML) -->
+      </div>
     </div>
 
     <!-- ========================= BODY ROW ========================= -->
