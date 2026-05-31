@@ -35,6 +35,10 @@ const WORKSPACE_MANAGER_SRC: &str = include_str!("../../../plugins/workspace-man
 /// The bundled bookmarks provider plugin source.
 const BOOKMARKS_SRC: &str = include_str!("../../../plugins/bookmarks/init.lua");
 
+/// The bundled history provider plugin source.
+/// History owns both `ui:history_provider` and `ui:urlbar_provider`.
+const HISTORY_SRC: &str = include_str!("../../../plugins/history/init.lua");
+
 fn make_runtime() -> (Runtime, AuditLog) {
     let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
     let store = Store::open_in_memory().expect("in-memory store");
@@ -156,6 +160,66 @@ fn bookmarks_passes_step1_and_step3_in_isolation() {
     registry
         .check_conformance(&loaded)
         .expect("bookmarks: step-3 contract conformance must pass");
+}
+
+/// The history plugin loads through the full four-step pipeline and passes
+/// step-1 (schema validation) and step-3 (contract conformance) against the
+/// real v1 registry.  History claims BOTH `ui:history_provider` AND
+/// `ui:urlbar_provider` — the two capabilities must both appear in its
+/// `running.capabilities` set.
+#[test]
+fn history_provider_loads_and_conforms() {
+    let (mut runtime, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+
+    let running = runtime
+        .load(HISTORY_SRC, identity(), &policy)
+        .expect("history plugin must load cleanly through the four-step pipeline");
+
+    // The plugin loaded with the correct name.
+    assert_eq!(running.name, plugin("history"));
+
+    // It fulfills BOTH the history and urlbar capabilities.
+    assert!(
+        running
+            .capabilities
+            .contains(&"ui:history_provider".to_owned()),
+        "history must claim ui:history_provider; got: {:?}",
+        running.capabilities
+    );
+    assert!(
+        running
+            .capabilities
+            .contains(&"ui:urlbar_provider".to_owned()),
+        "history must claim ui:urlbar_provider; got: {:?}",
+        running.capabilities
+    );
+
+    // It is tracked as loaded.
+    assert!(runtime.is_loaded(&plugin("history")));
+
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// Step-1 + step-3 can be exercised in isolation for the history plugin.
+#[test]
+fn history_passes_step1_and_step3_in_isolation() {
+    use mote_lua::load_plugin;
+
+    let registry = Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+    let loaded = load_plugin(HISTORY_SRC, "plugins/history/init.lua")
+        .expect("history module loads without error");
+    let m = loaded.manifest();
+
+    // Step 1.
+    registry
+        .validate_schema(&m.permissions, &m.capabilities, &m.consumes)
+        .expect("history: step-1 schema validation must pass");
+
+    // Step 3.
+    registry
+        .check_conformance(&loaded)
+        .expect("history: step-3 contract conformance must pass");
 }
 
 /// Multiple bundled providers can coexist in a single runtime without

@@ -1603,6 +1603,10 @@ return M
         );
         assert!(loaded.contains(&"approved-plugin"), "got {loaded:?}");
         assert!(
+            loaded.contains(&"history"),
+            "bundled history loaded: {loaded:?}"
+        );
+        assert!(
             loaded.contains(&"bookmarks"),
             "bundled bookmarks loaded: {loaded:?}"
         );
@@ -1690,6 +1694,10 @@ return M
             "exactly the unapproved plugin is pending"
         );
         // Bundled defaults still auto-grant + load regardless.
+        assert!(
+            loaded.contains(&"history"),
+            "bundled history still loads: {loaded:?}"
+        );
         assert!(
             loaded.contains(&"bookmarks"),
             "bundled bookmarks still loads: {loaded:?}"

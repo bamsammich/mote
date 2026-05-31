@@ -2044,6 +2044,10 @@ return M
             "plugin with unparsable source must be omitted: {names:?}"
         );
         assert!(
+            names.contains(&"history"),
+            "bundled defaults must still seed when a sibling fails: {names:?}"
+        );
+        assert!(
             names.contains(&"bookmarks"),
             "bundled defaults must still seed when a sibling fails: {names:?}"
         );

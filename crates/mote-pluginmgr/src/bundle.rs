@@ -174,6 +174,7 @@ mod tests {
             !strs.contains(&"urlbar"),
             "urlbar must NOT be bundled (history owns ui:urlbar_provider); got {strs:?}"
         );
+        assert!(strs.contains(&"history"), "got {strs:?}");
         assert!(strs.contains(&"bookmarks"), "got {strs:?}");
         assert!(strs.contains(&"workspace-manager"), "got {strs:?}");
     }
