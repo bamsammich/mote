@@ -229,29 +229,37 @@
               <span class="br">[</span><span class="name">tabs</span
               ><span class="br">]</span>
             </span>
-            <span class="sidepanel-meta">4 open · 1 hidden</span>
+            <span class="sidepanel-meta">0 open</span>
           </header>
           <div class="sidepanel-body">
-            <!--
-              tab-row: the tabstrip element nests here (maintainer decision —
-              tabs render vertically in the sidebar, not the top-bar). The
-              `theme-vertical` tabbar variant stacks the rows.
-            -->
-            <div data-slot="tab-row">
-              <div
-                id="tabstrip"
-                class="tabbar theme-vertical"
-                role="tablist"
-                aria-label="open tabs"
-              >
-                <!-- host.js rebuilds these rows from the runtime tab list. A
-                     single seed row keeps the panel non-empty before first
-                     paint. -->
-                <div class="tab is-active" role="tab" aria-selected="true">
-                  <span class="favicon"></span>
-                  <span class="title">new tab</span>
+            <div data-panel="tabs" class="is-active-panel">
+              <!--
+                tab-row: the tabstrip element nests here (maintainer decision —
+                tabs render vertically in the sidebar, not the top-bar). The
+                `theme-vertical` tabbar variant stacks the rows.
+              -->
+              <div data-slot="tab-row">
+                <div
+                  id="tabstrip"
+                  class="tabbar theme-vertical"
+                  role="tablist"
+                  aria-label="open tabs"
+                >
+                  <!-- host.js rebuilds these rows from the runtime tab list. A
+                       single seed row keeps the panel non-empty before first
+                       paint. -->
+                  <div class="tab is-active" role="tab" aria-selected="true">
+                    <span class="favicon"></span>
+                    <span class="title">new tab</span>
+                  </div>
                 </div>
               </div>
+            </div>
+            <div data-panel="bookmarks">
+              <!-- rows rendered by host.js applyOp("bookmark_list", …) -->
+            </div>
+            <div data-panel="history">
+              <!-- rows rendered by host.js applyOp("history_list", …) -->
             </div>
           </div>
         </div>

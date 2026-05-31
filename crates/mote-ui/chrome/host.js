@@ -429,6 +429,90 @@
     });
   }
 
+  // ---- Activity-bar panel switching --------------------------------------
+  //
+  // Binds the three first-class panels (tabs, bookmarks, history) to the
+  // activity-bar buttons identified by aria-label. On click:
+  //   1. Update is-active + aria-pressed on the activity buttons.
+  //   2. Switch the visible [data-panel] container via is-active-panel.
+  //   3. Update the [tabs]/[bookmarks]/[history] lockup .name in the header.
+  //   4. Invoke set_active_panel so the shell pushes fresh data (no-op for tabs).
+  function wireActivityBar() {
+    var panels = ["tabs", "bookmarks", "history"];
+    var buttons = {};
+    var containers = {};
+    var nameEl = document.querySelector(".sidepanel-slot .name");
+    var metaEl = document.querySelector(".sidepanel-meta");
+
+    panels.forEach(function (name) {
+      var btn = document.querySelector(".activity-btn[aria-label='" + name + "']");
+      var container = document.querySelector("[data-panel='" + name + "']");
+      if (btn) buttons[name] = btn;
+      if (container) containers[name] = container;
+    });
+
+    function switchToPanel(name) {
+      // Update activity button states.
+      panels.forEach(function (p) {
+        var btn = buttons[p];
+        if (!btn) return;
+        if (p === name) {
+          btn.classList.add("is-active");
+          btn.setAttribute("aria-pressed", "true");
+        } else {
+          btn.classList.remove("is-active");
+          btn.setAttribute("aria-pressed", "false");
+        }
+      });
+
+      // Switch visible panel container.
+      panels.forEach(function (p) {
+        var c = containers[p];
+        if (!c) return;
+        if (p === name) {
+          c.classList.add("is-active-panel");
+        } else {
+          c.classList.remove("is-active-panel");
+        }
+      });
+
+      // Update the lockup header name.
+      if (nameEl) {
+        nameEl.textContent = name;
+      }
+
+      // Tell the shell to push fresh data (tabs is handled by existing push_state_to_chrome).
+      if (name !== "tabs") {
+        if (window.mote && window.mote.invoke) {
+          window.mote
+            .invoke("set_active_panel", { name: name })
+            .catch(function () {});
+        }
+      }
+    }
+
+    panels.forEach(function (name) {
+      var btn = buttons[name];
+      if (!btn) return;
+      btn.addEventListener("click", function () {
+        switchToPanel(name);
+      });
+    });
+
+    // Expose for use in applyOp handlers that need to update meta selectively.
+    return {
+      activePanel: function () {
+        for (var i = 0; i < panels.length; i++) {
+          var p = panels[i];
+          var btn = buttons[p];
+          if (btn && btn.classList.contains("is-active")) return p;
+        }
+        return "tabs";
+      },
+      metaEl: metaEl,
+    };
+  }
+
   // The structured-op application seam (Rust → chrome): the shell pushes live
   // tab-list and current-URL state here so the tab strip + omnibox reflect
   // reality. A payload is parsed DATA, never markup.
@@ -456,6 +540,148 @@
     }
   };
 
+  // ---- applyOp handler for bookmark_list + history_list -----------------
+  //
+  // Chained via prevApplyOp so existing set_url/set_tabs/urlbar_suggestions ops
+  // are preserved.  Payload contracts:
+  //   bookmark_list: { rows: [{url, title}, ...], count: N }
+  //   history_list:  { rows: [{url, title}, ...], count: N, truncated: bool }
+  //
+  // DOM-build discipline (ADR-0005): createElement + textContent + appendChild.
+  // NEVER innerHTML on payload-derived content.
+  function wireSidePanelOps(activityBar) {
+    var prevApplyOp =
+      typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
+
+    window.mote.applyOp = function (op, payload) {
+      if (op === "bookmark_list") {
+        var container = document.querySelector("[data-panel='bookmarks']");
+        if (!container) {
+          if (prevApplyOp) prevApplyOp(op, payload);
+          return;
+        }
+
+        // Clear previous content.
+        container.textContent = "";
+
+        var rows = (payload && Array.isArray(payload.rows)) ? payload.rows : [];
+        var count = (payload && typeof payload.count === "number") ? payload.count : rows.length;
+
+        var list = document.createElement("div");
+        list.className = "sidepanel-list";
+
+        rows.forEach(function (record) {
+          var row = document.createElement("button");
+          row.className = "sidepanel-row";
+          var url = (typeof record.url === "string") ? record.url : "";
+          row.setAttribute("data-url", url);
+
+          var urlSpan = document.createElement("span");
+          urlSpan.className = "row-url";
+          urlSpan.textContent = url;
+          row.appendChild(urlSpan);
+
+          var titleSpan = document.createElement("span");
+          titleSpan.className = "row-title";
+          titleSpan.textContent = (typeof record.title === "string") ? record.title : "";
+          row.appendChild(titleSpan);
+
+          var removeBtn = document.createElement("button");
+          removeBtn.className = "row-remove";
+          removeBtn.setAttribute("aria-label", "remove bookmark");
+          removeBtn.textContent = "×"; // ×
+          removeBtn.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            if (window.mote && window.mote.invoke) {
+              window.mote
+                .invoke("bookmark_remove", { url: url })
+                .catch(function () {});
+            }
+          });
+          row.appendChild(removeBtn);
+
+          row.addEventListener("click", function () {
+            if (window.mote && window.mote.invoke) {
+              window.mote.invoke("navigate", { url: url }).catch(function () {});
+            }
+          });
+
+          list.appendChild(row);
+        });
+
+        container.appendChild(list);
+
+        // Update meta when bookmarks is the active panel.
+        var metaEl = activityBar.metaEl;
+        if (metaEl && activityBar.activePanel() === "bookmarks") {
+          metaEl.textContent = count + " saved";
+        }
+        return;
+      }
+
+      if (op === "history_list") {
+        var hContainer = document.querySelector("[data-panel='history']");
+        if (!hContainer) {
+          if (prevApplyOp) prevApplyOp(op, payload);
+          return;
+        }
+
+        // Clear previous content.
+        hContainer.textContent = "";
+
+        var hRows = (payload && Array.isArray(payload.rows)) ? payload.rows : [];
+        var hCount = (payload && typeof payload.count === "number") ? payload.count : hRows.length;
+        var truncated = (payload && payload.truncated === true);
+
+        var hList = document.createElement("div");
+        hList.className = "sidepanel-list";
+
+        hRows.forEach(function (record) {
+          var hRow = document.createElement("button");
+          hRow.className = "sidepanel-row";
+          var hUrl = (typeof record.url === "string") ? record.url : "";
+          hRow.setAttribute("data-url", hUrl);
+
+          var hUrlSpan = document.createElement("span");
+          hUrlSpan.className = "row-url";
+          hUrlSpan.textContent = hUrl;
+          hRow.appendChild(hUrlSpan);
+
+          var hTitleSpan = document.createElement("span");
+          hTitleSpan.className = "row-title";
+          hTitleSpan.textContent = (typeof record.title === "string") ? record.title : "";
+          hRow.appendChild(hTitleSpan);
+
+          hRow.addEventListener("click", function () {
+            if (window.mote && window.mote.invoke) {
+              window.mote.invoke("navigate", { url: hUrl }).catch(function () {});
+            }
+          });
+
+          hList.appendChild(hRow);
+        });
+
+        hContainer.appendChild(hList);
+
+        if (truncated) {
+          var footer = document.createElement("div");
+          footer.className = "sidepanel-footer";
+          footer.textContent = "showing 200 most recent";
+          hContainer.appendChild(footer);
+        }
+
+        // Update meta when history is the active panel.
+        var hMetaEl = activityBar.metaEl;
+        if (hMetaEl && activityBar.activePanel() === "history") {
+          hMetaEl.textContent = hCount + " visits";
+        }
+        return;
+      }
+
+      if (prevApplyOp) prevApplyOp(op, payload);
+    };
+  }
+
   function boot() {
     installInvoke();
     wireOmnibox();
@@ -463,6 +689,11 @@
     // Chain the urlbar_suggestions applyOp handler after the base handler is
     // installed above.  wireCompletionsOp() captures prevApplyOp at call-time.
     wireCompletionsOp();
+    // Wire the activity-bar panel switching (tabs / bookmarks / history).
+    var activityBar = wireActivityBar();
+    // Chain the bookmark_list + history_list applyOp handlers last so they wrap
+    // all prior handlers.
+    wireSidePanelOps(activityBar);
   }
 
   if (document.readyState === "loading") {

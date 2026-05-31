@@ -180,6 +180,12 @@ enum ShellCommand {
     /// The chrome omnibox input changed; invoke `ui:urlbar_provider` → `query`
     /// and push the results to chrome as `applyOp('urlbar_suggestions', …)`.
     UrlbarQuery(String),
+    /// The user switched the active sidebar panel; invoke the appropriate list
+    /// capability and push the result to chrome.
+    SetActivePanel(String),
+    /// The user removed a bookmark from the bookmarks panel; invoke
+    /// `ui:bookmarks_provider` → `remove_bookmark` and re-push the bookmark list.
+    BookmarkRemove(String),
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -595,6 +601,10 @@ fn build_overlay_resources(integrity_html: &str) -> ChromeResources {
 /// Build the closed op registry. Ops translate chrome intents into
 /// [`ShellCommand`]s the winit loop applies (the handlers are `Send + Sync` and
 /// must not capture the `!Send` pages).
+#[allow(
+    clippy::too_many_lines,
+    reason = "registry factory — each op is one logical entry; extracting sub-factories adds indirection without clarity"
+)]
 fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let nav_queue = Arc::clone(commands);
     let focus_queue = Arc::clone(commands);
@@ -606,6 +616,8 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let rollback_queue = Arc::clone(commands);
     let reload_queue = Arc::clone(commands);
     let revoke_queue = Arc::clone(commands);
+    let set_active_panel_queue = Arc::clone(commands);
+    let bookmark_remove_queue = Arc::clone(commands);
     let adjust_queue = Arc::clone(commands);
     let revoke_secret_queue = Arc::clone(commands);
     let urlbar_query_queue = Arc::clone(commands);
@@ -686,6 +698,24 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                 || OpResponse::err(400, "urlbar_query requires a string `text`"),
                 |text| {
                     push(&urlbar_query_queue, ShellCommand::UrlbarQuery(text));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
+        })
+        .register("set_active_panel", move |params: &str| {
+            json_string_field(params, "name").map_or_else(
+                || OpResponse::err(400, "set_active_panel requires a string `name`"),
+                |name| {
+                    push(&set_active_panel_queue, ShellCommand::SetActivePanel(name));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
+        })
+        .register("bookmark_remove", move |params: &str| {
+            json_string_field(params, "url").map_or_else(
+                || OpResponse::err(400, "bookmark_remove requires a string `url`"),
+                |url| {
+                    push(&bookmark_remove_queue, ShellCommand::BookmarkRemove(url));
                     OpResponse::ok("{\"ok\":true}")
                 },
             )
@@ -930,6 +960,8 @@ impl ShellApp {
                     self.plugin_revoke_secret(&plugin, &name);
                 }
                 ShellCommand::UrlbarQuery(text) => self.urlbar_query(&text),
+                ShellCommand::SetActivePanel(name) => self.set_active_panel(&name),
+                ShellCommand::BookmarkRemove(url) => self.bookmark_remove(&url),
             }
         }
     }
@@ -992,6 +1024,177 @@ impl ShellApp {
         let chrome = self.bridge.page();
         chrome.eval_js(&format!(
             "window.mote&&window.mote.applyOp&&window.mote.applyOp('urlbar_suggestions',{payload_json});"
+        ));
+    }
+
+    /// Switch the active sidebar panel and push fresh data to chrome.
+    ///
+    /// `"bookmarks"` → [`push_bookmark_list`]; `"history"` → [`push_history_list`].
+    /// `"tabs"` is a no-op here — the existing [`push_state_to_chrome`] already
+    /// covers tab state.  Unknown panel names are silently ignored.
+    fn set_active_panel(&self, name: &str) {
+        match name {
+            "bookmarks" => self.push_bookmark_list(),
+            "history" => self.push_history_list(),
+            _ => {}
+        }
+    }
+
+    /// Remove the bookmark keyed by `url` and re-push the bookmark list.
+    ///
+    /// Invokes `ui:bookmarks_provider` → `remove_bookmark` with `{ url }`.
+    /// Returns after pushing the updated list regardless of the remove outcome
+    /// (no-op for a URL that was never bookmarked).
+    fn bookmark_remove(&self, url: &str) {
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        let arg = HostValue::Map(arg_map);
+        let _ =
+            self.host
+                .runtime
+                .invoke_capability("ui:bookmarks_provider", "remove_bookmark", &arg);
+        self.push_bookmark_list();
+    }
+
+    /// Invoke `ui:bookmarks_provider` → `list_bookmarks` with an empty filter
+    /// and push the result to chrome as `applyOp('bookmark_list', {rows, count})`.
+    ///
+    /// # Failure policy
+    ///
+    /// - No fulfiller / contract violation → returns `None`; push an empty list.
+    /// - The provider may return an empty Lua table `{}` which marshals to
+    ///   [`HostValue::Map`] (empty-table-marshalling defensiveness, lessons.md L3).
+    ///   Normalise any non-List to `List([])`.
+    /// - Rows are sorted by `added` desc (the bookmarks plugin's monotonic `_seq`
+    ///   counter — larger value = more recently added).
+    pub(crate) fn push_bookmark_list(&self) {
+        // Pass empty string filter — list_bookmarks(filter) returns all when empty.
+        let arg = HostValue::Str(String::new());
+        let raw =
+            self.host
+                .runtime
+                .invoke_capability("ui:bookmarks_provider", "list_bookmarks", &arg);
+
+        let mut items = match raw {
+            Some(HostValue::List(v)) => v,
+            _ => vec![],
+        };
+
+        // Sort by `added` desc (higher _seq = added more recently).
+        items.sort_by(|a, b| {
+            let added_a = match a {
+                HostValue::Map(m) => match m.get("added") {
+                    Some(HostValue::Number(f)) => *f,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            };
+            let added_b = match b {
+                HostValue::Map(m) => match m.get("added") {
+                    Some(HostValue::Number(f)) => *f,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            };
+            added_b
+                .partial_cmp(&added_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let count = items.len();
+        let rows_json = match serde_json::to_string(&host_to_json(&HostValue::List(items))) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: push_bookmark_list serialise failed: {e}");
+                "[]".to_owned()
+            }
+        };
+
+        let payload_json = format!("{{\"rows\":{rows_json},\"count\":{count}}}");
+
+        if !self.chrome_ready {
+            return;
+        }
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('bookmark_list',{payload_json});"
+        ));
+    }
+
+    /// Invoke `ui:history_provider` → `query_history` with an empty filter and
+    /// push the result to chrome as
+    /// `applyOp('history_list', {rows, count, truncated})`.
+    ///
+    /// The shell caps the pushed rows at 200. When the plugin returns more than 200
+    /// results the `truncated` flag is `true` and only the first 200 are pushed.
+    ///
+    /// # Sorting
+    ///
+    /// Results are returned by the plugin already ranked by
+    /// `visit_count * 1_000_000 + last_visited` descending. The shell re-sorts by
+    /// `last_visited` descending (recency first) as specified for the history panel
+    /// — a pure recency view rather than visit-count ranking.
+    ///
+    /// # Failure policy
+    ///
+    /// Same as [`push_bookmark_list`]: normalise non-List results to an empty list.
+    pub(crate) fn push_history_list(&self) {
+        const HISTORY_CAP: usize = 200;
+
+        let arg = HostValue::Str(String::new());
+        let raw = self
+            .host
+            .runtime
+            .invoke_capability("ui:history_provider", "query_history", &arg);
+
+        let mut items = match raw {
+            Some(HostValue::List(v)) => v,
+            _ => vec![],
+        };
+
+        // Re-sort by last_visited desc (recency — the panel is a reverse-chrono view).
+        items.sort_by(|a, b| {
+            let lv_a = match a {
+                HostValue::Map(m) => match m.get("last_visited") {
+                    Some(HostValue::Number(f)) => *f,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            };
+            let lv_b = match b {
+                HostValue::Map(m) => match m.get("last_visited") {
+                    Some(HostValue::Number(f)) => *f,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            };
+            lv_b.partial_cmp(&lv_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let original_count = items.len();
+        let truncated = original_count > HISTORY_CAP;
+        if truncated {
+            items.truncate(HISTORY_CAP);
+        }
+        let count = items.len();
+
+        let rows_json = match serde_json::to_string(&host_to_json(&HostValue::List(items))) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: push_history_list serialise failed: {e}");
+                "[]".to_owned()
+            }
+        };
+
+        let payload_json =
+            format!("{{\"rows\":{rows_json},\"count\":{count},\"truncated\":{truncated}}}");
+
+        if !self.chrome_ready {
+            return;
+        }
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('history_list',{payload_json});"
         ));
     }
 
@@ -2688,6 +2891,95 @@ fn json_string_field(json: &str, field: &str) -> Option<String> {
 fn json_u64_field(json: &str, field: &str) -> Option<u64> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     value.as_object()?.get(field)?.as_u64()
+}
+
+/// Build the `bookmark_list` applyOp JSON payload from the runtime, without
+/// performing the `eval_js` push.
+///
+/// This is the testable intermediate-state seam for the three bookmark/history
+/// TDD tests (the chrome page is not available in headless tests). The payload
+/// shape is `{"rows":[{url,title,...}...],"count":N}`.
+///
+/// Returns `None` when the `ui:bookmarks_provider` capability is unavailable.
+#[cfg(test)]
+pub(crate) fn build_bookmark_list_json(host: &runtime::PluginHost) -> Option<String> {
+    let arg = HostValue::Str(String::new());
+    let raw = host
+        .runtime
+        .invoke_capability("ui:bookmarks_provider", "list_bookmarks", &arg)?;
+
+    let mut items = match raw {
+        HostValue::List(v) => v,
+        _ => vec![],
+    };
+
+    // Sort by `added` desc (per push_bookmark_list).
+    items.sort_by(|a, b| {
+        let added = |v: &HostValue| match v {
+            HostValue::Map(m) => match m.get("added") {
+                Some(HostValue::Number(f)) => *f,
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+        added(b)
+            .partial_cmp(&added(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let count = items.len();
+    let rows_json = serde_json::to_string(&host_to_json(&HostValue::List(items)))
+        .unwrap_or_else(|_| "[]".to_owned());
+    Some(format!("{{\"rows\":{rows_json},\"count\":{count}}}"))
+}
+
+/// Build the `history_list` applyOp JSON payload from the runtime, without
+/// performing the `eval_js` push.
+///
+/// This is the testable intermediate-state seam for the history TDD tests.
+/// The payload shape is `{"rows":[...],"count":N,"truncated":bool}`.
+///
+/// Returns `None` when the `ui:history_provider` capability is unavailable.
+#[cfg(test)]
+pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<String> {
+    const HISTORY_CAP: usize = 200;
+
+    let arg = HostValue::Str(String::new());
+    let raw = host
+        .runtime
+        .invoke_capability("ui:history_provider", "query_history", &arg)?;
+
+    let mut items = match raw {
+        HostValue::List(v) => v,
+        _ => vec![],
+    };
+
+    // Re-sort by last_visited desc (per push_history_list).
+    items.sort_by(|a, b| {
+        let lv = |v: &HostValue| match v {
+            HostValue::Map(m) => match m.get("last_visited") {
+                Some(HostValue::Number(f)) => *f,
+                _ => 0.0,
+            },
+            _ => 0.0,
+        };
+        lv(b)
+            .partial_cmp(&lv(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let original_count = items.len();
+    let truncated = original_count > HISTORY_CAP;
+    if truncated {
+        items.truncate(HISTORY_CAP);
+    }
+    let count = items.len();
+
+    let rows_json = serde_json::to_string(&host_to_json(&HostValue::List(items)))
+        .unwrap_or_else(|_| "[]".to_owned());
+    Some(format!(
+        "{{\"rows\":{rows_json},\"count\":{count},\"truncated\":{truncated}}}"
+    ))
 }
 
 #[cfg(test)]

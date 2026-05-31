@@ -148,6 +148,93 @@ When the `tabs` panel is the chosen default, a theme typically leaves the `top-b
 - The activity bar is `<nav aria-label="sidebar panels">` with each button having an `aria-label` and `aria-pressed` matching its active state.
 - The active panel name is announced via `aria-live="polite"` in the panel header.
 
+## Panel rows (bookmarks / history)
+
+Bookmarks and history panels render their data as a mono-row vertical list.
+The shell builds the DOM; plugin authors return only data.
+
+### Row structure
+
+```html
+<!-- bookmark row (has remove control) -->
+<button class="sidepanel-row" data-url="https://example.com">
+  <span class="row-url">https://example.com</span>
+  <span class="row-title">Example Page</span>
+  <button class="row-remove" aria-label="remove bookmark">×</button>
+</button>
+
+<!-- history row (no remove control; the grid col stays but the cell is absent) -->
+<button class="sidepanel-row" data-url="https://example.com">
+  <span class="row-url">https://example.com</span>
+  <span class="row-title">Example Page</span>
+</button>
+
+<!-- footer shown only when truncated == true -->
+<div class="sidepanel-footer">showing 200 most recent</div>
+```
+
+### Token table
+
+| Class | Property | Token | Notes |
+|---|---|---|---|
+| `.sidepanel-list` | `font` | `var(--text-mono)` | mono surface throughout |
+| `.sidepanel-list` | `padding` | `4px 0` | tight vertical rhythm |
+| `.sidepanel-row` | `grid-template-columns` | `1fr auto auto` | url \| title \| optional control |
+| `.sidepanel-row` | `gap` | `12px` | column spacing |
+| `.sidepanel-row` | `padding` | `6px 12px` | row inset |
+| `.sidepanel-row` | `background` | `transparent` (default) / `var(--surface-2)` (hover) | |
+| `.row-url` | `color` | `var(--fg)` | primary |
+| `.row-url` | `text-overflow` | `ellipsis` | overflow handling |
+| `.row-title` | `color` | `var(--fg-2)` | dim companion |
+| `.row-title` | `max-width` | `140px` | prevent layout blowout |
+| `.row-remove` | `color` (default) | `var(--fg-3)` | very dim |
+| `.row-remove` | `color` (row hover) | `var(--fg-2)` | surfaces on row hover |
+| `.row-remove` | `color` (button hover) | `var(--accent)` | destructive signal |
+| `.row-remove` | `border` (button hover) | `1px solid var(--border)` | |
+| `.row-remove` | `background` (button hover) | `var(--surface-1)` | |
+| `.row-remove` | `border-radius` | `var(--radius-1)` | sharp |
+| `.sidepanel-footer` | `font` | `var(--text-mono-sm)` | smaller than rows |
+| `.sidepanel-footer` | `color` | `var(--fg-2)` | dim |
+| `.sidepanel-footer` | `border-top` | `1px solid var(--border)` | hairline separator |
+
+### States
+
+| Element | State | Effect |
+|---|---|---|
+| `.sidepanel-row` | hover | `background: var(--surface-2)` |
+| `.row-remove` | row-hover | color `var(--fg-2)` |
+| `.row-remove` | button-hover | `color: var(--accent)` + border + background |
+
+### Behavior
+
+- Click a row → `mote.invoke("navigate", {url})`.
+- Click `×` (bookmarks only) → `event.stopPropagation()` then `mote.invoke("bookmark_remove", {url})`. The shell re-pushes `bookmark_list` after the removal.
+- History rows have no remove control.
+- History panel shows a `.sidepanel-footer` footer only when `truncated == true` in the payload.
+
+### Behavior — data source
+
+Data is pushed by the shell via:
+- `applyOp("bookmark_list", { rows: [{url, title}, ...], count: N })`
+- `applyOp("history_list", { rows: [{url, title}, ...], count: N, truncated: bool })`
+
+The shell calls the relevant capability when:
+1. The panel becomes active (`set_active_panel` op).
+2. After a bookmark mutation (`bookmark_remove` op → re-push).
+
+Plugin authors return data only via the `ui:bookmarks_provider` and
+`ui:history_provider` capabilities. They never touch CSS or HTML — this is the
+key insulation property (same data-only discipline as `bookmarks_contribution.rs`).
+
+### Anti-patterns
+
+- ❌ `innerHTML` with payload content — `createElement` + `textContent` only.
+- ❌ Icons or emoji in rows — mono text surface.
+- ❌ Keycap on rows — rows are list items, not press-buttons (matches `.palette-row` precedent in `palette.md`).
+- ❌ Animation on panel switch — instant, no transitions.
+- ❌ Shadows on rows — shadow only on floating surfaces.
+- ❌ `border-radius` larger than `var(--radius-1)` on `.row-remove`.
+
 ## Anti-patterns
 
 - ❌ Activity bar icons larger than 28px.
