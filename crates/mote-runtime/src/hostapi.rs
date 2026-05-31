@@ -17,6 +17,11 @@
 //!   error.
 //! - `mote.events.emit(name, payload)` → fan out to other plugins' declarative
 //!   `M.events` handlers (broadcast). Gated by `events:emit`.
+//! - `mote.events.collect(name, payload)` → gather contributions from every
+//!   subscriber of a **collector** event (ADR-0010), returned as a Lua array of
+//!   the subscribers' marshalled returns. Restricted to `Collector`-dispatch
+//!   events; gated by `events:emit`. Returns an empty table on denial, an
+//!   unknown event, or a non-collector event (default-deny).
 //! - `mote.capabilities.invoke(capability, fn, arg)` → route to the current
 //!   fulfiller, executing under the fulfiller's permissions (D4). The
 //!   caller-side gate is `events:on` (consumer participation); the fulfiller's
@@ -235,6 +240,47 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
             })
             .map_err(stringify)?;
         events.set("emit", emit).map_err(stringify)?;
+    }
+
+    // --- events.collect(name, payload) -------------------------------------
+    //
+    // Collector dispatch (ADR-0010): an exclusive provider gathers contributions
+    // from every subscriber of a `Collector`-dispatch event, returned as a Lua
+    // array (1-indexed) of each subscriber's marshalled return value. Gated by
+    // the SAME `events:emit` permission as `emit` (the caller owns/emits the
+    // collector surface). Default-deny: missing permission, an unknown event, or
+    // a non-collector event all yield an empty table — never a Lua error,
+    // matching the host-call denial idiom used everywhere else in this module.
+    {
+        let core = core.clone();
+        let g = gate.clone();
+        let audit = audit.clone();
+        let collect = lua
+            .create_function(move |lua, (name, payload): (String, Value)| {
+                let arr = lua.create_table()?;
+                if !g.check("events", "emit", "*", Some(format!("collect {name}"))) {
+                    return Ok(arr);
+                }
+                let Ok(hv) = HostValue::from_lua(&payload) else {
+                    return Ok(arr);
+                };
+                // `Core::collect` rejects non-collector / unknown events with an
+                // `Err`; the host surface maps that to the empty default-deny
+                // table (the rejection condition is observable to tests as "no
+                // contributions").
+                let Ok(contributions) = core.collect(&name, &hv, &audit) else {
+                    return Ok(arr);
+                };
+                for (i, hv) in contributions.iter().enumerate() {
+                    // 1-indexed Lua array. A contribution that cannot be
+                    // re-materialized (OOM) becomes `nil` rather than aborting.
+                    let lv = hv.to_lua(lua).unwrap_or(Value::Nil);
+                    arr.set(i + 1, lv)?;
+                }
+                Ok(arr)
+            })
+            .map_err(stringify)?;
+        events.set("collect", collect).map_err(stringify)?;
     }
 
     // --- capabilities.invoke(capability, fn, arg) --------------------------
