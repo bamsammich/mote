@@ -77,20 +77,58 @@ to support this (see "File overlap + dispatch" below).
 
 ### R1 — Resize repaint cascade
 
-**Problem.** Hyprland resize freezes both chrome and content; `WindowEvent::Resized`
-doesn't propagate to CEF browser hosts. Latent HiDPI gap from prior work has
-the same root: `on_scale_factor_changed` only notifies the active content
-page.
+**Problem.** Triggered cleanly by opening a neighbor window in the same
+Hyprland workspace (e.g. `hyprctl dispatch exec`): Mote tiles smaller,
+then when the neighbor closes Mote expands back — but rendering stays at
+the old (small) dimensions while the surface is padded black to the new
+dimensions. An explicit subsequent `hyprctl resizeactive` immediately
+fixes it.
 
-**Fix.** Introduce `notify_all_pages_of_size_change(width, height, scale)` in
-`ShellApp` that fans out `WasResized` to every alive page in the shell:
-active and inactive content pages, chrome host, open overlay/popup pages.
-Both `WindowEvent::Resized` and `WindowEvent::ScaleFactorChanged` route
-through it.
+**Corrected diagnosis** (initial design assumption was wrong). Existing
+`handle_resize` (`lib.rs:2419`) DOES fan out to chrome + integrity overlay
++ picker overlay + active content page. The defect is that **winit is not
+delivering `WindowEvent::Resized` for every window-state transition
+Hyprland produces** — particularly the close-of-tiled-neighbor → expand
+sequence. `handle_resize` works correctly when called; the question is
+why it's not always called.
 
-**Verification.** Drag Mote between monitors of different scales and across
-tile-grid changes via `hyprctl`; confirm chrome + content + open overlays
-redraw correctly.
+Three subordinate gaps that compound the user-visible symptom:
+1. **Inactive content pages** (other tabs in the current workspace) are
+   not part of the fanout — switching to a non-active tab post-resize
+   shows it at the old size.
+2. **Pages in other workspaces** are not in the fanout — switching
+   workspace post-resize requires materialization but also a correct size.
+3. **The size-zero guard** (`size.width == 0 || size.height == 0` early
+   return at line 2420) could swallow transient zero-size events during
+   compositor reconfigure; needs verification, not blind removal.
+4. **`on_scale_factor_changed`** still only notifies the active content
+   page (`lib.rs:2406`) — the original latent HiDPI gap from memory.
+
+**Fix shape** (refined from initial design):
+- Diagnose which winit events fire on the open-neighbor-close-neighbor
+  sequence (add temporary `tracing::info!` logs in `handle_resize`,
+  `on_scale_factor_changed`, and the main event-loop match — see what
+  arrives vs. what's missing).
+- Likely supplement: catch additional event(s) (`WindowEvent::Moved`,
+  `Focused`, `Occluded`, or a periodic `RedrawRequested`-driven
+  size-reconciliation) to detect and recover when window dimensions
+  changed without a `Resized` delivery. Choice depends on what the
+  diagnostic logs show.
+- Extend fanout to every alive page (active + inactive content,
+  every workspace), not just the active one. Introduce
+  `notify_all_pages_of_size_change(width, height, scale)` and route both
+  `Resized` and `ScaleFactorChanged` through it.
+- Investigate the size-zero guard: log when it triggers; if it's swallowing
+  legitimate transient sizes during compositor reconfigure, replace with
+  smarter handling.
+
+**Verification.**
+- Repro the original bug (open alacritty in same workspace, close it);
+  confirm Mote redraws cleanly without manual intervention.
+- Drag Mote between monitors of different scales via `hyprctl`.
+- Tile-grid changes (cycle through tile layouts).
+- Switch to a previously-inactive tab post-resize; verify it materializes
+  at the correct size on activation.
 
 ### R2 — Address-bar truth
 
