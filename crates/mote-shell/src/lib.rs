@@ -1201,11 +1201,42 @@ impl ShellApp {
         self.workspace = new_ws;
         self.session.set_active_workspace(new_ws);
         self.rebuild_tabs_for_workspace();
+        // Materialize the active tab's CEF page. `rebuild_tabs_for_workspace`
+        // creates every tab with `page: None`; without this materialization the
+        // active tab has no live browser, `navigate_active` silently no-ops
+        // (the `if let Some(page)` skips), and the viewport stays frozen on the
+        // previous workspace's content. Other tabs stay placeholders until
+        // `select_tab` materializes them on focus.
+        self.materialize_active_if_placeholder();
         self.on_active_changed();
         self.persist_and_push();
         // Push updated workspace list so the chrome strip reflects the switch.
         self.push_workspace_list();
         eprintln!("mote-shell: switched to workspace {id} ({new_ws})");
+    }
+
+    /// If the active tab is a placeholder (no live CEF page), create one. Used
+    /// after `rebuild_tabs_for_workspace` so the user-visible result of a
+    /// workspace switch (or any equivalent rebuild) has a live page they can
+    /// navigate / interact with.
+    fn materialize_active_if_placeholder(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if tab.is_live() {
+            return;
+        }
+        let url = tab.url.clone();
+        let id = tab.id;
+        eprintln!("mote-shell: materialize placeholder tab {id} -> {url} (workspace switch)");
+        match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+            Ok(page) => {
+                if let Some(t) = self.tabs.get_mut(self.active) {
+                    t.page = Some(page);
+                }
+            }
+            Err(e) => eprintln!("mote-shell: failed to materialize tab {id}: {e}"),
+        }
     }
 
     /// Rebuild `self.tabs` and `self.active` from the session's
