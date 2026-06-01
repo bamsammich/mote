@@ -150,19 +150,25 @@
   background: var(--surface-2);
 }
 
-.sidepanel-row .row-url {
+/* title is the PRIMARY identifier (browser convention). When a row has no
+ * title (e.g., a bookmark added before D2's title capture, or a visit whose
+ * page never resolved one), host.js falls back to using the URL as the
+ * primary text and leaves .row-url empty so column alignment stays consistent. */
+.sidepanel-row .row-title {
   color: var(--fg);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.sidepanel-row .row-title {
+/* url is the DIM secondary context — capped width so a long URL never squeezes
+ * the title; truncates with ellipsis. */
+.sidepanel-row .row-url {
   color: var(--fg-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  max-width: 240px;
 }
 
 .sidepanel-row .row-remove {

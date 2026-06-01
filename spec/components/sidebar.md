@@ -155,23 +155,34 @@ The shell builds the DOM; plugin authors return only data.
 
 ### Row structure
 
+Title is the **primary** identifier (matches every shipping browser's bookmarks / history panel); URL is the dim **secondary** context. When a row has no title (e.g., a bookmark added before title-capture lands, or a visit whose page never resolved a title), the URL becomes the primary text and the secondary cell is left empty so column alignment stays consistent across rows.
+
 ```html
-<!-- bookmark row (has remove control) -->
+<!-- bookmark row (has title — both cells populated) -->
 <button class="sidepanel-row" data-url="https://example.com">
-  <span class="row-url">https://example.com</span>
   <span class="row-title">Example Page</span>
+  <span class="row-url">https://example.com</span>
   <button class="row-remove" aria-label="remove bookmark">×</button>
 </button>
 
-<!-- history row (no remove control; the grid col stays but the cell is absent) -->
+<!-- bookmark row (no title — URL fills primary, secondary cell empty) -->
 <button class="sidepanel-row" data-url="https://example.com">
-  <span class="row-url">https://example.com</span>
+  <span class="row-title">https://example.com</span>
+  <span class="row-url"></span>
+  <button class="row-remove" aria-label="remove bookmark">×</button>
+</button>
+
+<!-- history row (no remove control) -->
+<button class="sidepanel-row" data-url="https://example.com">
   <span class="row-title">Example Page</span>
+  <span class="row-url">https://example.com</span>
 </button>
 
 <!-- footer shown only when truncated == true -->
 <div class="sidepanel-footer">showing 200 most recent</div>
 ```
+
+> **Favicons are deliberately deferred to v0.2.** Real browsers show site icons next to bookmark/history rows, but doing favicons properly means per-URL fetch on add, on-disk cache with eviction, fallback rendering, and a security review for cross-origin fetches from the chrome origin. v0.1 ships title-primary text rows; favicons are a separate body of work.
 
 ### Token table
 
@@ -179,14 +190,14 @@ The shell builds the DOM; plugin authors return only data.
 |---|---|---|---|
 | `.sidepanel-list` | `font` | `var(--text-mono)` | mono surface throughout |
 | `.sidepanel-list` | `padding` | `4px 0` | tight vertical rhythm |
-| `.sidepanel-row` | `grid-template-columns` | `1fr auto auto` | url \| title \| optional control |
+| `.sidepanel-row` | `grid-template-columns` | `1fr auto auto` | title \| dim url \| optional control |
 | `.sidepanel-row` | `gap` | `12px` | column spacing |
 | `.sidepanel-row` | `padding` | `6px 12px` | row inset |
 | `.sidepanel-row` | `background` | `transparent` (default) / `var(--surface-2)` (hover) | |
-| `.row-url` | `color` | `var(--fg)` | primary |
-| `.row-url` | `text-overflow` | `ellipsis` | overflow handling |
-| `.row-title` | `color` | `var(--fg-2)` | dim companion |
-| `.row-title` | `max-width` | `140px` | prevent layout blowout |
+| `.row-title` | `color` | `var(--fg)` | primary (title or URL-as-fallback) |
+| `.row-title` | `text-overflow` | `ellipsis` | overflow handling |
+| `.row-url` | `color` | `var(--fg-2)` | dim secondary context |
+| `.row-url` | `max-width` | `240px` | cap so long URLs don't squeeze the title |
 | `.row-remove` | `color` (default) | `var(--fg-3)` | very dim |
 | `.row-remove` | `color` (row hover) | `var(--fg-2)` | surfaces on row hover |
 | `.row-remove` | `color` (button hover) | `var(--accent)` | destructive signal |

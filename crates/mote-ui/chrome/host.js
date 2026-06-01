@@ -540,6 +540,60 @@
     }
   };
 
+  // Build one sidepanel row.  Title is the primary identifier (real-browser
+  // convention); URL is the dim secondary context.  If `title` is missing/empty
+  // or equal to the URL, the URL becomes the primary text and the secondary
+  // cell is left empty so the grid columns stay aligned across rows.
+  function buildSidePanelRow(record, options) {
+    var url = (typeof record.url === "string") ? record.url : "";
+    var rawTitle = (typeof record.title === "string") ? record.title : "";
+
+    var row = document.createElement("button");
+    row.className = "sidepanel-row";
+    row.setAttribute("data-url", url);
+
+    // Primary: title if it adds info, else url as fallback.
+    var titleSpan = document.createElement("span");
+    titleSpan.className = "row-title";
+    titleSpan.textContent = rawTitle || url;
+    row.appendChild(titleSpan);
+
+    // Secondary: url, only when distinct from the primary.
+    var urlSpan = document.createElement("span");
+    urlSpan.className = "row-url";
+    if (rawTitle && rawTitle !== url) {
+      urlSpan.textContent = url;
+    }
+    row.appendChild(urlSpan);
+
+    if (options && options.withRemove) {
+      var removeBtn = document.createElement("button");
+      removeBtn.className = "row-remove";
+      removeBtn.setAttribute(
+        "aria-label",
+        options.removeAriaLabel || "remove",
+      );
+      removeBtn.textContent = "×"; // ×
+      removeBtn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        if (window.mote && window.mote.invoke && options.removeOp) {
+          window.mote
+            .invoke(options.removeOp, { url: url })
+            .catch(function () {});
+        }
+      });
+      row.appendChild(removeBtn);
+    }
+
+    row.addEventListener("click", function () {
+      if (window.mote && window.mote.invoke) {
+        window.mote.invoke("navigate", { url: url }).catch(function () {});
+      }
+    });
+
+    return row;
+  }
+
   // ---- applyOp handler for bookmark_list + history_list -----------------
   //
   // Chained via prevApplyOp so existing set_url/set_tabs/urlbar_suggestions ops
@@ -571,41 +625,11 @@
         list.className = "sidepanel-list";
 
         rows.forEach(function (record) {
-          var row = document.createElement("button");
-          row.className = "sidepanel-row";
-          var url = (typeof record.url === "string") ? record.url : "";
-          row.setAttribute("data-url", url);
-
-          var urlSpan = document.createElement("span");
-          urlSpan.className = "row-url";
-          urlSpan.textContent = url;
-          row.appendChild(urlSpan);
-
-          var titleSpan = document.createElement("span");
-          titleSpan.className = "row-title";
-          titleSpan.textContent = (typeof record.title === "string") ? record.title : "";
-          row.appendChild(titleSpan);
-
-          var removeBtn = document.createElement("button");
-          removeBtn.className = "row-remove";
-          removeBtn.setAttribute("aria-label", "remove bookmark");
-          removeBtn.textContent = "×"; // ×
-          removeBtn.addEventListener("click", function (ev) {
-            ev.stopPropagation();
-            if (window.mote && window.mote.invoke) {
-              window.mote
-                .invoke("bookmark_remove", { url: url })
-                .catch(function () {});
-            }
+          var row = buildSidePanelRow(record, {
+            withRemove: true,
+            removeAriaLabel: "remove bookmark",
+            removeOp: "bookmark_remove",
           });
-          row.appendChild(removeBtn);
-
-          row.addEventListener("click", function () {
-            if (window.mote && window.mote.invoke) {
-              window.mote.invoke("navigate", { url: url }).catch(function () {});
-            }
-          });
-
           list.appendChild(row);
         });
 
@@ -637,28 +661,7 @@
         hList.className = "sidepanel-list";
 
         hRows.forEach(function (record) {
-          var hRow = document.createElement("button");
-          hRow.className = "sidepanel-row";
-          var hUrl = (typeof record.url === "string") ? record.url : "";
-          hRow.setAttribute("data-url", hUrl);
-
-          var hUrlSpan = document.createElement("span");
-          hUrlSpan.className = "row-url";
-          hUrlSpan.textContent = hUrl;
-          hRow.appendChild(hUrlSpan);
-
-          var hTitleSpan = document.createElement("span");
-          hTitleSpan.className = "row-title";
-          hTitleSpan.textContent = (typeof record.title === "string") ? record.title : "";
-          hRow.appendChild(hTitleSpan);
-
-          hRow.addEventListener("click", function () {
-            if (window.mote && window.mote.invoke) {
-              window.mote.invoke("navigate", { url: hUrl }).catch(function () {});
-            }
-          });
-
-          hList.appendChild(hRow);
+          hList.appendChild(buildSidePanelRow(record, { withRemove: false }));
         });
 
         hContainer.appendChild(hList);
