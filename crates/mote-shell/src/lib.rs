@@ -189,6 +189,10 @@ enum ShellCommand {
     /// The user clicked the inline urlbar bookmark toggle; add if not bookmarked,
     /// remove if bookmarked, then re-push `set_url` so the star color updates.
     BookmarkToggle,
+    /// The user (or chrome) invoked `set_active_workspace`; ask the
+    /// `workspace:provider` plugin to validate + persist, then re-point
+    /// `self.workspace` and rebuild the visible tab strip.
+    SwitchWorkspace(String),
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -625,6 +629,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let adjust_queue = Arc::clone(commands);
     let revoke_secret_queue = Arc::clone(commands);
     let urlbar_query_queue = Arc::clone(commands);
+    let switch_workspace_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -727,6 +732,15 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
         .register("bookmark_toggle", move |_params: &str| {
             push(&bookmark_toggle_queue, ShellCommand::BookmarkToggle);
             OpResponse::ok("{\"ok\":true}")
+        })
+        .register("set_active_workspace", move |params: &str| {
+            json_string_field(params, "id").map_or_else(
+                || OpResponse::err(400, "set_active_workspace requires a string `id`"),
+                |id| {
+                    push(&switch_workspace_queue, ShellCommand::SwitchWorkspace(id));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
         })
 }
 
@@ -971,6 +985,7 @@ impl ShellApp {
                 ShellCommand::SetActivePanel(name) => self.set_active_panel(&name),
                 ShellCommand::BookmarkRemove(url) => self.bookmark_remove(&url),
                 ShellCommand::BookmarkToggle => self.bookmark_toggle(),
+                ShellCommand::SwitchWorkspace(id) => self.switch_workspace(&id),
             }
         }
     }
@@ -1135,6 +1150,100 @@ impl ShellApp {
         self.push_state_to_chrome();
         // Re-push bookmark list so the sidebar panel stays in sync.
         self.push_bookmark_list();
+    }
+
+    /// Ask the `workspace:provider` plugin to validate, persist, and emit the
+    /// workspace switch, then re-point `self.workspace` and rebuild the visible
+    /// tab strip from the session's tab list for the new workspace.
+    ///
+    /// # Flow
+    ///
+    /// 1. Invoke `workspace:provider` → `switch_workspace({id})` — the plugin
+    ///    validates the id against the built-in set, persists the new active
+    ///    workspace, and emits `workspaces:on_change`.
+    /// 2. On a truthy return: re-point `self.workspace` and `self.session`'s
+    ///    active workspace, rebuild `self.tabs` from
+    ///    [`Session::tab_picker_ranked`] for the new workspace, reset `active`
+    ///    to 0, call [`Self::on_active_changed`], and flush + push to chrome.
+    /// 3. On a falsy / `None` return (plugin rejected the id): no-op — the shell
+    ///    state is unchanged.
+    ///
+    /// # Design note
+    ///
+    /// This is the shell *mechanism*; the plugin owns *policy* (validation,
+    /// persistence, event emission). The shell does not subscribe to
+    /// `workspaces:on_change` — it drives the switch and trusts the plugin's
+    /// return value to confirm acceptance.
+    fn switch_workspace(&mut self, id: &str) {
+        // Build the Map arg the plugin expects: { id = "<string>" }.
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert("id".to_owned(), HostValue::Str(id.to_owned()));
+        let result = self.host.runtime.invoke_capability(
+            "workspace:provider",
+            "switch_workspace",
+            &HostValue::Map(arg_map),
+        );
+        // Plugin returns `true` on success, `false` (or `None`) on unknown id.
+        let accepted = match result {
+            Some(HostValue::Bool(b)) => b,
+            Some(_) => true, // any non-Bool truthy return treated as accepted
+            None => false,
+        };
+        if !accepted {
+            eprintln!("mote-shell: switch_workspace({id}) rejected by plugin");
+            return;
+        }
+        // Map the string id to the numeric WorkspaceId the session uses.
+        let Some(new_ws) = workspace_id_for_slug(id) else {
+            eprintln!("mote-shell: switch_workspace({id}): unrecognised slug, ignoring");
+            return;
+        };
+        self.workspace = new_ws;
+        self.session.set_active_workspace(new_ws);
+        self.rebuild_tabs_for_workspace();
+        self.on_active_changed();
+        self.persist_and_push();
+        eprintln!("mote-shell: switched to workspace {id} ({new_ws})");
+    }
+
+    /// Rebuild `self.tabs` and `self.active` from the session's
+    /// [`Session::tab_picker_ranked`] list for `self.workspace`.
+    ///
+    /// This is the same logic as [`build_initial_tabs`] for the restore path,
+    /// minus the fresh-session tab seeding and page materialization: on a
+    /// workspace switch existing tabs in the new workspace are surfaced as
+    /// placeholders and the first one is selected (the user will focus it or
+    /// navigate — at that point `select_tab` materializes the page).
+    ///
+    /// If the target workspace has no tabs yet, a fresh default-URL tab is
+    /// added to keep the window non-blank.
+    fn rebuild_tabs_for_workspace(&mut self) {
+        let ranked: Vec<ShellTab> = self
+            .session
+            .tab_picker_ranked(self.workspace)
+            .into_iter()
+            .map(|tab| ShellTab {
+                id: tab.id,
+                url: tab.url.clone(),
+                title: tab.title.clone(),
+                page: None, // all placeholders; selected one materializes on focus
+            })
+            .collect();
+
+        if ranked.is_empty() {
+            // Seed a fresh tab for an empty workspace.
+            let url = DEFAULT_START_URL.to_string();
+            let id = self.session.add_tab(url.clone(), self.workspace);
+            self.tabs = vec![ShellTab {
+                id,
+                url,
+                title: None,
+                page: None,
+            }];
+        } else {
+            self.tabs = ranked;
+        }
+        self.active = 0;
     }
 
     /// Invoke `ui:bookmarks_provider` → `list_bookmarks` with an empty filter
@@ -2969,6 +3078,25 @@ fn json_u64_field(json: &str, field: &str) -> Option<u64> {
     value.as_object()?.get(field)?.as_u64()
 }
 
+/// Map the `workspace:provider` plugin's string workspace id to the numeric
+/// [`WorkspaceId`] the `mote-session` layer uses.
+///
+/// The built-in workspace set is fixed for v0.1 (`"default"` and `"work"`);
+/// this mapping is stable across restarts because `Session::flush` persists the
+/// numeric id. The mapping is authoritative here (the shell owns the mechanism)
+/// and must agree with the plugin's `BUILTIN_WORKSPACES` ordering.
+///
+/// Returns `None` for an unrecognised slug (defensive; the plugin validates
+/// ids before calling the shell, so `None` should not be reached in normal
+/// operation).
+pub(crate) fn workspace_id_for_slug(slug: &str) -> Option<WorkspaceId> {
+    match slug {
+        "default" => Some(WorkspaceId::new(0)),
+        "work" => Some(WorkspaceId::new(1)),
+        _ => None,
+    }
+}
+
 /// Build the `bookmark_list` applyOp JSON payload from the runtime, without
 /// performing the `eval_js` push.
 ///
@@ -3052,6 +3180,27 @@ pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<Stri
     Some(format!(
         "{{\"rows\":{rows_json},\"count\":{count},\"truncated\":{truncated}}}"
     ))
+}
+
+/// Test-accessible seam: invoke `workspace:provider` → `switch_workspace({id})`
+/// and return whether the plugin accepted the switch.
+///
+/// Mirrors the first half of [`ShellApp::switch_workspace`] without requiring a
+/// live window bridge. Used by workspace-switch tests to drive the plugin path
+/// (persistence + `workspaces:on_change` emit) and assert the return value.
+#[cfg(test)]
+pub(crate) fn invoke_switch_workspace(host: &runtime::PluginHost, id: &str) -> bool {
+    let mut arg_map = BTreeMap::new();
+    arg_map.insert("id".to_owned(), HostValue::Str(id.to_owned()));
+    match host.runtime.invoke_capability(
+        "workspace:provider",
+        "switch_workspace",
+        &HostValue::Map(arg_map),
+    ) {
+        Some(HostValue::Bool(b)) => b,
+        Some(_) => true,
+        None => false,
+    }
 }
 
 /// Test-accessible seam: check whether `url` is present in the bookmarks store,

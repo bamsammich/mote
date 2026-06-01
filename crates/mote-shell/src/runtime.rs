@@ -3237,4 +3237,201 @@ return M
             "must be un-bookmarked after second toggle (back to original state)"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Task E3: workspace switch — shell mechanism tests
+    //
+    // `ShellApp` cannot be constructed headlessly (requires a live CEF engine
+    // + bridge).  The assertable intermediate state is:
+    //
+    //  1. `workspace_id_for_slug` maps string ids to stable numeric ids.
+    //  2. `invoke_switch_workspace` (the plugin path) returns true for valid ids
+    //     and false for unknown ids.
+    //  3. `list_workspaces` after a switch shows the new active entry, proving
+    //     the plugin actually persisted the change (E3 test 3 — persistence).
+    //  4. `Session::tab_picker_ranked` returns the expected set after seeding
+    //     tabs, proving the session's workspace-keyed tab list works (the
+    //     rebuild-tabs logic in `ShellApp::rebuild_tabs_for_workspace` delegates
+    //     to this exact call).
+    //
+    // The `eval_js` → chrome push half of `switch_workspace` is the live-
+    // verification gap (same pattern as C2/D1/D3) — noted in the report.
+    // -----------------------------------------------------------------------
+
+    /// `workspace_id_for_slug` returns the stable numeric ids for the built-in
+    /// workspace slugs and `None` for unknown slugs.
+    #[test]
+    fn workspace_id_for_slug_maps_builtin_slugs() {
+        use mote_types::WorkspaceId;
+
+        assert_eq!(
+            crate::workspace_id_for_slug("default"),
+            Some(WorkspaceId::new(0)),
+            "\"default\" must map to WorkspaceId(0) — the existing WORKSPACE const"
+        );
+        assert_eq!(
+            crate::workspace_id_for_slug("work"),
+            Some(WorkspaceId::new(1)),
+            "\"work\" must map to WorkspaceId(1)"
+        );
+        assert!(
+            crate::workspace_id_for_slug("does-not-exist").is_none(),
+            "unknown slug must return None"
+        );
+    }
+
+    /// After a successful `switch_workspace("work")`, `list_workspaces` shows
+    /// `work` as the active entry.  This proves the plugin persisted the change
+    /// (E3 test 3 — persistence via plugin).
+    #[test]
+    fn switch_workspace_persists_via_plugin() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        // Verify the workspace-manager loaded.
+        assert!(
+            host.loaded
+                .iter()
+                .any(|r| r.name.as_str() == "workspace-manager"),
+            "workspace-manager must be loaded for this test"
+        );
+
+        // Switch to "work".
+        let accepted = crate::invoke_switch_workspace(&host, "work");
+        assert!(
+            accepted,
+            "switch_workspace(\"work\") must be accepted by the plugin"
+        );
+
+        // Query the plugin: exactly one workspace must be active, and it must be "work".
+        let result = host.runtime.invoke_capability(
+            "workspace:provider",
+            "list_workspaces",
+            &mote_runtime::HostValue::Nil,
+        );
+        let Some(mote_runtime::HostValue::List(workspaces)) = result else {
+            panic!("list_workspaces must return a List");
+        };
+
+        let active_ids: Vec<String> = workspaces
+            .iter()
+            .filter_map(|ws| {
+                let mote_runtime::HostValue::Map(m) = ws else {
+                    return None;
+                };
+                if matches!(m.get("active"), Some(mote_runtime::HostValue::Bool(true)))
+                    && let Some(mote_runtime::HostValue::Str(id)) = m.get("id")
+                {
+                    return Some(id.clone());
+                }
+                None
+            })
+            .collect();
+
+        assert_eq!(
+            active_ids,
+            vec!["work"],
+            "after switch_workspace(\"work\"), list_workspaces must show \"work\" as active; \
+             got active_ids={active_ids:?}"
+        );
+    }
+
+    /// `switch_workspace` rejects an unknown workspace id — the plugin returns
+    /// `false` and the seam returns `false`.
+    #[test]
+    fn switch_workspace_rejects_unknown_id() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        // The "default" workspace must remain active before the test.
+        let accepted = crate::invoke_switch_workspace(&host, "does-not-exist");
+        assert!(
+            !accepted,
+            "switch_workspace with an unknown id must return false"
+        );
+
+        // "default" must still be the active workspace (no state change).
+        let result = host.runtime.invoke_capability(
+            "workspace:provider",
+            "list_workspaces",
+            &mote_runtime::HostValue::Nil,
+        );
+        let Some(mote_runtime::HostValue::List(workspaces)) = result else {
+            panic!("list_workspaces must return a List");
+        };
+        let active_ids: Vec<String> = workspaces
+            .iter()
+            .filter_map(|ws| {
+                let mote_runtime::HostValue::Map(m) = ws else {
+                    return None;
+                };
+                if matches!(m.get("active"), Some(mote_runtime::HostValue::Bool(true)))
+                    && let Some(mote_runtime::HostValue::Str(id)) = m.get("id")
+                {
+                    return Some(id.clone());
+                }
+                None
+            })
+            .collect();
+
+        assert_eq!(
+            active_ids,
+            vec!["default"],
+            "active workspace must remain \"default\" after a rejected switch; \
+             got {active_ids:?}"
+        );
+    }
+
+    /// `Session::tab_picker_ranked` returns only the tabs belonging to the given
+    /// workspace — the mechanism the shell's `rebuild_tabs_for_workspace` relies on.
+    ///
+    /// Seeds two tabs in "default" (WorkspaceId(0)) and two in "work" (WorkspaceId(1)),
+    /// then asserts that each workspace's ranked list contains exactly those tabs.
+    /// This is a black-box test of the session contract; `ShellApp` delegates to
+    /// this exact call.
+    #[test]
+    fn session_tab_picker_ranked_is_workspace_keyed() {
+        use mote_session::Session;
+        use mote_types::{IdentityId, WorkspaceId};
+
+        let ws_default = WorkspaceId::new(0);
+        let ws_work = WorkspaceId::new(1);
+        let mut session = Session::new(IdentityId::new(0), ws_default);
+
+        // Seed two tabs per workspace.
+        let _d1 = session.add_tab("https://default.test/a".to_owned(), ws_default);
+        let _d2 = session.add_tab("https://default.test/b".to_owned(), ws_default);
+        let _w1 = session.add_tab("https://work.test/a".to_owned(), ws_work);
+        let _w2 = session.add_tab("https://work.test/b".to_owned(), ws_work);
+
+        // Default workspace: must have exactly the two default-namespace tabs.
+        let default_tabs = session.tab_picker_ranked(ws_default);
+        assert_eq!(
+            default_tabs.len(),
+            2,
+            "default workspace must have 2 tabs; got {}",
+            default_tabs.len()
+        );
+        assert!(
+            default_tabs
+                .iter()
+                .all(|t| t.url.starts_with("https://default.test/")),
+            "all default-workspace tabs must be from default.test; got {:?}",
+            default_tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+        );
+
+        // Work workspace: must have exactly the two work-namespace tabs.
+        let work_tabs = session.tab_picker_ranked(ws_work);
+        assert_eq!(
+            work_tabs.len(),
+            2,
+            "work workspace must have 2 tabs; got {}",
+            work_tabs.len()
+        );
+        assert!(
+            work_tabs
+                .iter()
+                .all(|t| t.url.starts_with("https://work.test/")),
+            "all work-workspace tabs must be from work.test; got {:?}",
+            work_tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+        );
+    }
 }
