@@ -140,6 +140,21 @@
     <div class="mote-body">
       <!-- left-sidebar: tabs panel bound by default -->
       <aside data-slot="left-sidebar" class="sidebar" aria-label="sidebar">
+        <!-- Workspace strip: always-visible workspace context + switcher.
+             Populated by host.js applyOp('workspace_list', {rows}). -->
+        <div
+          class="workspace-strip"
+          role="button"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          tabindex="0"
+        >
+          <span class="lockup" aria-hidden="true">
+            <span class="br">[</span><span class="name">default</span><span class="br">]</span>
+          </span>
+          <span class="chevron" aria-hidden="true">›</span>
+        </div>
+        <div class="sidebar-body">
         <nav class="activitybar" aria-label="sidebar panels">
           <button class="activity-btn is-active" aria-label="tabs" aria-pressed="true">
             <svg
@@ -279,6 +294,18 @@
               <!-- rows rendered by host.js applyOp("history_list", …) -->
             </div>
           </div>
+        </div>
+        </div><!-- /.sidebar-body -->
+        <!-- Workspace popover: floating dropdown below the strip.
+             Rows appended by host.js via DOM-build (never innerHTML). -->
+        <div
+          id="workspace-popover"
+          class="workspace-popover"
+          role="listbox"
+          aria-label="workspaces"
+          hidden
+        >
+          <!-- rows appended by host.js applyOp('workspace_list', …) -->
         </div>
       </aside>
 

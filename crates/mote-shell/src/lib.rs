@@ -1203,6 +1203,8 @@ impl ShellApp {
         self.rebuild_tabs_for_workspace();
         self.on_active_changed();
         self.persist_and_push();
+        // Push updated workspace list so the chrome strip reflects the switch.
+        self.push_workspace_list();
         eprintln!("mote-shell: switched to workspace {id} ({new_ws})");
     }
 
@@ -1372,6 +1374,52 @@ impl ShellApp {
         let chrome = self.bridge.page();
         chrome.eval_js(&format!(
             "window.mote&&window.mote.applyOp&&window.mote.applyOp('history_list',{payload_json});"
+        ));
+    }
+
+    /// Invoke `workspace:provider` → `list_workspaces` and push the result to
+    /// chrome as `applyOp('workspace_list', {rows: [{id, name, active}, …]})`.
+    ///
+    /// Called on chrome-ready (boot) and after every `switch_workspace` so the
+    /// workspace strip stays in sync with the persisted active workspace.
+    ///
+    /// # Failure policy
+    ///
+    /// - No fulfiller / contract violation → returns `None`; push an empty rows
+    ///   list so the strip renders a safe fallback rather than crashing.
+    /// - `list_workspaces` takes no real argument; an empty Map is passed
+    ///   (L2/L3: `HostValue::Map(BTreeMap::new())` is the safe zero-arg form —
+    ///   Lua ignores extra args; the empty-table-maps-to-Map footgun only applies
+    ///   on the *return* side, not the call side).
+    pub(crate) fn push_workspace_list(&self) {
+        // list_workspaces() takes no parameter — empty Map is the safe zero-arg
+        // HostValue (Lua ignores extra args; L2 note).
+        let arg = HostValue::Map(BTreeMap::new());
+        let raw =
+            self.host
+                .runtime
+                .invoke_capability("workspace:provider", "list_workspaces", &arg);
+
+        let rows = match raw {
+            Some(HostValue::List(v)) => v,
+            // Defensive: empty Lua table returns as Map({}) (L3).
+            _ => vec![],
+        };
+
+        let rows_json = match serde_json::to_string(&host_to_json(&HostValue::List(rows))) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: push_workspace_list serialise failed: {e}");
+                "[]".to_owned()
+            }
+        };
+
+        if !self.chrome_ready {
+            return;
+        }
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('workspace_list',{{rows:{rows_json}}});"
         ));
     }
 
@@ -2760,6 +2808,8 @@ impl ApplicationHandler for ShellApp {
         if !self.chrome_ready && self.bridge.page().paint_count() >= 1 {
             self.chrome_ready = true;
             self.push_state_to_chrome();
+            // Populate the workspace strip on first render.
+            self.push_workspace_list();
         }
 
         // The plugin load pass is deferred past window creation so a slow or
@@ -3180,6 +3230,34 @@ pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<Stri
     Some(format!(
         "{{\"rows\":{rows_json},\"count\":{count},\"truncated\":{truncated}}}"
     ))
+}
+
+/// Build the `workspace_list` applyOp JSON payload from the runtime, without
+/// performing the `eval_js` push.
+///
+/// This is the testable intermediate-state seam for the workspace-switcher TDD
+/// test (the chrome page is not available in headless tests). The payload shape
+/// is `{"rows":[{id,name,active},…]}`.
+///
+/// Returns `None` when the `workspace:provider` capability is unavailable.
+#[cfg(test)]
+pub(crate) fn build_workspace_list_json(host: &runtime::PluginHost) -> Option<String> {
+    // list_workspaces takes no real argument — Lua ignores extra args, so an
+    // empty Map is safe (L2 + L3 defensiveness: always pass a valid HostValue).
+    let arg = HostValue::Map(BTreeMap::new());
+    let raw = host
+        .runtime
+        .invoke_capability("workspace:provider", "list_workspaces", &arg)?;
+
+    let rows = match raw {
+        HostValue::List(v) => v,
+        // Lua returns `{}` (empty table) as Map when the list is empty (L3).
+        _ => vec![],
+    };
+
+    let rows_json = serde_json::to_string(&host_to_json(&HostValue::List(rows)))
+        .unwrap_or_else(|_| "[]".to_owned());
+    Some(format!("{{\"rows\":{rows_json}}}"))
 }
 
 /// Test-accessible seam: invoke `workspace:provider` → `switch_workspace({id})`
@@ -3666,6 +3744,105 @@ mod tests {
             }
             other => panic!("expected UrlbarQuery; got {other:?}"),
         }
+    }
+
+    // ── workspace_list push seam ──────────────────────────────────────────
+
+    /// `build_workspace_list_json` exercises the full path from the bundled
+    /// workspace-manager plugin through the Rust→Lua `invoke_capability` seam
+    /// and JSON serialization.
+    ///
+    /// Contract:
+    ///   • returns `Some(json)` when the `workspace:provider` cap is available.
+    ///   • The JSON is a `{rows: [...]}` object.
+    ///   • There are at least 2 rows (the built-in `default` + `work` workspaces).
+    ///   • Every row has `id`, `name`, and `active` fields.
+    ///   • Exactly one row has `active: true`.
+    #[test]
+    fn push_workspace_list_returns_list_from_provider() {
+        use std::time::Duration;
+
+        use mote_audit::{AuditLog, Config};
+        use mote_storage::Store;
+        use mote_types::{IdentityId, SchemaVersion};
+
+        use crate::runtime::PluginHost;
+
+        // The bundled plugin source must be a module-level const to avoid the
+        // items_after_statements clippy lint.
+        const WS_SRC: &str = include_str!("../../../plugins/workspace-manager/init.lua");
+
+        let store = Store::open_in_memory().expect("in-memory store opens");
+        let config = Config {
+            ring_capacity: 256,
+            flush_threshold: 1,
+            flush_interval: Duration::from_millis(5),
+        };
+        let mut log = AuditLog::new(&store, config).expect("audit log starts");
+        let registry = mote_registry::Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+        let runtime = mote_runtime::Runtime::new(registry, store.clone(), log.producer());
+
+        // Stand up a minimal PluginHost using the tempdir boot path.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut host =
+            PluginHost::boot_in(store, dir.path(), dir.path()).expect("host boots cleanly");
+        host.runtime = runtime;
+
+        let policy = mote_runtime::GrantAsRequested;
+        let identity = mote_runtime::IdentityContext::new(IdentityId::new(0));
+        host.runtime
+            .load(WS_SRC, identity, &policy)
+            .expect("workspace-manager loads cleanly");
+
+        // Exercise the test-seam helper that mirrors push_workspace_list.
+        let json = build_workspace_list_json(&host).expect("workspace:provider is available");
+
+        // Parse and validate the shape.
+        let v: serde_json::Value = serde_json::from_str(&json).expect("workspace list JSON parses");
+        let rows = v
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .expect("rows array present");
+
+        assert!(
+            rows.len() >= 2,
+            "at least 2 built-in workspaces expected; got {} (json={json:?})",
+            rows.len()
+        );
+
+        let mut active_count = 0usize;
+        let mut found_default = false;
+        let mut found_work = false;
+        for row in rows {
+            assert!(
+                row.get("id").is_some() && row.get("name").is_some() && row.get("active").is_some(),
+                "every workspace row must have id, name, active fields (row={row:?})"
+            );
+            if row.get("active").and_then(serde_json::Value::as_bool) == Some(true) {
+                active_count += 1;
+            }
+            if row.get("id").and_then(serde_json::Value::as_str) == Some("default") {
+                found_default = true;
+            }
+            if row.get("id").and_then(serde_json::Value::as_str) == Some("work") {
+                found_work = true;
+            }
+        }
+
+        assert_eq!(
+            active_count, 1,
+            "exactly one workspace must be active (json={json:?})"
+        );
+        assert!(
+            found_default,
+            "built-in 'default' workspace must be present (json={json:?})"
+        );
+        assert!(
+            found_work,
+            "built-in 'work' workspace must be present (json={json:?})"
+        );
+
+        log.shutdown().expect("audit log shuts down cleanly");
     }
 
     /// Empty text string is accepted (op enqueues a command; the handler lets

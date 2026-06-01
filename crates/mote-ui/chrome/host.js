@@ -730,6 +730,139 @@
     };
   }
 
+  // ---- Workspace strip + popover ----------------------------------------
+  //
+  // Wires the workspace strip at the top of the left sidebar.  The strip
+  // shows the active workspace as a [name] lockup and a › chevron; clicking
+  // toggles the workspace popover dropdown.  The popover lists all workspaces;
+  // clicking a row invokes set_active_workspace.  The strip updates whenever
+  // the shell pushes a workspace_list applyOp (on boot + after each switch).
+  //
+  // Accessibility: role="button" + aria-haspopup on the strip; role="listbox"
+  // on the popover.  Esc closes; click-outside closes; Tab leaves the strip.
+  //
+  // DOM-build discipline (ADR-0005): createElement + textContent only.
+  // NEVER innerHTML on payload content.
+  function wireWorkspaceStrip() {
+    var strip = document.querySelector(".workspace-strip");
+    var popover = document.getElementById("workspace-popover");
+    if (!strip || !popover) return;
+
+    function isPopoverOpen() {
+      return !popover.hidden;
+    }
+
+    function openPopover() {
+      popover.hidden = false;
+      strip.setAttribute("aria-expanded", "true");
+    }
+
+    function closePopover() {
+      popover.hidden = true;
+      strip.setAttribute("aria-expanded", "false");
+    }
+
+    // Toggle on strip click.
+    strip.addEventListener("click", function () {
+      if (isPopoverOpen()) {
+        closePopover();
+      } else {
+        openPopover();
+      }
+    });
+
+    // Keyboard: Esc closes and returns focus to strip.
+    strip.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && isPopoverOpen()) {
+        closePopover();
+        strip.focus();
+        ev.preventDefault();
+      } else if (ev.key === "Enter" || ev.key === " ") {
+        if (isPopoverOpen()) {
+          closePopover();
+        } else {
+          openPopover();
+        }
+        ev.preventDefault();
+      }
+    });
+
+    // Close on click-outside (strip or popover clicks are kept).
+    document.addEventListener("click", function (ev) {
+      if (!isPopoverOpen()) return;
+      if (ev.target.closest(".workspace-strip, .workspace-popover")) return;
+      closePopover();
+    });
+
+    // Popover row clicks: invoke set_active_workspace + close.
+    popover.addEventListener("click", function (ev) {
+      var row = ev.target.closest(".row[data-id]");
+      if (!row) return;
+      var id = row.getAttribute("data-id");
+      if (id && window.mote && window.mote.invoke) {
+        window.mote
+          .invoke("set_active_workspace", { id: id })
+          .catch(function () {});
+      }
+      closePopover();
+      // Strip text updates when the next workspace_list push arrives — no
+      // optimistic update here (the shell is the source of truth).
+    });
+
+    // workspace_list applyOp handler chained via prevApplyOp.
+    // Payload: { rows: [{id, name, active}, ...] }
+    var prevApplyOp =
+      typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
+
+    window.mote.applyOp = function (op, payload) {
+      if (op !== "workspace_list") {
+        if (prevApplyOp) prevApplyOp(op, payload);
+        return;
+      }
+
+      var rows = (payload && Array.isArray(payload.rows)) ? payload.rows : [];
+
+      // Update strip lockup name from the active row.
+      var activeRow = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i] && rows[i].active === true) {
+          activeRow = rows[i];
+          break;
+        }
+      }
+      var nameEl = strip.querySelector(".lockup .name");
+      if (nameEl && activeRow && typeof activeRow.name === "string") {
+        nameEl.textContent = activeRow.name;
+      }
+      // If no active row is present, leave existing text unchanged (defensive).
+
+      // Rebuild popover rows.  DOM-build only — no innerHTML.
+      popover.textContent = "";
+      rows.forEach(function (record) {
+        if (!record || typeof record.id !== "string") return;
+
+        var rowEl = document.createElement("div");
+        rowEl.className = "row" + (record.active === true ? " is-current" : "");
+        rowEl.setAttribute("role", "option");
+        rowEl.setAttribute("data-id", record.id);
+
+        // Check mark: "✓" for the active workspace, invisible otherwise.
+        var checkEl = document.createElement("span");
+        checkEl.className = "check";
+        checkEl.textContent = record.active === true ? "✓" : " ";
+        rowEl.appendChild(checkEl);
+
+        // Workspace name.
+        var nameSpan = document.createElement("span");
+        nameSpan.className = "name";
+        nameSpan.textContent = typeof record.name === "string" ? record.name : record.id;
+        rowEl.appendChild(nameSpan);
+
+        popover.appendChild(rowEl);
+      });
+    };
+  }
+
   function wireBookmarkToggle() {
     var bookmarkBtn = document.querySelector(".bookmark-toggle");
     if (bookmarkBtn) {
@@ -754,6 +887,10 @@
     // Chain the bookmark_list + history_list applyOp handlers last so they wrap
     // all prior handlers.
     wireSidePanelOps(activityBar);
+    // Chain the workspace_list applyOp handler and wire the workspace strip
+    // toggle + popover interaction.  Must run after all prior applyOp handlers
+    // are chained so the prevApplyOp capture is complete.
+    wireWorkspaceStrip();
   }
 
   if (document.readyState === "loading") {

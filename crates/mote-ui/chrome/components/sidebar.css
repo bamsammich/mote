@@ -1,21 +1,127 @@
 /*
- * sidebar.css — side-slot host: activity bar + swappable panel. Per
- * spec/components/sidebar.md. Docked (no shadow). The panel header uses the
- * [tabs] bracket lockup. Token-only. Activity icons <= 28px, no labels.
+ * sidebar.css — side-slot host: workspace strip + activity bar + swappable
+ * panel. Per spec/components/sidebar.md. Docked (no shadow). The panel header
+ * uses the [tabs] bracket lockup. Token-only. Activity icons <= 28px, no
+ * labels.
+ *
+ * Layout change (E4): .sidebar is now a flex column so the workspace strip can
+ * sit above the activitybar + sidepanel grid. The grid moves to .sidebar-body.
  */
 
 .sidebar {
-  display: grid;
-  grid-template-columns: 36px 280px; /* activity bar + panel */
+  display: flex;
+  flex-direction: column;
+  position: relative; /* popover anchor */
   border-right: 1px solid var(--border);
   background: var(--surface-1);
 }
 
-/* When placed in right-sidebar, the divider flips. */
+/* The activitybar + sidepanel grid — unchanged proportions, now nested inside
+ * .sidebar-body so the workspace strip can sit above it. */
+.sidebar-body {
+  display: grid;
+  grid-template-columns: 36px 280px; /* activitybar + panel */
+  flex: 1;
+  min-height: 0;
+}
+
+/* When placed in right-sidebar, the divider flips.
+ * The sidebar-body columns also flip to keep the activity bar on the outside
+ * edge. */
 .sidebar.side-right {
   border-right: 0;
   border-left: 1px solid var(--border);
+}
+
+.sidebar.side-right .sidebar-body {
   grid-template-columns: 280px 36px;
+}
+
+/* ---- Workspace strip ---- */
+
+/* Full-width header above the sidebar body. Brand lockup + chevron; click
+ * toggles the workspace popover. Height matches .sidepanel-head rhythm. */
+.workspace-strip {
+  height: 30px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font: var(--text-mono-sm);
+  color: var(--fg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.workspace-strip:hover {
+  background: var(--surface-2);
+}
+
+.workspace-strip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.workspace-strip .lockup .br {
+  color: var(--accent);
+}
+
+.workspace-strip .lockup .name {
+  color: var(--fg);
+}
+
+.workspace-strip .chevron {
+  color: var(--fg-2);
+}
+
+/* ---- Workspace popover ---- */
+
+/* Sidebar-wide floating dropdown below the strip (floating surface — shadow
+ * per rule 5; docked sidebar itself has no shadow). */
+.workspace-popover {
+  position: absolute;
+  top: 30px; /* below the strip */
+  left: 0;
+  right: 0;
+  z-index: 700;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-top: 0;
+  box-shadow: var(--shadow-2);
+  font: var(--text-mono);
+}
+
+.workspace-popover[hidden] {
+  display: none;
+}
+
+.workspace-popover .row {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.workspace-popover .row:hover {
+  background: var(--surface-2);
+}
+
+.workspace-popover .row.is-current {
+  color: var(--fg);
+}
+
+.workspace-popover .row.is-current .check {
+  color: var(--accent);
+}
+
+.workspace-popover .row .check {
+  color: transparent;
 }
 
 .activitybar {

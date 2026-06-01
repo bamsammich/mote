@@ -148,6 +148,177 @@ When the `tabs` panel is the chosen default, a theme typically leaves the `top-b
 - The activity bar is `<nav aria-label="sidebar panels">` with each button having an `aria-label` and `aria-pressed` matching its active state.
 - The active panel name is announced via `aria-live="polite"` in the panel header.
 
+## Workspace strip
+
+### Purpose
+
+A persistent, always-visible workspace context indicator at the very top of the
+left sidebar, spanning its full width. Shows the active workspace's display name
+as a brand lockup (`[name]`) and a `›` chevron. Clicking the strip toggles a
+popover dropdown that lists all workspaces; clicking a row switches to it.
+
+The strip is the primary affordance for workspace switching in the chrome — it
+is always visible regardless of which sidebar panel is active.
+
+### Structure
+
+```html
+<aside data-slot="left-sidebar" class="sidebar" aria-label="sidebar">
+  <div
+    class="workspace-strip"
+    role="button"
+    aria-haspopup="listbox"
+    aria-expanded="false"
+    tabindex="0"
+  >
+    <span class="lockup" aria-hidden="true">
+      <span class="br">[</span><span class="name">default</span><span class="br">]</span>
+    </span>
+    <span class="chevron" aria-hidden="true">›</span>
+  </div>
+  <div class="sidebar-body">
+    <!-- existing <nav class="activitybar"> and <div class="sidepanel"> unchanged -->
+  </div>
+  <div
+    id="workspace-popover"
+    class="workspace-popover"
+    role="listbox"
+    aria-label="workspaces"
+    hidden
+  >
+    <!-- rows appended by host.js via DOM-build (never innerHTML) -->
+  </div>
+</aside>
+```
+
+The `<nav class="activitybar">` and `<div class="sidepanel">` move into
+`.sidebar-body` UNCHANGED — just wrapped. The `.sidebar` element changes from a
+2-column grid to a flex column so the strip can sit above the grid.
+
+### Tokens
+
+```css
+/* .sidebar changed from grid to flex column; grid moved to .sidebar-body */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  position: relative;                    /* popover anchor */
+  border-right: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.sidebar-body {
+  display: grid;
+  grid-template-columns: 36px 280px;     /* activitybar + panel — unchanged */
+  flex: 1;
+  min-height: 0;
+}
+
+.workspace-strip {
+  height: 30px;                          /* matches .sidepanel-head rhythm */
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  font: var(--text-mono-sm);
+  color: var(--fg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+}
+.workspace-strip:hover { background: var(--surface-2); }
+.workspace-strip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.workspace-strip .lockup .br   { color: var(--accent); }
+.workspace-strip .lockup .name { color: var(--fg); }
+.workspace-strip .chevron       { color: var(--fg-2); }
+
+/* Floating dropdown below the strip */
+.workspace-popover {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  right: 0;
+  z-index: 700;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-top: 0;
+  box-shadow: var(--shadow-2);
+  font: var(--text-mono);
+}
+.workspace-popover[hidden] { display: none; }
+.workspace-popover .row {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.workspace-popover .row:hover           { background: var(--surface-2); }
+.workspace-popover .row.is-current .check { color: var(--accent); }
+.workspace-popover .row .check          { color: transparent; }
+```
+
+### States
+
+| Element | State | Effect |
+|---|---|---|
+| `.workspace-strip` | default | `background: var(--surface-1)`, lockup in accent brackets |
+| `.workspace-strip` | hover | `background: var(--surface-2)` |
+| `.workspace-strip` | focus-visible | `outline: 1px solid var(--accent)`, offset -1px |
+| `.workspace-strip` | popover-open | `aria-expanded="true"` |
+| `.workspace-popover .row` | default | transparent background |
+| `.workspace-popover .row` | hover | `background: var(--surface-2)` |
+| `.workspace-popover .row` | is-current | `.check` in `var(--accent)` |
+
+### Behavior
+
+- Click `.workspace-strip` → toggle popover (open ↔ closed).
+- Click a popover row → `mote.invoke("set_active_workspace", { id })` +
+  close popover. Strip text updates when the next `workspace_list` push arrives.
+- Click outside the strip and popover → close popover.
+- `Esc` while popover is open → close popover + return focus to strip.
+- `Enter` / `Space` on the strip → toggle popover (keyboard accessibility).
+
+### Data flow
+
+The shell pushes workspace state via:
+```
+applyOp("workspace_list", { rows: [{id, name, active}, …] })
+```
+
+Push happens:
+1. On chrome-ready (first paint), so the strip is populated on initial render.
+2. After every `switch_workspace` call, so the strip reflects the new active workspace.
+
+`host.js` processes the payload:
+- Sets `.workspace-strip .lockup .name` to the active row's `name`.
+- Clears and rebuilds the popover rows via `createElement + textContent +
+  appendChild` (NEVER innerHTML on payload content, ADR-0005).
+- Adds `.is-current` + "✓" to the active row.
+
+### Accessibility
+
+- `.workspace-strip`: `role="button"`, `aria-haspopup="listbox"`,
+  `aria-expanded` toggled, `tabindex="0"`.
+- `#workspace-popover`: `role="listbox"`, `aria-label="workspaces"`, `hidden`
+  when closed.
+- Each popover row: `role="option"`, `data-id` for the workspace id.
+
+### Anti-patterns
+
+- ❌ `innerHTML` on payload content — `createElement + textContent` only.
+- ❌ Shadow on `.workspace-strip` (it is docked, not floating; shadow is only on
+  the popover).
+- ❌ Optimistic strip-name update on row click — wait for `workspace_list` push.
+- ❌ Labels or icons inside the lockup beyond `[name]`.
+
+---
+
 ## Panel rows (bookmarks / history)
 
 Bookmarks and history panels render their data as a mono-row vertical list.
