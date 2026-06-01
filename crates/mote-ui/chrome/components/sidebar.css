@@ -162,13 +162,22 @@
 }
 
 /* url is the DIM secondary context — capped width so a long URL never squeezes
- * the title; truncates with ellipsis. */
+ * the title; truncates with ellipsis.  Hidden by default so the title can use
+ * the full row width when scanning; revealed on row hover or keyboard focus so
+ * the user can confirm the URL before clicking.  The grid column collapses to
+ * 0 when display:none, so title shifts slightly when URL appears — acceptable
+ * tradeoff for cleaner default scanning. */
 .sidepanel-row .row-url {
+  display: none;
   color: var(--fg-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 240px;
+}
+.sidepanel-row:hover .row-url,
+.sidepanel-row:focus-within .row-url {
+  display: inline;
 }
 
 .sidepanel-row .row-time {

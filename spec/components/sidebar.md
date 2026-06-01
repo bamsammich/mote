@@ -213,7 +213,9 @@ therefore never render a `.row-time` span.
 | `.row-title` | `color` | `var(--fg)` | primary (title or URL-as-fallback) |
 | `.row-title` | `text-overflow` | `ellipsis` | overflow handling |
 | `.row-url` | `color` | `var(--fg-2)` | dim secondary context |
-| `.row-url` | `max-width` | `240px` | cap so long URLs don't squeeze the title |
+| `.row-url` | `display` (default) | `none` | hidden when scanning; reveal on hover/focus |
+| `.row-url` | `display` (row hover / `:focus-within`) | `inline` | confirms the URL before click |
+| `.row-url` | `max-width` | `240px` | cap so long URLs don't squeeze the title when revealed |
 | `.row-time` | `color` | `var(--fg-2)` | dim relative timestamp (history only) |
 | `.row-time` | `font` | `var(--text-mono-sm)` | smaller than the title |
 | `.row-time` | `white-space` | `nowrap` | never wraps |
