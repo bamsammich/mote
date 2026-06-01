@@ -38,6 +38,29 @@ The mode auto-switches when the user types the entering prefix as the first char
 </div>
 ```
 
+### Inline actions
+
+The `.right` slot inside the urlbar contains inline action buttons:
+
+- **Bookmark toggle** — `<button type="button" class="btn btn-ghost btn-icon bookmark-toggle" aria-label="bookmark page" aria-pressed="false|true">` with the Lucide bookmark stroke icon (same `<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z">` used by the activity-bar bookmark panel, same `stroke="currentColor" stroke-width="1.5"`).
+  - Default: `color: var(--fg-2)` (page not bookmarked).
+  - Bookmarked: `is-bookmarked` class applied; `color: var(--accent)`; `aria-pressed="true"`.
+  - Hover: `color: var(--fg)` (both states).
+  - Click invokes the `bookmark_toggle` op (no params). The shell checks the current bookmark state, calls `add_bookmark` or `remove_bookmark` on `ui:bookmarks_provider`, then re-pushes `set_url` with an updated `bookmarked: bool` field so the star color reflects the new state without a page reload.
+- **Sidebar toggle** — `<button type="button" class="btn btn-ghost btn-icon" aria-label="toggle sidebar">`.
+
+All inline buttons carry `type="button"` to prevent accidental form submission (the omnibar-row wraps these in a `<form>`).
+
+#### `set_url` payload
+
+The shell's `set_url` push includes a `bookmarked` boolean:
+
+```js
+window.mote.applyOp('set_url', { url: "https://...", bookmarked: true|false });
+```
+
+The chrome's `applyOp` handler reads `payload.bookmarked` and toggles `.is-bookmarked` + `aria-pressed` on `.bookmark-toggle`.
+
 When focused, the URL display is replaced with an `<input>` and a block cursor:
 
 ```html

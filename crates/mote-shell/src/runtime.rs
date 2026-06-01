@@ -3142,4 +3142,99 @@ return M
             .any(|r| r["url"].as_str() == Some("https://keep.test/a"));
         assert!(kept, "non-removed bookmark must still appear in the list");
     }
+
+    /// `bookmark_toggle` on an un-bookmarked URL adds it; count goes from 0 → 1.
+    ///
+    /// Assertion technique: `crate::is_url_bookmarked_in_host` (same headless
+    /// seam as `build_bookmark_list_json`).
+    #[test]
+    fn bookmark_toggle_adds_when_not_bookmarked() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        let url = "https://toggle-add.test/page";
+
+        // Confirm the URL is not yet bookmarked.
+        assert!(
+            !crate::is_url_bookmarked_in_host(&host, url),
+            "url must not be bookmarked before toggle"
+        );
+
+        // Simulate the toggle: add it (the add-path of bookmark_toggle).
+        seed_bookmark(&host, url, "Toggle Add Test");
+
+        assert!(
+            crate::is_url_bookmarked_in_host(&host, url),
+            "url must be bookmarked after toggle-add"
+        );
+
+        let json = crate::build_bookmark_list_json(&host)
+            .expect("bookmark_list must be buildable after add");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("payload must be valid JSON");
+        assert_eq!(
+            parsed["count"].as_u64().unwrap(),
+            1,
+            "count must be 1 after adding one bookmark"
+        );
+    }
+
+    /// `bookmark_toggle` on an already-bookmarked URL removes it; count goes
+    /// from 1 → 0.
+    #[test]
+    fn bookmark_toggle_removes_when_bookmarked() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        let url = "https://toggle-remove.test/page";
+
+        // Pre-add so it is bookmarked.
+        seed_bookmark(&host, url, "Toggle Remove Test");
+        assert!(
+            crate::is_url_bookmarked_in_host(&host, url),
+            "url must be bookmarked before the remove toggle"
+        );
+
+        // Simulate the remove-path of bookmark_toggle.
+        remove_bookmark(&host, url);
+
+        assert!(
+            !crate::is_url_bookmarked_in_host(&host, url),
+            "url must no longer be bookmarked after toggle-remove"
+        );
+
+        let json = crate::build_bookmark_list_json(&host)
+            .expect("bookmark_list must be buildable after remove");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("payload must be valid JSON");
+        assert_eq!(
+            parsed["count"].as_u64().unwrap(),
+            0,
+            "count must be 0 after removing the only bookmark"
+        );
+    }
+
+    /// Two consecutive `bookmark_toggle` operations restore the original state
+    /// (add then remove → not bookmarked again).
+    #[test]
+    fn bookmark_toggle_is_idempotent_pair() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        let url = "https://toggle-pair.test/page";
+
+        // Confirm starts empty.
+        assert!(
+            !crate::is_url_bookmarked_in_host(&host, url),
+            "must start un-bookmarked"
+        );
+
+        // First toggle: add.
+        seed_bookmark(&host, url, "Idempotent Pair");
+        assert!(
+            crate::is_url_bookmarked_in_host(&host, url),
+            "must be bookmarked after first toggle"
+        );
+
+        // Second toggle: remove.
+        remove_bookmark(&host, url);
+        assert!(
+            !crate::is_url_bookmarked_in_host(&host, url),
+            "must be un-bookmarked after second toggle (back to original state)"
+        );
+    }
 }

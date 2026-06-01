@@ -524,6 +524,19 @@
         if (input && payload && typeof payload.url === "string") {
           input.value = payload.url;
         }
+        // Update bookmark-toggle visual state when present.
+        if (payload && typeof payload.bookmarked === "boolean") {
+          var bm = document.querySelector(".bookmark-toggle");
+          if (bm) {
+            if (payload.bookmarked) {
+              bm.classList.add("is-bookmarked");
+              bm.setAttribute("aria-pressed", "true");
+            } else {
+              bm.classList.remove("is-bookmarked");
+              bm.setAttribute("aria-pressed", "false");
+            }
+          }
+        }
         break;
       case "set_tabs":
         if (payload && Array.isArray(payload.tabs)) {
@@ -717,9 +730,21 @@
     };
   }
 
+  function wireBookmarkToggle() {
+    var bookmarkBtn = document.querySelector(".bookmark-toggle");
+    if (bookmarkBtn) {
+      bookmarkBtn.addEventListener("click", function () {
+        if (window.mote && window.mote.invoke) {
+          window.mote.invoke("bookmark_toggle", {}).catch(function () {});
+        }
+      });
+    }
+  }
+
   function boot() {
     installInvoke();
     wireOmnibox();
+    wireBookmarkToggle();
     wireNewTab();
     // Chain the urlbar_suggestions applyOp handler after the base handler is
     // installed above.  wireCompletionsOp() captures prevApplyOp at call-time.

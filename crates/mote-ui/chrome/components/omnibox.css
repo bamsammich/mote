@@ -199,3 +199,10 @@
   background: var(--surface-2);
   color: var(--fg);
 }
+
+/* Bookmark toggle: same Lucide stroke as the activity-bar bookmark icon.
+ * Dim by default (the page isn't bookmarked); accent when bookmarked. */
+.omni .right .bookmark-toggle               { color: var(--fg-2); }
+.omni .right .bookmark-toggle.is-bookmarked { color: var(--accent); }
+.omni .right .bookmark-toggle:hover         { color: var(--fg); }
+.omni .right .bookmark-toggle.is-bookmarked:hover { color: var(--accent); }

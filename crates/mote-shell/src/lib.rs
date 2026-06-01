@@ -186,6 +186,9 @@ enum ShellCommand {
     /// The user removed a bookmark from the bookmarks panel; invoke
     /// `ui:bookmarks_provider` → `remove_bookmark` and re-push the bookmark list.
     BookmarkRemove(String),
+    /// The user clicked the inline urlbar bookmark toggle; add if not bookmarked,
+    /// remove if bookmarked, then re-push `set_url` so the star color updates.
+    BookmarkToggle,
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -618,6 +621,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let revoke_queue = Arc::clone(commands);
     let set_active_panel_queue = Arc::clone(commands);
     let bookmark_remove_queue = Arc::clone(commands);
+    let bookmark_toggle_queue = Arc::clone(commands);
     let adjust_queue = Arc::clone(commands);
     let revoke_secret_queue = Arc::clone(commands);
     let urlbar_query_queue = Arc::clone(commands);
@@ -719,6 +723,10 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                     OpResponse::ok("{\"ok\":true}")
                 },
             )
+        })
+        .register("bookmark_toggle", move |_params: &str| {
+            push(&bookmark_toggle_queue, ShellCommand::BookmarkToggle);
+            OpResponse::ok("{\"ok\":true}")
         })
 }
 
@@ -962,6 +970,7 @@ impl ShellApp {
                 ShellCommand::UrlbarQuery(text) => self.urlbar_query(&text),
                 ShellCommand::SetActivePanel(name) => self.set_active_panel(&name),
                 ShellCommand::BookmarkRemove(url) => self.bookmark_remove(&url),
+                ShellCommand::BookmarkToggle => self.bookmark_toggle(),
             }
         }
     }
@@ -1053,6 +1062,74 @@ impl ShellApp {
             self.host
                 .runtime
                 .invoke_capability("ui:bookmarks_provider", "remove_bookmark", &arg);
+        self.push_bookmark_list();
+    }
+
+    /// Check whether `url` is currently in the bookmarks store by calling
+    /// `list_bookmarks` and scanning the returned rows.
+    ///
+    /// Returns `false` on any failure (no provider, empty list, marshal error) so
+    /// callers get a safe default. Used by [`push_state_to_chrome`] and
+    /// [`bookmark_toggle`].
+    fn is_url_bookmarked(&self, url: &str) -> bool {
+        let arg = HostValue::Str(String::new());
+        let raw =
+            self.host
+                .runtime
+                .invoke_capability("ui:bookmarks_provider", "list_bookmarks", &arg);
+        let Some(HostValue::List(items)) = raw else {
+            return false;
+        };
+        items.iter().any(|item| match item {
+            HostValue::Map(m) => matches!(m.get("url"), Some(HostValue::Str(u)) if u == url),
+            _ => false,
+        })
+    }
+
+    /// Toggle the bookmark state for the active tab.
+    ///
+    /// - If the URL is not yet bookmarked: calls `add_bookmark {url, title}`.
+    /// - If already bookmarked: calls `remove_bookmark {url}`.
+    ///
+    /// After the toggle, re-pushes `set_url` (via [`push_state_to_chrome`]) so
+    /// the urlbar star reflects the new state, and re-pushes the bookmark list so
+    /// the sidebar panel stays in sync.
+    ///
+    /// # Failure policy
+    ///
+    /// `let _ =` on every `invoke_capability` call — the audit log records
+    /// failures internally; the UI will simply not update on a provider fault.
+    fn bookmark_toggle(&self) {
+        // Capture owned values before any mutable borrow.
+        let (url, title) = match self.tabs.get(self.active) {
+            Some(tab) => (tab.url.clone(), tab.title.clone()),
+            None => return,
+        };
+
+        let already_bookmarked = self.is_url_bookmarked(&url);
+        let mut arg_map = BTreeMap::new();
+        arg_map.insert("url".to_owned(), HostValue::Str(url));
+        if already_bookmarked {
+            let _ = self.host.runtime.invoke_capability(
+                "ui:bookmarks_provider",
+                "remove_bookmark",
+                &HostValue::Map(arg_map),
+            );
+        } else {
+            arg_map.insert(
+                "title".to_owned(),
+                HostValue::Str(title.unwrap_or_default()),
+            );
+            let _ = self.host.runtime.invoke_capability(
+                "ui:bookmarks_provider",
+                "add_bookmark",
+                &HostValue::Map(arg_map),
+            );
+        }
+
+        // Re-push set_url so the urlbar star color reflects the new state.
+        self.push_state_to_chrome();
+        // Re-push bookmark list so the sidebar panel stays in sync.
         self.push_bookmark_list();
     }
 
@@ -1496,9 +1573,11 @@ impl ShellApp {
             "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_tabs',{{tabs:{tabs_json}}});"
         ));
         if let Some(tab) = self.tabs.get(self.active) {
-            let url = js_string(&tab.url);
+            let url_str = tab.url.clone();
+            let url = js_string(&url_str);
+            let bookmarked = self.is_url_bookmarked(&url_str);
             chrome.eval_js(&format!(
-                "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_url',{{url:{url}}});"
+                "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_url',{{url:{url},bookmarked:{bookmarked}}});"
             ));
         }
     }
@@ -2969,6 +3048,27 @@ pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<Stri
     Some(format!(
         "{{\"rows\":{rows_json},\"count\":{count},\"truncated\":{truncated}}}"
     ))
+}
+
+/// Test-accessible seam: check whether `url` is present in the bookmarks store,
+/// mirroring the logic of [`ShellApp::is_url_bookmarked`] without requiring a
+/// live window bridge.
+///
+/// Returns `false` when the provider is unavailable or returns an unexpected
+/// shape — callers should treat that as "not bookmarked."
+#[cfg(test)]
+pub(crate) fn is_url_bookmarked_in_host(host: &runtime::PluginHost, url: &str) -> bool {
+    let arg = HostValue::Str(String::new());
+    let raw = host
+        .runtime
+        .invoke_capability("ui:bookmarks_provider", "list_bookmarks", &arg);
+    let Some(HostValue::List(items)) = raw else {
+        return false;
+    };
+    items.iter().any(|item| match item {
+        HostValue::Map(m) => matches!(m.get("url"), Some(HostValue::Str(u)) if u == url),
+        _ => false,
+    })
 }
 
 #[cfg(test)]
