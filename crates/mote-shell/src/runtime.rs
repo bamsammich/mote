@@ -2396,6 +2396,68 @@ return M
         (host, config, cache)
     }
 
+    /// Phase 5a close-out integration test (Task F1).
+    ///
+    /// All three first-party bundled providers (`bookmarks`, `history`,
+    /// `workspace-manager`) must load dialog-free in a fresh profile boot, AND
+    /// all four exclusive capabilities they claim
+    /// (`ui:bookmarks_provider` / `ui:history_provider` /
+    /// `ui:urlbar_provider` / `workspace:provider`) must be fulfilled without
+    /// claim conflict. No approval dialogs pending — bundled provenance
+    /// auto-grants per ADR-0008.
+    ///
+    /// This is the integration check that proves the Phase 5a story end-to-end:
+    /// bundled plugins ship, the binary embed reaches the cache (via
+    /// `bundled_version_for` content hash, `6df4235`), all four exclusive
+    /// `required_api` contracts are satisfied, and the runtime accepts the set.
+    #[test]
+    fn phase5a_providers_all_load_bundled() {
+        use std::collections::HashSet;
+
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        // (a) All three bundled providers loaded.
+        let loaded: HashSet<&str> = host.loaded.iter().map(|r| r.name.as_str()).collect();
+        for expected in ["bookmarks", "history", "workspace-manager"] {
+            assert!(
+                loaded.contains(expected),
+                "bundled provider `{expected}` failed to load (loaded set = {loaded:?})"
+            );
+        }
+
+        // (b) No pending approvals — bundled provenance auto-grants (ADR-0008).
+        assert!(
+            host.pending_approvals.is_empty(),
+            "all bundled plugins must auto-grant; pending: {:?}",
+            host.pending_approvals
+                .iter()
+                .map(|(r, _)| r.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // (c) All four exclusive capabilities are claimed, with no double-claim
+        // (a duplicate would have rejected the second load — the capability
+        // map's exclusive-double-claim check; presence is the negative
+        // confirmation that no conflict occurred).
+        let claimed: HashSet<&str> = host
+            .loaded
+            .iter()
+            .flat_map(|r| r.manifest.capabilities.iter().map(String::as_str))
+            .collect();
+        for cap in [
+            "ui:bookmarks_provider",
+            "ui:history_provider",
+            "ui:urlbar_provider",
+            "workspace:provider",
+        ] {
+            assert!(
+                claimed.contains(cap),
+                "exclusive capability `{cap}` is not claimed by any bundled plugin \
+                 (claimed = {claimed:?})"
+            );
+        }
+    }
+
     /// Seed a visit via `ui:history_provider` → `record_visit`.
     ///
     /// Passes a wall-clock `time` in milliseconds.  Callers that do not care
