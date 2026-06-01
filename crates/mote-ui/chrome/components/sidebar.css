@@ -206,9 +206,18 @@
   color: var(--fg-2);
 }
 
+/* Right-edge group keeps `N open` and the `+` together so `space-between` on
+ * .sidepanel-head pushes the lockup to the left and the whole right-group to
+ * the right — instead of stranding the meta in the middle. */
+.sidepanel-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .sidepanel-head .new-tab-btn {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -218,7 +227,6 @@
   border-radius: var(--radius-1);
   color: var(--fg-2);
   cursor: pointer;
-  margin-left: 8px;
 }
 
 .sidepanel-head .new-tab-btn:hover {
