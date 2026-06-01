@@ -847,44 +847,47 @@
 
       var rows = (payload && Array.isArray(payload.rows)) ? payload.rows : [];
 
-      // Update strip lockup name from the active row.
+      // Build into a fragment first.  If rendering produces zero valid rows
+      // (e.g., the shell pushed an empty list due to a transient invoke
+      // failure), we preserve the existing popover content rather than clear
+      // it — so the seeded fallback row remains visible.
+      var frag = document.createDocumentFragment();
       var activeRow = null;
+      var renderedCount = 0;
       for (var i = 0; i < rows.length; i++) {
-        if (rows[i] && rows[i].active === true) {
-          activeRow = rows[i];
-          break;
-        }
-      }
-      var nameEl = strip.querySelector(".name");
-      if (nameEl && activeRow && typeof activeRow.name === "string") {
-        nameEl.textContent = activeRow.name;
-      }
-      // If no active row is present, leave existing text unchanged (defensive).
-
-      // Rebuild popover rows.  DOM-build only — no innerHTML.
-      popover.textContent = "";
-      rows.forEach(function (record) {
-        if (!record || typeof record.id !== "string") return;
+        var record = rows[i];
+        if (!record || typeof record.id !== "string") continue;
+        if (record.active === true) activeRow = record;
 
         var rowEl = document.createElement("div");
         rowEl.className = "row" + (record.active === true ? " is-current" : "");
         rowEl.setAttribute("role", "option");
         rowEl.setAttribute("data-id", record.id);
 
-        // Check mark: "✓" for the active workspace, invisible otherwise.
         var checkEl = document.createElement("span");
         checkEl.className = "check";
-        checkEl.textContent = record.active === true ? "✓" : " ";
+        checkEl.textContent = record.active === true ? "✓" : " "; // ✓
         rowEl.appendChild(checkEl);
 
-        // Workspace name.
         var nameSpan = document.createElement("span");
         nameSpan.className = "name";
-        nameSpan.textContent = typeof record.name === "string" ? record.name : record.id;
+        nameSpan.textContent =
+          typeof record.name === "string" ? record.name : record.id;
         rowEl.appendChild(nameSpan);
 
-        popover.appendChild(rowEl);
-      });
+        frag.appendChild(rowEl);
+        renderedCount++;
+      }
+
+      if (renderedCount > 0) {
+        popover.textContent = "";
+        popover.appendChild(frag);
+        var nameEl = strip.querySelector(".name");
+        if (nameEl && activeRow && typeof activeRow.name === "string") {
+          nameEl.textContent = activeRow.name;
+        }
+      }
+      // else: keep whatever was in the popover (typically the seeded fallback).
     };
   }
 

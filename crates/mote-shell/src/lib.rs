@@ -2808,8 +2808,10 @@ impl ApplicationHandler for ShellApp {
         if !self.chrome_ready && self.bridge.page().paint_count() >= 1 {
             self.chrome_ready = true;
             self.push_state_to_chrome();
-            // Populate the workspace strip on first render.
-            self.push_workspace_list();
+            // NOTE: push_workspace_list intentionally NOT called here — plugins
+            // haven't loaded yet at chrome-ready (the load pass runs on the next
+            // tick, below); invoke_capability would return None and the strip
+            // would render empty.  It's pushed right after run_initial_load_pass.
         }
 
         // The plugin load pass is deferred past window creation so a slow or
@@ -2820,6 +2822,8 @@ impl ApplicationHandler for ShellApp {
         if self.chrome_ready && !self.did_initial_load {
             self.did_initial_load = true;
             self.host.run_initial_load_pass();
+            // Populate the workspace strip now that workspace:provider is loaded.
+            self.push_workspace_list();
             // Show the FIRST awaiting-approval dialog now that chrome is live.
             // The single dialog root holds one dialog, so multi-pending is shown
             // one at a time — `approve_plugin` advances to the next as each
