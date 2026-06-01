@@ -1220,6 +1220,18 @@ impl ShellApp {
     /// after `rebuild_tabs_for_workspace` so the user-visible result of a
     /// workspace switch (or any equivalent rebuild) has a live page they can
     /// navigate / interact with.
+    ///
+    /// **Regression note (`0ccb346`):** removing this call from
+    /// `switch_workspace` reintroduces a navigation regression — typing a URL
+    /// into the omnibox after switching workspaces silently no-ops because
+    /// `navigate_active` falls through the `if let Some(page)` guard. No unit
+    /// test currently catches that because the failure mode requires a live
+    /// CEF engine to observe (`Page::with_profile` cannot be instantiated
+    /// headlessly).  A future closest-seam test would refactor materialization
+    /// behind a trait that can be mocked + counter-spied; tracked as a
+    /// `feedback-always-write-tests` follow-up.  Until then, this doc comment
+    /// IS the protection — do not remove the call from `switch_workspace`
+    /// without replacing the regression protection.
     fn materialize_active_if_placeholder(&mut self) {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
@@ -3876,6 +3888,83 @@ mod tests {
         assert!(
             found_work,
             "built-in 'work' workspace must be present (json={json:?})"
+        );
+
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+
+    /// Regression for `9e19dc1 fix(shell): defer workspace push to after plugin
+    /// load`. The bug: `push_workspace_list` was being called at chrome-ready,
+    /// before plugins had loaded — so `invoke_capability("workspace:provider",
+    /// "list_workspaces", …)` returned `None`, the chrome got `rows: []`, and
+    /// the popover rendered empty.
+    ///
+    /// This test pins the ordering invariant at the data layer:
+    ///   • BEFORE the `workspace:provider` fulfiller is loaded,
+    ///     `build_workspace_list_json` returns `None` (the seam mirrors
+    ///     `push_workspace_list`; None means "no fulfiller, don't push").
+    ///   • AFTER the plugin is loaded, the same call returns `Some(json)` with
+    ///     the built-in workspace rows.
+    ///
+    /// If a future change re-introduces a push-before-load call site, the
+    /// "before" assertion here would still pass against the helper, but the
+    /// SHELL-SIDE invariant — "don't call `push_workspace_list` until plugins
+    /// are loaded" — is captured by the code comment above the call site in
+    /// `about_to_wait`.  Keep both protections in sync.
+    #[test]
+    fn workspace_list_unavailable_before_plugin_load() {
+        use std::time::Duration;
+
+        use mote_audit::{AuditLog, Config};
+        use mote_storage::Store;
+        use mote_types::{IdentityId, SchemaVersion};
+
+        use crate::runtime::PluginHost;
+
+        const WS_SRC: &str = include_str!("../../../plugins/workspace-manager/init.lua");
+
+        let store = Store::open_in_memory().expect("in-memory store opens");
+        let config = Config {
+            ring_capacity: 256,
+            flush_threshold: 1,
+            flush_interval: Duration::from_millis(5),
+        };
+        let mut log = AuditLog::new(&store, config).expect("audit log starts");
+        let registry = mote_registry::Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+        let runtime = mote_runtime::Runtime::new(registry, store.clone(), log.producer());
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut host =
+            PluginHost::boot_in(store, dir.path(), dir.path()).expect("host boots cleanly");
+        host.runtime = runtime;
+
+        // BEFORE loading the workspace plugin: the helper returns None.  This is
+        // exactly the state the buggy push-at-chrome-ready code hit on boot.
+        assert!(
+            build_workspace_list_json(&host).is_none(),
+            "workspace_list must be unavailable before the workspace:provider \
+             plugin is loaded; pushing it now would deliver empty rows"
+        );
+
+        // Load the plugin (mirrors the relevant subset of `run_initial_load_pass`).
+        let policy = mote_runtime::GrantAsRequested;
+        let identity = mote_runtime::IdentityContext::new(IdentityId::new(0));
+        host.runtime
+            .load(WS_SRC, identity, &policy)
+            .expect("workspace-manager loads cleanly");
+
+        // AFTER loading: the same helper returns Some(json) with workspace rows.
+        let json =
+            build_workspace_list_json(&host).expect("workspace_list available after plugin load");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("workspace list JSON parses");
+        let rows = v
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .expect("rows array present after load");
+        assert!(
+            rows.len() >= 2,
+            "expected >=2 built-in workspaces after load; got {} ({json:?})",
+            rows.len()
         );
 
         log.shutdown().expect("audit log shuts down cleanly");
