@@ -91,14 +91,23 @@ fn host_invokes_urlbar_query() {
         .expect("history plugin must load");
 
     // Seed two visits for "https://example.com/foo" and one for an unrelated URL.
-    // `record_visit` expects `{ url, title }` as a Map payload.
+    // `record_visit` expects `{ url, time }` as a Map payload (time = Unix ms).
     let visit_foo = {
         let mut m = BTreeMap::new();
         m.insert(
             "url".to_owned(),
             HostValue::Str("https://example.com/foo".to_owned()),
         );
-        m.insert("title".to_owned(), HostValue::Str("Foo Page".to_owned()));
+        m.insert("time".to_owned(), HostValue::Number(1_700_000_001_000.0));
+        HostValue::Map(m)
+    };
+    let visit_foo2 = {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "url".to_owned(),
+            HostValue::Str("https://example.com/foo".to_owned()),
+        );
+        m.insert("time".to_owned(), HostValue::Number(1_700_000_002_000.0));
         HostValue::Map(m)
     };
     let visit_bar = {
@@ -107,15 +116,15 @@ fn host_invokes_urlbar_query() {
             "url".to_owned(),
             HostValue::Str("https://other.example/bar".to_owned()),
         );
-        m.insert("title".to_owned(), HostValue::Str("Bar".to_owned()));
+        m.insert("time".to_owned(), HostValue::Number(1_700_000_003_000.0));
         HostValue::Map(m)
     };
     runtime
         .invoke_capability("ui:history_provider", "record_visit", &visit_foo)
         .expect("first record_visit must succeed");
     runtime
-        .invoke_capability("ui:history_provider", "record_visit", &visit_foo)
-        .expect("second record_visit (same URL) must succeed");
+        .invoke_capability("ui:history_provider", "record_visit", &visit_foo2)
+        .expect("second record_visit (same URL, different time) must succeed");
     runtime
         .invoke_capability("ui:history_provider", "record_visit", &visit_bar)
         .expect("record_visit for bar must succeed");

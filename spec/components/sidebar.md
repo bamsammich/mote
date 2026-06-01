@@ -153,9 +153,24 @@ When the `tabs` panel is the chosen default, a theme typically leaves the `top-b
 Bookmarks and history panels render their data as a mono-row vertical list.
 The shell builds the DOM; plugin authors return only data.
 
+History uses a **chronological visit log** model: every navigation produces a
+separate event entry, so the same URL appears multiple times (once per visit) in
+the history panel. Titles are stored at the URL level — when `update_title` is
+called after page load, the new title propagates to all historical visit rows for
+that URL via the join in `query_history(sort=recent)`. Bookmarks use a distinct
+model (one entry per URL, no event log) and do not carry a `time_ms` field.
+
 ### Row structure
 
-Title is the **primary** identifier (matches every shipping browser's bookmarks / history panel); URL is the dim **secondary** context. When a row has no title (e.g., a bookmark added before title-capture lands, or a visit whose page never resolved a title), the URL becomes the primary text and the secondary cell is left empty so column alignment stays consistent across rows.
+Title is the **primary** identifier (matches every shipping browser's bookmarks /
+history panel); URL is the dim **secondary** context. When a row has no title
+(e.g., a bookmark added before title-capture lands, or a visit whose page never
+resolved a title), the URL becomes the primary text and the secondary cell is
+left empty so column alignment stays consistent across rows.
+
+History rows also carry a `.row-time` span with a human-readable relative
+timestamp (e.g., "2 minutes ago"). Bookmark rows do not carry `time_ms` and
+therefore never render a `.row-time` span.
 
 ```html
 <!-- bookmark row (has title — both cells populated) -->
@@ -172,10 +187,11 @@ Title is the **primary** identifier (matches every shipping browser's bookmarks 
   <button class="row-remove" aria-label="remove bookmark">×</button>
 </button>
 
-<!-- history row (no remove control) -->
+<!-- history row (no remove control; time_ms present → .row-time rendered) -->
 <button class="sidepanel-row" data-url="https://example.com">
   <span class="row-title">Example Page</span>
   <span class="row-url">https://example.com</span>
+  <span class="row-time">2 minutes ago</span>
 </button>
 
 <!-- footer shown only when truncated == true -->
@@ -198,6 +214,10 @@ Title is the **primary** identifier (matches every shipping browser's bookmarks 
 | `.row-title` | `text-overflow` | `ellipsis` | overflow handling |
 | `.row-url` | `color` | `var(--fg-2)` | dim secondary context |
 | `.row-url` | `max-width` | `240px` | cap so long URLs don't squeeze the title |
+| `.row-time` | `color` | `var(--fg-2)` | dim relative timestamp (history only) |
+| `.row-time` | `font` | `var(--text-mono-sm)` | smaller than the title |
+| `.row-time` | `white-space` | `nowrap` | never wraps |
+| `.row-time` | `margin-left` | `4px` | small gap from `.row-url` |
 | `.row-remove` | `color` (default) | `var(--fg-3)` | very dim |
 | `.row-remove` | `color` (row hover) | `var(--fg-2)` | surfaces on row hover |
 | `.row-remove` | `color` (button hover) | `var(--accent)` | destructive signal |
@@ -222,12 +242,17 @@ Title is the **primary** identifier (matches every shipping browser's bookmarks 
 - Click `×` (bookmarks only) → `event.stopPropagation()` then `mote.invoke("bookmark_remove", {url})`. The shell re-pushes `bookmark_list` after the removal.
 - History rows have no remove control.
 - History panel shows a `.sidepanel-footer` footer only when `truncated == true` in the payload.
+- History shows each visit as a separate row (chronological log); the same URL appears multiple times at different timestamps. The title is URL-level: `update_title` propagates to all historical rows for that URL.
+- Bookmark rows do not carry `time_ms`; `.row-time` is never rendered for bookmark rows.
 
 ### Behavior — data source
 
 Data is pushed by the shell via:
 - `applyOp("bookmark_list", { rows: [{url, title}, ...], count: N })`
-- `applyOp("history_list", { rows: [{url, title}, ...], count: N, truncated: bool })`
+- `applyOp("history_list", { rows: [{url, title, time_ms}, ...], count: N, truncated: bool })`
+
+History rows include `time_ms` (Unix epoch milliseconds, wall-clock stamped by
+the shell at navigate time). Bookmark rows do not include `time_ms`.
 
 The shell calls the relevant capability when:
 1. The panel becomes active (`set_active_panel` op).

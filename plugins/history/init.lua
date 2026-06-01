@@ -1,7 +1,7 @@
 -- Mote bundled first-party plugin: history
 --
 -- Fulfills TWO exclusive capabilities:
---   • `ui:history_provider` (contract: query_history, record_visit)
+--   • `ui:history_provider` (contract: query_history, record_visit, update_title)
 --   • `ui:urlbar_provider`  (contract: query)
 --
 -- History owns the urlbar:suggest collector surface (DESIGN.md:349/862) — it
@@ -14,30 +14,34 @@
 -- This plugin owns the urlbar and history POLICY: what a visit is, ranking,
 -- and the urlbar:suggest collector surface other plugins contribute to.
 --
--- Data model (docs/plans/2026-05-30-phase5a-core-providers.md §Unknown-2):
--- One KV entry per URL, key = "v:" .. url, value = JSON-encoded record:
---   { url, title, visit_count, last_visited }
--- where `last_visited` is a monotonic integer counter (not wall-clock time).
--- A separate key "_seq" holds the latest sequence value.
+-- Data model (chronological visit log with URL-level title cache):
+--
+--   URL records  — key "u:<url>"
+--     { url, title, first_seen_ms, last_seen_ms, total_count }
+--     One record per URL; mutable.  Title is URL-level so update_title
+--     propagates to all historical rows for that URL via the join in
+--     query_history(sort="recent").
+--
+--   Visit events — key "e:<time_ms_padded>"
+--     { url, time_ms }
+--     One record per visit; append-only.  Key is a 16-digit zero-padded
+--     decimal timestamp so storage.list_keys() returns events in
+--     lexicographic = chronological order.
+--
+--     Collision note: two visits at the exact same millisecond on a
+--     single-machine stream are astronomically unlikely, but the key space
+--     is keyed on wall-clock ms so no explicit disambiguator is added.
+--     If a future use-case requires sub-ms precision, append a counter suffix.
+--
+-- Wall-clock time enters via shell-stamping: the shell captures
+-- SystemTime::now() and passes time_ms in the record_visit payload.  The
+-- plugin is time-free — it only stores what the shell gives it.  This is
+-- consistent with the broader "shell stamps context for plugins" pattern and
+-- sidesteps the fingerprinting concern that gates a general mote.time API.
 --
 -- mote.json.encode/decode is used for all record serialization — this is the
 -- library-backed approach (serde_json under the hood) required by the
--- feedback-use-libraries-not-rolled project rule.  The bookmarks plugin uses
--- a pipe-delimited codec (written before this rule was adopted); this plugin
--- uses JSON as the forward-looking baseline for all new plugins.
---
--- NOTE: os.time is NOT available in the Mote Lua sandbox (os module is
--- excluded for security).  `last_visited` is a monotonic `_seq` counter —
--- a stand-in until a `mote.time` host API is designed.  This gives stable
--- recency ordering without wall-clock access.  Future callers upgrading to
--- real timestamps should rename the field to avoid ambiguity.
---
--- Ranking formula for query_history results:
---   score = visit_count * 1_000_000 + last_visited
--- Higher visit_count wins; last_visited breaks ties between entries with the
--- same count.  Results are capped at 20 (the natural list length if smaller).
--- This formula is documented here so the ranking contract is explicit and
--- testable.
+-- feedback-use-libraries-not-rolled project rule.
 --
 -- NOTE on filter case-sensitivity: Lua's string.lower is ASCII-only.  For
 -- v0.1, case-insensitive substring matching uses string.lower on both the
@@ -46,9 +50,9 @@
 -- later via a mote.text host API if needed.
 --
 -- NOTE on max_entries: write-side LRU trim (max_entries cap) is intentionally
--- NOT implemented in this commit.  The data model is bounded in practice by
--- real browsing volume; a configurable trim policy belongs in a follow-up
--- task once the usage pattern is observed.  See phase5a plan §B2 deferred.
+-- NOT implemented.  The data model is bounded in practice by real browsing
+-- volume; a configurable trim policy belongs in a follow-up task once the
+-- usage pattern is observed.
 --
 -- ADR-0001: all hooks/events/api are declarative module-level tables.
 -- setup() runs only after all four load-time validation steps pass.
@@ -76,8 +80,9 @@ M.manifest = {
   },
 
   -- History owns both capabilities: it is the exclusive fulfiller of both
-  -- ui:history_provider (record_visit / query_history) and ui:urlbar_provider
-  -- (query), replacing the now-removed standalone urlbar plugin.
+  -- ui:history_provider (record_visit / update_title / query_history) and
+  -- ui:urlbar_provider (query), replacing the now-removed standalone urlbar
+  -- plugin.
   capabilities = {
     "ui:history_provider",
     "ui:urlbar_provider",
@@ -90,102 +95,111 @@ M.manifest = {
 -- Internal helpers
 -- ---------------------------------------------------------------------------
 
---- Read the next monotonic sequence number from storage and advance it.
--- This is a stand-in for wall-clock time (os.time is not available in the
--- sandbox).  The counter is scoped to this plugin + identity by the storage
--- namespace.  The value is only meaningful for relative ordering: a larger
--- `last_visited` means "visited more recently in this session/store".
-local function next_seq()
-  local raw = storage.get("_seq")
-  local n = tonumber(raw) or 0
-  n = n + 1
-  storage.set("_seq", tostring(n))
-  return n
-end
-
---- Read and JSON-decode a visit record from storage.
+--- Read and JSON-decode a URL record from storage.
 --- Returns nil if the key does not exist or decoding fails.
-local function read_record(url)
-  local raw = storage.get("v:" .. url)
+local function read_url_record(url)
+  local raw = storage.get("u:" .. url)
   if raw == nil then return nil end
   return mote.json.decode(raw)
 end
 
---- Encode and write a visit record to storage.
-local function write_record(rec)
+--- Encode and write a URL record to storage.
+local function write_url_record(rec)
   local encoded = mote.json.encode(rec)
   if encoded ~= nil then
-    storage.set("v:" .. rec.url, encoded)
+    storage.set("u:" .. rec.url, encoded)
+  end
+end
+
+--- Write a visit event to storage.
+--- Key format: "e:<16-digit-zero-padded-ms>" so list_keys() is chronological.
+local function write_event(url, time_ms)
+  local key = "e:" .. string.format("%016d", time_ms)
+  local encoded = mote.json.encode({ url = url, time_ms = time_ms })
+  if encoded ~= nil then
+    storage.set(key, encoded)
   end
 end
 
 -- ---------------------------------------------------------------------------
 -- `M.api` — satisfies BOTH capability contracts:
---   ui:history_provider: required_api = ["query_history", "record_visit"]
+--   ui:history_provider: required_api = ["query_history", "record_visit", "update_title"]
 --   ui:urlbar_provider:  required_api = ["query"]
 -- ---------------------------------------------------------------------------
 
 M.api = {
   --- record_visit(payload)
-  ---   payload = { url = <string>, title = <string|nil> }
+  ---   payload = { url = <string>, time = <number, unix ms> }
   ---
-  --- Records a visit for the given URL.  If a record already exists for this
-  --- URL, visit_count is incremented and last_visited is updated; the title is
-  --- replaced only when the new title is non-nil and non-empty (preserving an
-  --- existing title when no title is supplied in this visit).
+  --- Records a visit for the given URL.
   ---
-  --- Returns true on success; nil/false on invalid input.
+  --- URL record (u:<url>):
+  ---   - First visit: create with {url, title="", first_seen_ms=time,
+  ---     last_seen_ms=time, total_count=1}.
+  ---   - Subsequent visit: title untouched, last_seen_ms = time,
+  ---     total_count += 1.
+  ---
+  --- Visit event (e:<padded_time>):
+  ---   - Append {url, time_ms=time}.
+  ---
+  --- Returns true on success; false if url missing/empty or time invalid.
   record_visit = function(payload)
     if payload == nil or payload.url == nil or payload.url == "" then
-      return nil
+      return false
     end
-    local url   = tostring(payload.url)
-    local title = payload.title
+    local url  = tostring(payload.url)
+    local time = tonumber(payload.time)
+    if time == nil or time ~= time then  -- nil or NaN
+      return false
+    end
+    local time_ms = math.floor(time)
 
-    local seq = next_seq()
-    local existing = read_record(url)
-
+    -- Upsert the URL record.
+    local existing = read_url_record(url)
     local rec
     if existing == nil then
-      -- First visit: create a new record.
       rec = {
-        url         = url,
-        title       = (title ~= nil and title ~= "") and tostring(title) or "",
-        visit_count = 1,
-        last_visited = seq,
+        url           = url,
+        title         = "",
+        first_seen_ms = time_ms,
+        last_seen_ms  = time_ms,
+        total_count   = 1,
       }
     else
-      -- Subsequent visit: bump count, update seq, optionally update title.
       rec = {
-        url         = url,
-        -- Only replace title if the new one is non-nil and non-empty.
-        title       = (title ~= nil and tostring(title) ~= "")
-                        and tostring(title)
-                        or (existing.title or ""),
-        visit_count = (existing.visit_count or 0) + 1,
-        last_visited = seq,
+        url           = url,
+        title         = existing.title or "",
+        first_seen_ms = existing.first_seen_ms or time_ms,
+        last_seen_ms  = time_ms,
+        total_count   = (existing.total_count or 0) + 1,
       }
     end
+    write_url_record(rec)
 
-    write_record(rec)
+    -- Append the visit event.
+    write_event(url, time_ms)
+
     return true
   end,
 
   --- update_title(payload)
   ---   payload = { url = <string>, title = <string> }
   ---
-  --- Resolves the asynchronous page title for an existing visit record WITHOUT
+  --- Resolves the asynchronous page title for an existing URL record WITHOUT
   --- counting a re-visit.  This is the title-on-load seam: `record_visit` is
   --- called at navigate time (counting the user navigation), then `update_title`
   --- is called when the CEF `on_title_change` callback fires with the resolved
   --- title.  The two responsibilities are intentionally separated so that
-  --- `visit_count` reflects real user navigations, not internal load events.
+  --- `total_count` reflects real user navigations, not internal load events.
+  ---
+  --- Because title is URL-level, this update propagates to ALL historical
+  --- visit rows for that URL via the join in query_history(sort="recent").
   ---
   --- Semantics:
-  ---   • url missing/empty            → return false (no-op).
-  ---   • no existing record for url   → return false (no phantom record created).
-  ---   • title nil/empty              → return false (nothing to update).
-  ---   • otherwise: overwrite title, leave visit_count and last_visited unchanged.
+  ---   • url missing/empty              → return false (no-op).
+  ---   • no existing URL record for url → return false (no phantom record).
+  ---   • title nil/empty                → return false (nothing to update).
+  ---   • otherwise: overwrite title, leave total_count, first/last_seen_ms.
   ---   • Returns true on success.
   update_title = function(payload)
     if payload == nil or payload.url == nil or payload.url == "" then
@@ -196,14 +210,14 @@ M.api = {
       return false
     end
     local url = tostring(payload.url)
-    local existing = read_record(url)
+    local existing = read_url_record(url)
     if existing == nil then
       -- No prior visit for this URL — do not create a phantom record.
       return false
     end
     existing.title = tostring(title)
-    -- visit_count and last_visited are intentionally left unchanged.
-    write_record(existing)
+    -- total_count, first_seen_ms, last_seen_ms are intentionally unchanged.
+    write_url_record(existing)
     return true
   end,
 
@@ -211,19 +225,23 @@ M.api = {
   ---   payload = optional Lua table with fields:
   ---     filter  = string (nil or "" = no filter; case-insensitive ASCII match)
   ---     limit   = number (positive integer cap; default 20; ≤0 returns {})
-  ---     sort    = "relevance" | "recent"  (unknown values → "relevance")
+  ---     sort    = "recent" | "relevance"  (unknown values → "relevance")
   ---
-  --- Defaults preserve the original query_history(filter_string) behavior:
-  ---   limit=20, sort="relevance" (visit_count * 1_000_000 + last_visited desc).
+  --- sort="recent" (default for the sidebar):
+  ---   Iterate e:<...> keys in lexicographic (= chronological) order, reversed.
+  ---   For each event look up u:<url> for the current title.  Returns records:
+  ---     { url, title, time_ms }
+  ---   Each visit is a SEPARATE row — duplicates of the same URL appear multiple
+  ---   times at different timestamps (matches real browser history behavior).
   ---
-  --- sort="recent": last_visited descending (pure recency view; sidebar use).
+  --- sort="relevance" (default for the omnibox):
+  ---   Iterate u:<url> keys.  Sort by (total_count DESC, last_seen_ms DESC).
+  ---   Returns records: { url, title, total_count, last_seen_ms }
+  ---   Deduped per URL — sane for suggestion behavior.
   ---
-  --- Non-table / nil payload is treated as {} (all defaults).
-  --- Passing a plain string is NOT supported by this interface; callers must
-  --- migrate to the table form (see DESIGN brief 2026-05-31).
-  ---
-  --- Case-insensitive ASCII substring matching is used for the filter (see
-  --- NOTE in file header regarding unicode).
+  --- filter: case-insensitive ASCII substring on url+title; applied before limit.
+  --- default limit = 20 (preserves omnibox behavior).
+  --- Unknown `sort` falls back to "relevance" silently (closed enum, default-deny).
   query_history = function(payload)
     payload = (type(payload) == "table") and payload or {}
     local filter = (type(payload.filter) == "string") and payload.filter or ""
@@ -232,56 +250,109 @@ M.api = {
     local sort   = (payload.sort == "recent") and "recent" or "relevance"
 
     local keys = storage.list_keys()
-    local records = {}
 
-    -- Collect all "v:" keys and decode records; skip nil/decode failures.
-    for _, key in ipairs(keys) do
-      if key:sub(1, 2) == "v:" then
+    if sort == "recent" then
+      -- Collect all "e:" keys; list_keys returns them in lexicographic order
+      -- (= chronological).  We reverse to get newest-first.
+      local event_keys = {}
+      for _, key in ipairs(keys) do
+        if key:sub(1, 2) == "e:" then
+          event_keys[#event_keys + 1] = key
+        end
+      end
+
+      -- Reverse for newest-first traversal.
+      local n = #event_keys
+      local reversed = {}
+      for i = 1, n do
+        reversed[i] = event_keys[n - i + 1]
+      end
+
+      -- Apply filter and limit: for each event, join to URL record for title.
+      local f = (filter ~= "") and filter:lower() or nil
+      local result = {}
+      for _, key in ipairs(reversed) do
+        if #result >= limit then break end
         local raw = storage.get(key)
         if raw ~= nil then
-          local rec = mote.json.decode(raw)
-          if rec ~= nil then
-            records[#records + 1] = rec
+          local ev = mote.json.decode(raw)
+          if ev ~= nil and ev.url ~= nil then
+            -- Join to URL record for current title.
+            local url_rec = read_url_record(ev.url)
+            local title = (url_rec ~= nil) and (url_rec.title or "") or ""
+            -- Apply filter on url + title.
+            if f == nil then
+              result[#result + 1] = {
+                url     = ev.url,
+                title   = title,
+                time_ms = ev.time_ms or 0,
+              }
+            else
+              local url_lc   = ev.url:lower()
+              local title_lc = title:lower()
+              if url_lc:find(f, 1, true) or title_lc:find(f, 1, true) then
+                result[#result + 1] = {
+                  url     = ev.url,
+                  title   = title,
+                  time_ms = ev.time_ms or 0,
+                }
+              end
+            end
           end
         end
       end
-    end
+      return result
 
-    -- Apply optional substring filter.
-    if filter ~= "" then
-      local f = filter:lower()
-      local filtered = {}
-      for _, rec in ipairs(records) do
-        local url_lc   = (rec.url   or ""):lower()
-        local title_lc = (rec.title or ""):lower()
-        if url_lc:find(f, 1, true) or title_lc:find(f, 1, true) then
-          filtered[#filtered + 1] = rec
+    else
+      -- Relevance: iterate u:<url> keys, sort by (total_count DESC, last_seen_ms DESC).
+      local records = {}
+      for _, key in ipairs(keys) do
+        if key:sub(1, 2) == "u:" then
+          local raw = storage.get(key)
+          if raw ~= nil then
+            local rec = mote.json.decode(raw)
+            if rec ~= nil then
+              records[#records + 1] = rec
+            end
+          end
         end
       end
-      records = filtered
-    end
 
-    -- Sort by requested strategy.
-    if sort == "recent" then
-      -- Pure recency: last_visited descending.
-      table.sort(records, function(a, b)
-        return (a.last_visited or 0) > (b.last_visited or 0)
-      end)
-    else
-      -- Relevance: score = visit_count * 1_000_000 + last_visited, descending.
-      table.sort(records, function(a, b)
-        local sa = (a.visit_count or 0) * 1000000 + (a.last_visited or 0)
-        local sb = (b.visit_count or 0) * 1000000 + (b.last_visited or 0)
-        return sa > sb
-      end)
-    end
+      -- Apply optional filter.
+      if filter ~= "" then
+        local f = filter:lower()
+        local filtered = {}
+        for _, rec in ipairs(records) do
+          local url_lc   = (rec.url   or ""):lower()
+          local title_lc = (rec.title or ""):lower()
+          if url_lc:find(f, 1, true) or title_lc:find(f, 1, true) then
+            filtered[#filtered + 1] = rec
+          end
+        end
+        records = filtered
+      end
 
-    -- Cap at limit results.
-    local result = {}
-    for i = 1, math.min(#records, limit) do
-      result[i] = records[i]
+      -- Sort: total_count DESC, then last_seen_ms DESC as tiebreaker.
+      table.sort(records, function(a, b)
+        local ca = a.total_count or 0
+        local cb = b.total_count or 0
+        if ca ~= cb then return ca > cb end
+        return (a.last_seen_ms or 0) > (b.last_seen_ms or 0)
+      end)
+
+      -- Cap at limit and return relevance-shaped records.
+      local result = {}
+      for i = 1, math.min(#records, limit) do
+        local rec = records[i]
+        result[i] = {
+          url          = rec.url,
+          title        = rec.title or "",
+          total_count  = rec.total_count or 0,
+          last_seen_ms = rec.last_seen_ms or 0,
+        }
+      end
+      return result
     end
-    return result
   end,
 
   --- query(text) — urlbar provider contract.
@@ -292,21 +363,14 @@ M.api = {
   --- returned by a contributing plugin such as "bookmark").
   ---
   --- v0.1 merge policy (history owns this — DESIGN.md:862):
-  ---   1. Gather own visit-log matches: scan list_keys(), filter "v:" prefix,
-  ---      case-insensitive ASCII substring match on url+title, rank by
-  ---      visit_count*1_000_000 + last_visited (same formula as query_history).
+  ---   1. Gather own visit-log matches: scan u:<url> keys, case-insensitive
+  ---      ASCII substring match on url+title, rank by
+  ---      total_count DESC, last_seen_ms DESC.
   ---      Tag every record with source="history".
   ---   2. Collect contributions: call mote.events.collect("urlbar:suggest",
-  ---      {text=text}); each element of the returned table is one subscriber's
-  ---      contribution array (a list of suggestion records already tagged with
-  ---      their own source field).
+  ---      {text=text}); each element is one subscriber's contribution array.
   ---   3. Merge: history matches first (already ranked), then flatten all
   ---      subscriber contributions in collector order.  Cap total at 10.
-  ---
-  --- This policy is intentionally simple for v0.1 — tune as ranking signals
-  --- improve (e.g. add visit frequency to bookmark scoring, cross-source
-  --- deduplication, recency decay).  The merge point stays here; contributors
-  --- slot in via the collector with zero changes to this function.
   ---
   --- Empty text (nil or "") → return {} immediately (cheap path; no storage
   --- scan, no collect call).
@@ -319,12 +383,13 @@ M.api = {
     local filter = tostring(text):lower()
 
     -- -----------------------------------------------------------------------
-    -- Step 1: own history matches, ranked by visit_count * 1e6 + last_visited
+    -- Step 1: own history matches from URL records (deduped, ranked by
+    -- total_count * 1e6 + last_seen_ms for scoring stability)
     -- -----------------------------------------------------------------------
     local keys = storage.list_keys()
     local history_records = {}
     for _, key in ipairs(keys) do
-      if key:sub(1, 2) == "v:" then
+      if key:sub(1, 2) == "u:" then
         local raw = storage.get(key)
         if raw ~= nil then
           local rec = mote.json.decode(raw)
@@ -339,10 +404,10 @@ M.api = {
       end
     end
 
-    -- Sort by score = visit_count * 1_000_000 + last_visited, descending.
+    -- Sort by score = total_count * 1_000_000 + last_seen_ms, descending.
     table.sort(history_records, function(a, b)
-      local sa = (a.visit_count or 0) * 1000000 + (a.last_visited or 0)
-      local sb = (b.visit_count or 0) * 1000000 + (b.last_visited or 0)
+      local sa = (a.total_count or 0) * 1000000 + (a.last_seen_ms or 0)
+      local sb = (b.total_count or 0) * 1000000 + (b.last_seen_ms or 0)
       return sa > sb
     end)
 
@@ -358,9 +423,6 @@ M.api = {
 
     -- -----------------------------------------------------------------------
     -- Step 2: collect contributions from subscribers (e.g. bookmarks).
-    --   Each element of `extras` is ONE subscriber's return — itself a Lua
-    --   array of suggestion records (each already carrying a source tag).
-    --   Graceful degradation: if no subscribers are loaded, extras = {}.
     -- -----------------------------------------------------------------------
     local extras = mote.events.collect("urlbar:suggest", { text = text }) or {}
     for _, contrib in ipairs(extras) do

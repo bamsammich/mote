@@ -2397,14 +2397,18 @@ return M
     }
 
     /// Seed a visit via `ui:history_provider` → `record_visit`.
-    fn seed_visit(host: &PluginHost, url: &str, title: &str) {
+    ///
+    /// Passes a wall-clock `time` in milliseconds.  Callers that do not care
+    /// about a specific timestamp can pass any positive value; callers that seed
+    /// many visits should use distinct timestamps to avoid event-key collisions.
+    fn seed_visit(host: &PluginHost, url: &str, time_ms: f64) {
         use std::collections::BTreeMap;
 
         use mote_runtime::HostValue;
 
         let mut m = BTreeMap::new();
         m.insert("url".to_owned(), HostValue::Str(url.to_owned()));
-        m.insert("title".to_owned(), HostValue::Str(title.to_owned()));
+        m.insert("time".to_owned(), HostValue::Number(time_ms));
         host.runtime
             .invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(m))
             .expect("record_visit must succeed when history is loaded");
@@ -2426,9 +2430,9 @@ return M
         use mote_runtime::{HostValue, host_to_json};
 
         let (host, _config, _cache) = boot_host_with_bundled_plugins();
-        seed_visit(&host, "https://example.com/foo", "Foo Page");
-        seed_visit(&host, "https://example.com/foo", "Foo Page");
-        seed_visit(&host, "https://other.example/bar", "Bar");
+        seed_visit(&host, "https://example.com/foo", 1_700_000_001_000.0);
+        seed_visit(&host, "https://example.com/foo", 1_700_000_002_000.0);
+        seed_visit(&host, "https://other.example/bar", 1_700_000_003_000.0);
 
         // The shell passes text as a plain Str (the Lua function signature is
         // `query(text)` — a string, not a map).
@@ -2548,12 +2552,12 @@ return M
     // -----------------------------------------------------------------------
 
     /// After `navigate_active` fires `record_visit` for a URL, querying
-    /// `query_history` returns that URL in the result set.
+    /// `query_history` returns that URL in the result set and a `u:<url>` record
+    /// exists (via `sort=relevance`) plus at least one `e:<...>` event (via
+    /// `sort=recent`).
     ///
-    /// The call shape mirrors the exact code added to `navigate_active`:
-    ///   `HostValue::Map({"url" → HostValue::Str(url)})`
-    /// per lessons.md L2 (Lua `record_visit` takes a payload table, not a bare
-    /// `Str`) and the history plugin's `record_visit` signature.
+    /// The call shape mirrors the exact code in `navigate_active`:
+    ///   `HostValue::Map({"url" → Str, "time" → Number})`
     #[test]
     fn navigate_records_visit() {
         use std::collections::BTreeMap;
@@ -2562,12 +2566,13 @@ return M
 
         let (host, _config, _cache) = boot_host_with_bundled_plugins();
 
-        // Simulate what navigate_active will call after F2.
+        // Simulate what navigate_active calls.
         let mut arg_map = BTreeMap::new();
         arg_map.insert(
             "url".to_owned(),
             HostValue::Str("https://example.test".to_owned()),
         );
+        arg_map.insert("time".to_owned(), HostValue::Number(1_700_000_001_000.0));
         let arg = HostValue::Map(arg_map);
         let result = host
             .runtime
@@ -2577,42 +2582,69 @@ return M
             "record_visit must return Some when history is loaded"
         );
 
-        // Query history with the URL substring — must find the recorded visit.
+        // URL record exists (sort=relevance returns deduped URL-level records).
         let mut qmap = BTreeMap::new();
         qmap.insert(
             "filter".to_owned(),
             HostValue::Str("example.test".to_owned()),
         );
-        let query_arg = HostValue::Map(qmap);
-        let raw =
-            host.runtime
-                .invoke_capability("ui:history_provider", "query_history", &query_arg);
-
+        qmap.insert("sort".to_owned(), HostValue::Str("relevance".to_owned()));
+        let raw = host.runtime.invoke_capability(
+            "ui:history_provider",
+            "query_history",
+            &HostValue::Map(qmap),
+        );
         let items = match raw {
             Some(HostValue::List(v)) => v,
-            other => panic!("query_history must return HostValue::List; got {other:?}"),
+            other => panic!("query_history(relevance) must return List; got {other:?}"),
         };
         assert_eq!(
             items.len(),
             1,
-            "expected exactly one history record; got {items:?}"
+            "must have exactly one URL record; got {items:?}"
         );
-
-        // Verify the recorded URL.
         let record = match &items[0] {
             HostValue::Map(m) => m,
-            other => panic!("history record must be a Map; got {other:?}"),
+            other => panic!("record must be a Map; got {other:?}"),
         };
-        let url_val = record.get("url").expect("record must have 'url' field");
         assert_eq!(
-            url_val,
-            &HostValue::Str("https://example.test".to_owned()),
-            "recorded URL must match the navigated URL"
+            record.get("url"),
+            Some(&HostValue::Str("https://example.test".to_owned())),
+            "URL must match"
+        );
+        // total_count must be 1 after one visit.
+        match record.get("total_count") {
+            Some(HostValue::Number(f)) => assert!(
+                (*f - 1.0_f64).abs() < f64::EPSILON,
+                "total_count must be 1.0; got {f}"
+            ),
+            other => panic!("total_count must be Number; got {other:?}"),
+        }
+
+        // Event also exists (sort=recent returns one row per event).
+        let mut eqmap = BTreeMap::new();
+        eqmap.insert(
+            "filter".to_owned(),
+            HostValue::Str("example.test".to_owned()),
+        );
+        eqmap.insert("sort".to_owned(), HostValue::Str("recent".to_owned()));
+        let eraw = host.runtime.invoke_capability(
+            "ui:history_provider",
+            "query_history",
+            &HostValue::Map(eqmap),
+        );
+        let eitems = match eraw {
+            Some(HostValue::List(v)) => v,
+            other => panic!("query_history(recent) must return List; got {other:?}"),
+        };
+        assert!(
+            !eitems.is_empty(),
+            "at least one event must exist after record_visit"
         );
     }
 
-    /// Navigating to the same URL twice increments `visit_count` to 2 rather
-    /// than creating a duplicate record (history deduplicates by URL per B2).
+    /// Navigating to the same URL twice produces 2 event rows (one per visit)
+    /// and 1 deduped URL record (via sort=relevance) with `total_count` = 2.
     #[test]
     fn navigate_increments_visit_count_on_repeat() {
         use std::collections::BTreeMap;
@@ -2623,58 +2655,82 @@ return M
 
         let url = "https://example.test/page";
 
-        // First navigation.
-        let mut arg_map = BTreeMap::new();
-        arg_map.insert("url".to_owned(), HostValue::Str(url.to_owned()));
-        let arg = HostValue::Map(arg_map.clone());
+        // First navigation — distinct timestamp.
+        let mut arg1 = BTreeMap::new();
+        arg1.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        arg1.insert("time".to_owned(), HostValue::Number(1_700_000_001_000.0));
         host.runtime
-            .invoke_capability("ui:history_provider", "record_visit", &arg)
+            .invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(arg1))
             .expect("first record_visit must succeed");
 
-        // Second navigation to the same URL.
-        let arg2 = HostValue::Map(arg_map);
+        // Second navigation — distinct timestamp.
+        let mut arg2 = BTreeMap::new();
+        arg2.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        arg2.insert("time".to_owned(), HostValue::Number(1_700_000_002_000.0));
         host.runtime
-            .invoke_capability("ui:history_provider", "record_visit", &arg2)
+            .invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(arg2))
             .expect("second record_visit must succeed");
 
-        // Query — must return exactly one record (deduped) with visit_count = 2.
+        // URL record (sort=relevance) — exactly 1 deduped record, total_count=2.
         let mut qmap = BTreeMap::new();
         qmap.insert(
             "filter".to_owned(),
             HostValue::Str("example.test".to_owned()),
         );
-        let query_arg = HostValue::Map(qmap);
+        qmap.insert("sort".to_owned(), HostValue::Str("relevance".to_owned()));
         let raw = host
             .runtime
-            .invoke_capability("ui:history_provider", "query_history", &query_arg)
+            .invoke_capability(
+                "ui:history_provider",
+                "query_history",
+                &HostValue::Map(qmap),
+            )
             .expect("query_history must return Some");
-
         let items = match raw {
             HostValue::List(v) => v,
-            other => panic!("query_history must return HostValue::List; got {other:?}"),
+            other => panic!("query_history(relevance) must return List; got {other:?}"),
         };
         assert_eq!(
             items.len(),
             1,
-            "repeated navigate must deduplicate to one history record; got {items:?}"
+            "repeated navigate must deduplicate to one URL record; got {items:?}"
         );
-
         let record = match &items[0] {
             HostValue::Map(m) => m,
-            other => panic!("history record must be a Map; got {other:?}"),
+            other => panic!("record must be a Map; got {other:?}"),
         };
-
-        // visit_count is stored as a JSON number; HostValue::Number(f64).
-        let visit_count = record
-            .get("visit_count")
-            .expect("record must have 'visit_count'");
-        match visit_count {
-            HostValue::Number(f) => assert!(
+        match record.get("total_count") {
+            Some(HostValue::Number(f)) => assert!(
                 (*f - 2.0_f64).abs() < f64::EPSILON,
-                "visit_count must be 2.0 after two navigations; got {f}"
+                "total_count must be 2.0 after two navigations; got {f}"
             ),
-            other => panic!("visit_count must be HostValue::Number; got {other:?}"),
+            other => panic!("total_count must be Number; got {other:?}"),
         }
+
+        // Events (sort=recent) — exactly 2 rows.
+        let mut eqmap = BTreeMap::new();
+        eqmap.insert(
+            "filter".to_owned(),
+            HostValue::Str("example.test".to_owned()),
+        );
+        eqmap.insert("sort".to_owned(), HostValue::Str("recent".to_owned()));
+        let eraw = host
+            .runtime
+            .invoke_capability(
+                "ui:history_provider",
+                "query_history",
+                &HostValue::Map(eqmap),
+            )
+            .expect("query_history(recent) must return Some");
+        let eitems = match eraw {
+            HostValue::List(v) => v,
+            other => panic!("query_history(recent) must return List; got {other:?}"),
+        };
+        assert_eq!(
+            eitems.len(),
+            2,
+            "two navigations must produce 2 event rows; got {eitems:?}"
+        );
     }
 
     /// When no history plugin is loaded, `invoke_capability` returns `None` and
@@ -2723,8 +2779,8 @@ return M
     //   • `last_visited` is unchanged — only the title field is overwritten.
     //   • Calling `update_title` for a URL with no prior record is a no-op.
 
-    /// Query history and return the single record for `filter`. Panics if the
-    /// result is not exactly one `Map`.
+    /// Query history (sort=relevance, URL-level records) and return the single
+    /// deduped record for `filter`. Panics if the result is not exactly one `Map`.
     fn query_one_record(
         host: &PluginHost,
         filter: &str,
@@ -2734,6 +2790,7 @@ return M
         use mote_runtime::HostValue;
         let mut qmap = BTreeMap::new();
         qmap.insert("filter".to_owned(), HostValue::Str(filter.to_owned()));
+        qmap.insert("sort".to_owned(), HostValue::Str("relevance".to_owned()));
         let raw = host
             .runtime
             .invoke_capability(
@@ -2758,13 +2815,13 @@ return M
     }
 
     /// `update_title` resolves the async page title without incrementing
-    /// `visit_count` or touching `last_visited`.
+    /// `total_count` or touching `last_seen_ms`.
     ///
     /// Flow mirrors the production path:
-    ///   1. `record_visit({url})` — F2 navigate (URL only, no title yet).
+    ///   1. `record_visit({url, time})` — F2 navigate (URL + timestamp, no title).
     ///   2. `update_title({url, title})` — title-on-load (`sync_active_title`).
     ///
-    /// Asserts: title populated; `visit_count` stays 1.0; `last_visited`
+    /// Asserts: title populated; `total_count` stays 1.0; `last_seen_ms`
     /// unchanged; `update_title` on a never-visited URL creates no phantom record.
     #[test]
     fn update_title_resolves_title_without_recounting_visit() {
@@ -2775,30 +2832,31 @@ return M
         let (host, _config, _cache) = boot_host_with_bundled_plugins();
         let url = "https://example.test/async-title";
 
-        // Step 1: F2 navigate path — record_visit with URL only.
+        // Step 1: F2 navigate path — record_visit with URL + timestamp.
         let mut arg = BTreeMap::new();
         arg.insert("url".to_owned(), HostValue::Str(url.to_owned()));
+        arg.insert("time".to_owned(), HostValue::Number(1_700_000_001_000.0));
         host.runtime
             .invoke_capability("ui:history_provider", "record_visit", &HostValue::Map(arg))
             .expect("record_visit must succeed when history is loaded");
 
-        // Capture baseline: title empty, visit_count == 1, record last_visited.
+        // Capture baseline: title empty, total_count == 1, record last_seen_ms.
         let rec = query_one_record(&host, "async-title");
-        let last_visited_before = match rec.get("last_visited").expect("must have last_visited") {
+        let last_seen_ms_before = match rec.get("last_seen_ms").expect("must have last_seen_ms") {
             HostValue::Number(f) => *f,
-            other => panic!("last_visited must be Number; got {other:?}"),
+            other => panic!("last_seen_ms must be Number; got {other:?}"),
         };
-        match rec.get("visit_count").expect("must have visit_count") {
+        match rec.get("total_count").expect("must have total_count") {
             HostValue::Number(f) => assert!(
                 (*f - 1.0_f64).abs() < f64::EPSILON,
-                "visit_count must be 1.0 after record_visit; got {f}"
+                "total_count must be 1.0 after record_visit; got {f}"
             ),
-            other => panic!("visit_count must be Number; got {other:?}"),
+            other => panic!("total_count must be Number; got {other:?}"),
         }
         match rec.get("title").expect("must have title") {
             HostValue::Str(s) => assert!(
                 s.is_empty(),
-                "title must be empty after URL-only record_visit"
+                "title must be empty after record_visit (title is set by update_title)"
             ),
             other => panic!("title must be Str; got {other:?}"),
         }
@@ -2823,22 +2881,22 @@ return M
             HostValue::Str(s) => assert_eq!(s, "Example Title", "title must be populated"),
             other => panic!("title must be Str; got {other:?}"),
         }
-        match rec.get("visit_count").expect("must have visit_count") {
+        match rec.get("total_count").expect("must have total_count") {
             HostValue::Number(f) => assert!(
                 (*f - 1.0_f64).abs() < f64::EPSILON,
-                "visit_count must remain 1.0 after update_title; got {f}"
+                "total_count must remain 1.0 after update_title; got {f}"
             ),
-            other => panic!("visit_count must be Number; got {other:?}"),
+            other => panic!("total_count must be Number; got {other:?}"),
         }
-        match rec.get("last_visited").expect("must have last_visited") {
+        match rec.get("last_seen_ms").expect("must have last_seen_ms") {
             HostValue::Number(f) => assert!(
-                (*f - last_visited_before).abs() < f64::EPSILON,
-                "last_visited must be unchanged after update_title; got {f}, was {last_visited_before}"
+                (*f - last_seen_ms_before).abs() < f64::EPSILON,
+                "last_seen_ms must be unchanged after update_title; got {f}, was {last_seen_ms_before}"
             ),
-            other => panic!("last_visited must be Number; got {other:?}"),
+            other => panic!("last_seen_ms must be Number; got {other:?}"),
         }
 
-        // Step 3: update_title on a never-visited URL must be a no-op.
+        // Step 3: update_title on a never-visited URL must be a no-op (no phantom record).
         let mut arg = BTreeMap::new();
         arg.insert(
             "url".to_owned(),
@@ -2857,6 +2915,7 @@ return M
             "filter".to_owned(),
             HostValue::Str("never-visited".to_owned()),
         );
+        qmap.insert("sort".to_owned(), HostValue::Str("relevance".to_owned()));
         let raw = host
             .runtime
             .invoke_capability(
@@ -2973,14 +3032,15 @@ return M
     fn set_active_panel_history_caps_at_200_and_flags_truncation() {
         let (host, _config, _cache) = boot_host_with_bundled_plugins();
 
-        // Seed 250 distinct URLs. The shell requests limit=HISTORY_CAP+1 (201)
-        // to overfetch and detect truncation; the plugin returns up to 201; the
-        // shell truncates to HISTORY_CAP (200) and flags truncated=true.
+        // Seed 250 distinct URLs with distinct timestamps.  The shell requests
+        // limit=HISTORY_CAP+1 (201) to overfetch and detect truncation; the
+        // plugin returns up to 201; the shell truncates to HISTORY_CAP (200)
+        // and flags truncated=true.
         for i in 0..250_u32 {
             seed_visit(
                 &host,
                 &format!("https://example.test/page-{i:03}"),
-                &format!("Page {i}"),
+                1_700_000_000_000.0 + f64::from(i),
             );
         }
 
@@ -3022,7 +3082,7 @@ return M
             seed_visit(
                 &host,
                 &format!("https://below-cap.test/p-{i:03}"),
-                &format!("P {i}"),
+                1_700_000_000_000.0 + f64::from(i),
             );
         }
         let json = crate::build_history_list_json(&host).expect("payload built");

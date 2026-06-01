@@ -540,10 +540,34 @@
     }
   };
 
+  // Format a Unix-millisecond timestamp as a human-readable relative string
+  // using Intl.RelativeTimeFormat.  Returns "" for invalid input.
+  function formatRelativeTime(timeMs) {
+    if (typeof timeMs !== "number" || !isFinite(timeMs)) return "";
+    var diffMs = Date.now() - timeMs;
+    var rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+    var sec = Math.round(diffMs / 1000);
+    if (Math.abs(sec) < 60) return rtf.format(-sec, "second");
+    var min = Math.round(sec / 60);
+    if (Math.abs(min) < 60) return rtf.format(-min, "minute");
+    var hr = Math.round(min / 60);
+    if (Math.abs(hr) < 24) return rtf.format(-hr, "hour");
+    var day = Math.round(hr / 24);
+    if (Math.abs(day) < 7) return rtf.format(-day, "day");
+    var wk = Math.round(day / 7);
+    if (Math.abs(wk) < 5) return rtf.format(-wk, "week");
+    var mon = Math.round(day / 30);
+    if (Math.abs(mon) < 12) return rtf.format(-mon, "month");
+    return rtf.format(-Math.round(day / 365), "year");
+  }
+
   // Build one sidepanel row.  Title is the primary identifier (real-browser
   // convention); URL is the dim secondary context.  If `title` is missing/empty
   // or equal to the URL, the URL becomes the primary text and the secondary
   // cell is left empty so the grid columns stay aligned across rows.
+  //
+  // When `record.time_ms` is a finite number (history rows carry this; bookmark
+  // rows do not), a `.row-time` span with a relative-time label is appended.
   function buildSidePanelRow(record, options) {
     var url = (typeof record.url === "string") ? record.url : "";
     var rawTitle = (typeof record.title === "string") ? record.title : "";
@@ -565,6 +589,14 @@
       urlSpan.textContent = url;
     }
     row.appendChild(urlSpan);
+
+    // Relative timestamp (history rows only — bookmarks don't carry time_ms).
+    if (typeof record.time_ms === "number" && isFinite(record.time_ms)) {
+      var timeSpan = document.createElement("span");
+      timeSpan.className = "row-time";
+      timeSpan.textContent = formatRelativeTime(record.time_ms);
+      row.appendChild(timeSpan);
+    }
 
     if (options && options.withRemove) {
       var removeBtn = document.createElement("button");

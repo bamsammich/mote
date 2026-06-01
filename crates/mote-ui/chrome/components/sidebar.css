@@ -171,6 +171,13 @@
   max-width: 240px;
 }
 
+.sidepanel-row .row-time {
+  color: var(--fg-2);
+  font: var(--text-mono-sm);
+  white-space: nowrap;
+  margin-left: 4px;
+}
+
 .sidepanel-row .row-remove {
   width: 18px;
   height: 18px;
