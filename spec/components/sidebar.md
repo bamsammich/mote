@@ -171,9 +171,10 @@ is always visible regardless of which sidebar panel is active.
     aria-expanded="false"
     tabindex="0"
   >
-    <span class="lockup" aria-hidden="true">
-      <span class="br">[</span><span class="name">default</span><span class="br">]</span>
-    </span>
+    <span class="label" aria-hidden="true">workspace</span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="name">default</span>
+    <span class="spacer"></span>
     <span class="chevron" aria-hidden="true">›</span>
   </div>
   <div class="sidebar-body">

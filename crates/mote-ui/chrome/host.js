@@ -748,6 +748,31 @@
     var popover = document.getElementById("workspace-popover");
     if (!strip || !popover) return;
 
+    // Seed the popover with at least the current strip name as a placeholder
+    // row so the first click renders SOMETHING visible even if the shell's
+    // workspace_list push hasn't arrived (or got missed due to timing).  The
+    // real list replaces this once the applyOp fires.
+    function seedFallbackRow() {
+      if (popover.childElementCount > 0) return;
+      var nameEl = strip.querySelector(".name");
+      var current = nameEl ? nameEl.textContent : "";
+      if (!current) return;
+      var row = document.createElement("div");
+      row.className = "row is-current";
+      row.setAttribute("role", "option");
+      row.setAttribute("data-id", current);
+      var check = document.createElement("span");
+      check.className = "check";
+      check.textContent = "✓"; // ✓
+      row.appendChild(check);
+      var name = document.createElement("span");
+      name.className = "name";
+      name.textContent = current;
+      row.appendChild(name);
+      popover.appendChild(row);
+    }
+    seedFallbackRow();
+
     function isPopoverOpen() {
       return !popover.hidden;
     }
@@ -830,7 +855,7 @@
           break;
         }
       }
-      var nameEl = strip.querySelector(".lockup .name");
+      var nameEl = strip.querySelector(".name");
       if (nameEl && activeRow && typeof activeRow.name === "string") {
         nameEl.textContent = activeRow.name;
       }

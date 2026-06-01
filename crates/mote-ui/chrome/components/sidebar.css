@@ -65,17 +65,15 @@
   outline-offset: -1px;
 }
 
-.workspace-strip .lockup .br {
-  color: var(--accent);
-}
-
-.workspace-strip .lockup .name {
-  color: var(--fg);
-}
-
-.workspace-strip .chevron {
-  color: var(--fg-2);
-}
+/* Strip content: `workspace · default ›`.  No brand lockup here — the strip
+ * is a CONTEXTUAL selector, not a slot/mode identifier; reusing the bracket
+ * lockup pattern alongside [url] and [tabs] read as a confusing third "mode"
+ * (E4 design feedback 2026-06-01). Plain labelled text + chevron instead. */
+.workspace-strip .label   { color: var(--fg-2); margin-right: 6px; }
+.workspace-strip .sep     { color: var(--fg-2); margin-right: 6px; }
+.workspace-strip .name    { color: var(--fg); }
+.workspace-strip .spacer  { flex: 1; }
+.workspace-strip .chevron { color: var(--fg-2); margin-left: 8px; }
 
 /* ---- Workspace popover ---- */
 
