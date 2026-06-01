@@ -200,9 +200,14 @@
   color: var(--fg);
 }
 
-/* Bookmark toggle: same Lucide stroke as the activity-bar bookmark icon.
- * Dim by default (the page isn't bookmarked); accent when bookmarked. */
-.omni .right .bookmark-toggle               { color: var(--fg-2); }
-.omni .right .bookmark-toggle.is-bookmarked { color: var(--accent); }
-.omni .right .bookmark-toggle:hover         { color: var(--fg); }
-.omni .right .bookmark-toggle.is-bookmarked:hover { color: var(--accent); }
+/* Bookmark toggle is a STATE INDICATOR (carve-out from the iconography
+ * "stroke only" rule — see spec/06_iconography.md): the icon fills with accent
+ * when the page is bookmarked so the saved/not-saved state is unmistakable at
+ * a glance.  Color alone is too subtle for a toggle this small.  This matches
+ * Chrome / Firefox / Safari convention.  Static (non-stateful) icons still
+ * follow "stroke only." */
+.omni .right .bookmark-toggle                       { color: var(--fg-2); }
+.omni .right .bookmark-toggle.is-bookmarked         { color: var(--accent); }
+.omni .right .bookmark-toggle:hover                 { color: var(--fg); }
+.omni .right .bookmark-toggle.is-bookmarked:hover   { color: var(--accent); }
+.omni .right .bookmark-toggle.is-bookmarked svg path { fill: currentColor; }

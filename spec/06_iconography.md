@@ -17,7 +17,7 @@ Mote uses **[Lucide](https://lucide.dev)** for all chrome and content icons. The
 
 | Rule | Why |
 |---|---|
-| **Stroke icons only.** Never filled. | Consistency with the linework aesthetic. |
+| **Stroke icons only for static / representational uses.** Fill is reserved for **state-indicator toggles** (e.g., bookmarked-vs-unbookmarked, favorited, pinned) where the fill is the active state. Otherwise stroke. | Consistency with the linework aesthetic; carve-out matches universal browser convention for save/favorite toggles. |
 | **Stroke width: 1.5px.** | Lucide's default is 2; override. |
 | **Color: `currentColor`.** | Icons inherit from the surrounding text. Never hardcode. |
 | **Size: 16px in chrome, 20px in dialogs, 14px in status line.** | Three sizes only. Don't invent new ones. |

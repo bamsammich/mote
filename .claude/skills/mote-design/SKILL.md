@@ -132,7 +132,7 @@ preview/                         ← design-review snapshots (visual reference, 
 - ❌ Bluish-purple gradients, mesh gradients, any gradients.
 - ❌ `border-radius: 9999px` (pills) on anything except status dots.
 - ❌ Drop shadows on inline elements.
-- ❌ Filled Lucide icons. Stroke only.
+- ❌ Filled Lucide icons for static use. Stroke only. (Carve-out: **state-indicator toggles** like bookmark/favorite/pin may fill on the active state — see `spec/06_iconography.md`.)
 - ❌ Spring/bounce easing, slide transitions on content swap.
 - ❌ Loading spinners.
 - ❌ Glow effects, especially on AI surfaces.

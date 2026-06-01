@@ -1063,6 +1063,10 @@ impl ShellApp {
                 .runtime
                 .invoke_capability("ui:bookmarks_provider", "remove_bookmark", &arg);
         self.push_bookmark_list();
+        // If the removed URL is the active tab's URL, the urlbar star must
+        // drop its accent/fill — re-push set_url so the chrome re-evaluates
+        // `bookmarked` for the active tab.
+        self.push_state_to_chrome();
     }
 
     /// Check whether `url` is currently in the bookmarks store by calling
