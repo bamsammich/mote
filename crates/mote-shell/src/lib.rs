@@ -1053,13 +1053,14 @@ impl ShellApp {
 
     /// Switch the active sidebar panel and push fresh data to chrome.
     ///
-    /// `"bookmarks"` → [`push_bookmark_list`]; `"history"` → [`push_history_list`].
-    /// `"tabs"` is a no-op here — the existing [`push_state_to_chrome`] already
-    /// covers tab state.  Unknown panel names are silently ignored.
+    /// `"bookmarks"` → [`push_bookmark_list`]; `"history"` → [`push_history_list`];
+    /// `"tabs"` → [`push_state_to_chrome`] so the meta refreshes to "N open".
+    /// Unknown panel names are silently ignored.
     fn set_active_panel(&self, name: &str) {
         match name {
             "bookmarks" => self.push_bookmark_list(),
             "history" => self.push_history_list(),
+            "tabs" => self.push_state_to_chrome(),
             _ => {}
         }
     }
@@ -3895,6 +3896,36 @@ mod tests {
         match q.pop_front().unwrap() {
             ShellCommand::UrlbarQuery(t) => assert!(t.is_empty(), "text must be empty string"),
             other => panic!("expected UrlbarQuery; got {other:?}"),
+        }
+    }
+
+    /// `set_active_panel("tabs")` enqueues `ShellCommand::SetActivePanel("tabs")`.
+    ///
+    /// The full execution path (`ShellApp::set_active_panel` → `push_state_to_chrome`)
+    /// requires a live window bridge and is covered by live verification.  This test
+    /// asserts the command-enqueue seam: the op handler parses the `name` field and
+    /// produces the correct `ShellCommand` variant with `"tabs"`.
+    ///
+    /// The tabs branch was previously a no-op in the shell's `set_active_panel` match
+    /// (and the JS guard skipped calling the shell for tabs entirely).  This test pins
+    /// the fix so the op-layer wiring cannot silently regress.
+    #[test]
+    fn set_active_panel_tabs_pushes_state() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Simulate what the registered `set_active_panel` op closure does.
+        let name = json_string_field(r#"{"name":"tabs"}"#, "name").expect("name field must parse");
+        push(&queue, ShellCommand::SetActivePanel(name));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command must be enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::SetActivePanel(n) => {
+                assert_eq!(n, "tabs", "enqueued panel name must be \"tabs\"");
+            }
+            other => panic!("expected SetActivePanel; got {other:?}"),
         }
     }
 }

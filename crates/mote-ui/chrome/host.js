@@ -429,6 +429,19 @@
     });
   }
 
+  function wireNewTabShortcut() {
+    document.addEventListener("keydown", function (ev) {
+      // ⌘T on macOS / Ctrl+T on Linux.
+      var modifier = ev.metaKey || ev.ctrlKey;
+      if (!modifier) return;
+      if (ev.key !== "t" && ev.key !== "T") return;
+      ev.preventDefault();
+      if (window.mote && window.mote.invoke) {
+        window.mote.invoke("new_tab", {}).catch(function () {});
+      }
+    });
+  }
+
   // ---- Activity-bar panel switching --------------------------------------
   //
   // Binds the three first-class panels (tabs, bookmarks, history) to the
@@ -436,7 +449,7 @@
   //   1. Update is-active + aria-pressed on the activity buttons.
   //   2. Switch the visible [data-panel] container via is-active-panel.
   //   3. Update the [tabs]/[bookmarks]/[history] lockup .name in the header.
-  //   4. Invoke set_active_panel so the shell pushes fresh data (no-op for tabs).
+  //   4. Invoke set_active_panel so the shell pushes fresh data for the panel.
   function wireActivityBar() {
     var panels = ["tabs", "bookmarks", "history"];
     var buttons = {};
@@ -481,13 +494,11 @@
         nameEl.textContent = name;
       }
 
-      // Tell the shell to push fresh data (tabs is handled by existing push_state_to_chrome).
-      if (name !== "tabs") {
-        if (window.mote && window.mote.invoke) {
-          window.mote
-            .invoke("set_active_panel", { name: name })
-            .catch(function () {});
-        }
+      // Tell the shell to push fresh data for the newly active panel.
+      if (window.mote && window.mote.invoke) {
+        window.mote
+          .invoke("set_active_panel", { name: name })
+          .catch(function () {});
       }
     }
 
@@ -907,6 +918,7 @@
     wireOmnibox();
     wireBookmarkToggle();
     wireNewTab();
+    wireNewTabShortcut();
     // Chain the urlbar_suggestions applyOp handler after the base handler is
     // installed above.  wireCompletionsOp() captures prevApplyOp at call-time.
     wireCompletionsOp();

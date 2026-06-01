@@ -124,11 +124,42 @@ A panel is a `sidebar-panel` element a plugin registers via `ui.register_element
 mote.sidebar.default("tabs")
 ```
 
+## Panel header — new-tab button
+
+The tabs panel header contains a `+` button (`.new-tab-btn`) as its rightmost
+child. It is always visible regardless of which activity-bar panel is active
+(v0.1 design decision; per-panel hiding is a polish-phase task).
+
+```html
+<button
+  type="button"
+  class="new-tab-btn"
+  data-action="new-tab"
+  aria-label="new tab"
+  title="new tab (⌘T)"
+>
+  <svg ...><!-- Lucide plus: two intersecting paths --></svg>
+</button>
+```
+
+- `data-action="new-tab"` — picked up by `wireNewTab()` in `host.js`.
+- `type="button"` — guards against accidental form submission.
+- `title` — surfaces the `⌘T` keybind in the tooltip.
+- Keycap construction (`border-bottom-width: 2px`; collapses to `1px` + `translateY(1px)` on `:active`) matches mote-design rule 4.
+
+### `⌘T` / `Ctrl+T` shortcut
+
+`wireNewTabShortcut()` in `host.js` binds a document-level `keydown` listener.
+`ev.metaKey || ev.ctrlKey` + `ev.key === "t"` invokes `new_tab` and calls
+`ev.preventDefault()`. Wired from `boot()`.
+
 ## Behavior
 
 | Action | Result |
 |---|---|
 | click activity-bar icon | switch active panel |
+| click `+` button in panel header | open new tab (`new_tab` op) |
+| `⌘T` / `Ctrl+T` | open new tab (chrome-side keydown listener) |
 | `⌘B` | toggle sidebar open / closed |
 | `⌘⇧E` | focus the panel body (vim-style; "explorer") |
 | drag right edge | resize (snaps to `--gutter-xs/sm/md/lg`) |

@@ -206,6 +206,37 @@
   color: var(--fg-2);
 }
 
+.sidepanel-head .new-tab-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom-width: 2px; /* keycap construction */
+  border-radius: var(--radius-1);
+  color: var(--fg-2);
+  cursor: pointer;
+  margin-left: 8px;
+}
+
+.sidepanel-head .new-tab-btn:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+.sidepanel-head .new-tab-btn:active {
+  /* keycap press: bottom collapses, transform 1px down */
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+
+.sidepanel-head .new-tab-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .sidepanel-body {
   display: flex;
   flex-direction: column;
