@@ -98,13 +98,13 @@ The substrate for plugin credentials.
 
 Core behavior. The browser is barely usable without these.
 
-- [ ] `bookmarks` — store, organize, search; fulfills `ui:bookmarks_provider`
-- [ ] `history` — visit log, urlbar suggestions; fulfills `ui:history_provider` and `ui:urlbar_provider`
-- [ ] `workspace-manager` — full workspace functionality; fulfills `workspace:provider`
+- [x] `bookmarks` — store, organize, search; fulfills `ui:bookmarks_provider`
+- [x] `history` — visit log, urlbar suggestions; fulfills `ui:history_provider` and `ui:urlbar_provider`
+- [x] `workspace-manager` — full workspace functionality; fulfills `workspace:provider`
 - [ ] `password-manager-core` — library plugin; form detection, autofill UX, isolated-world injection helpers
 - [ ] `password-manager-1password` — vendor plugin using 1Password SDK
 - [ ] `password-manager-bitwarden` — vendor plugin using Bitwarden SDK
-- [ ] First-party plugin bundled distribution working (embedded in Mote binary)
+- [x] First-party plugin bundled distribution working (embedded in Mote binary)
 
 ### Phase 6 — First-party plugins (Tier 2)
 
