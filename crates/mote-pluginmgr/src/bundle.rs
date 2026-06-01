@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::{fs, io};
 
-use include_dir::{Dir, include_dir};
+use include_dir::{Dir, DirEntry, include_dir};
 use mote_types::PluginName;
 use thiserror::Error;
 
@@ -31,13 +31,52 @@ use crate::cache::{Cache, CacheError, CacheKey};
 /// it is not duplicated into the crate.
 static BUNDLE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../plugins");
 
-/// The synthetic commit/version directory for the embedded bundle.
+/// The synthetic commit/version directory for a bundled plugin's cache entry.
 ///
-/// Combines the literal `bundled-` prefix with the crate's package version so
-/// each Mote release unpacks under its own cache key.
+/// Combines the literal `bundled-` prefix, the crate version, and a BLAKE3
+/// **content hash** of the plugin's embedded sub-tree. The content hash is
+/// what makes the cache content-addressed: a plugin file change produces a
+/// different hash → different cache slot → fresh unpack. Without this, an
+/// unpacked cache from a prior binary version would be served indefinitely
+/// (a real footgun we hit during Phase 5a development).
+///
+/// Returns the version string without the hash suffix if the named plugin is
+/// not present in the bundle (the caller will surface a `NotBundled` error
+/// shortly anyway, so the value is informational at that point).
 #[must_use]
-pub fn bundled_version() -> String {
-    format!("bundled-{}", env!("CARGO_PKG_VERSION"))
+pub fn bundled_version_for(name: &PluginName) -> String {
+    let pkg = env!("CARGO_PKG_VERSION");
+    let Some(dir) = BUNDLE.get_dir(name.as_str()) else {
+        return format!("bundled-{pkg}-missing");
+    };
+    let mut hasher = blake3::Hasher::new();
+    hash_dir(&mut hasher, dir);
+    // 16 hex chars = 64 bits of content fingerprint; collision-resistant for
+    // our purposes and keeps the cache directory names compact.
+    let hex = hasher.finalize().to_hex();
+    format!("bundled-{pkg}-{}", &hex.as_str()[..16])
+}
+
+/// Stable, recursive content hash of an embedded directory. Sorts entries by
+/// path so the hash is deterministic regardless of `include_dir`'s iteration
+/// order. Hashes each file's path AND contents (so a rename without a content
+/// change still invalidates).
+fn hash_dir(hasher: &mut blake3::Hasher, dir: &Dir<'_>) {
+    let mut entries: Vec<&DirEntry<'_>> = dir.entries().iter().collect();
+    entries.sort_by(|a, b| a.path().cmp(b.path()));
+    for entry in entries {
+        match entry {
+            DirEntry::File(f) => {
+                hasher.update(f.path().to_string_lossy().as_bytes());
+                hasher.update(&[0u8]);
+                hasher.update(f.contents());
+                hasher.update(&[0u8]);
+            }
+            DirEntry::Dir(d) => {
+                hash_dir(hasher, d);
+            }
+        }
+    }
 }
 
 /// Error returned while materialising a bundled plugin.
@@ -110,7 +149,7 @@ pub fn unpack_into_cache(name: &PluginName, cache: &Cache) -> Result<CacheKey, B
         .get_dir(name.as_str())
         .ok_or_else(|| BundleError::NotBundled(name.as_str().to_owned()))?;
 
-    let version = bundled_version();
+    let version = bundled_version_for(name);
     // Unpack to a staging temp dir, then hand to the cache (which moves it into
     // place idempotently). Use a sibling of the cache commit dir's parent so a
     // rename stays on the same filesystem where possible.
@@ -196,7 +235,7 @@ mod tests {
         // history arrives in the next commit).
         let name = PluginName::new("bookmarks").unwrap();
         let key = unpack_into_cache(&name, &cache).unwrap();
-        assert_eq!(key.commit, bundled_version());
+        assert_eq!(key.commit, bundled_version_for(&name));
 
         // The init.lua materialised and is non-empty.
         let dir = cache.commit_dir(&name, &key.commit);

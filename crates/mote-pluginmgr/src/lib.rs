@@ -39,7 +39,7 @@ pub mod secrets;
 pub mod source;
 
 pub use approval_store::{ApprovalStore, ApprovalStoreError};
-pub use bundle::{BundleError, bundled_names, bundled_version, is_bundled, unpack_into_cache};
+pub use bundle::{BundleError, bundled_names, bundled_version_for, is_bundled, unpack_into_cache};
 pub use cache::{Cache, CacheError, CacheKey};
 pub use diff::{Delta, DeltaKind, DiffReport, diff};
 pub use dirhash::{DirHashError, hash_dir};
