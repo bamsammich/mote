@@ -2973,8 +2973,9 @@ return M
     fn set_active_panel_history_caps_at_200_and_flags_truncation() {
         let (host, _config, _cache) = boot_host_with_bundled_plugins();
 
-        // Seed 250 distinct URLs. The plugin applies limit=200, so it returns
-        // exactly 200. The shell's defensive cap fires: truncated=true.
+        // Seed 250 distinct URLs. The shell requests limit=HISTORY_CAP+1 (201)
+        // to overfetch and detect truncation; the plugin returns up to 201; the
+        // shell truncates to HISTORY_CAP (200) and flags truncated=true.
         for i in 0..250_u32 {
             seed_visit(
                 &host,
@@ -2993,26 +2994,44 @@ return M
         assert_eq!(
             rows.len(),
             200,
-            "exactly 200 rows must be returned when 250 visits are seeded (limit=200)"
+            "displayed rows must be capped at HISTORY_CAP (200) when 250 visits exist"
         );
 
         let count = parsed["count"].as_u64().expect("count must be a number");
-        assert_eq!(count, 200, "count must be 200");
+        assert_eq!(
+            count, 200,
+            "count must be 200 (the truncated display length)"
+        );
 
-        // With 250 entries seeded and limit=200 the plugin returns exactly 200;
-        // the shell's defensive cap sees original_count==200 which is NOT > 200,
-        // so truncated is false at the shell level. The plugin already capped.
-        // The user-visible "truncated" means the panel doesn't show everything —
-        // since the plugin enforced the 200 cap, truncated=false from shell.
-        // To get truncated=true from the shell we'd need the plugin to return >200,
-        // which is impossible with limit=200. This test confirms the full pipeline.
         let truncated = parsed["truncated"]
             .as_bool()
             .expect("truncated must be a bool");
         assert!(
-            !truncated,
-            "truncated must be false: the plugin capped at 200, shell cap==200, \
-             so original_count==200 is not > 200"
+            truncated,
+            "truncated must be true: 250 > 200, so the overfetch (limit=201) \
+             returns 201 rows and the shell flags truncation"
+        );
+    }
+
+    /// Negative companion to the truncation test: when stored visits <= `HISTORY_CAP`,
+    /// the overfetch trick correctly returns truncated=false.
+    #[test]
+    fn set_active_panel_history_truncated_false_below_cap() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        for i in 0..150_u32 {
+            seed_visit(
+                &host,
+                &format!("https://below-cap.test/p-{i:03}"),
+                &format!("P {i}"),
+            );
+        }
+        let json = crate::build_history_list_json(&host).expect("payload built");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let rows = parsed["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), 150, "exactly the seeded count of rows");
+        assert!(
+            !parsed["truncated"].as_bool().unwrap(),
+            "truncated must be false when fewer than HISTORY_CAP visits exist"
         );
     }
 

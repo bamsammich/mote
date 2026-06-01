@@ -1135,10 +1135,16 @@ impl ShellApp {
     /// Same as [`push_bookmark_list`]: normalise non-List results to an empty list.
     pub(crate) fn push_history_list(&self) {
         const HISTORY_CAP: usize = 200;
+        const HISTORY_OVERFETCH: f64 = 201.0; // HISTORY_CAP + 1, f64-typed for HostValue::Number
 
+        // Overfetch by 1 (request `HISTORY_CAP` + 1) so the shell can distinguish
+        // "exactly `HISTORY_CAP` visits exist" from ">`HISTORY_CAP`, truncated."
+        // Without overfetch the truncation footer would never fire — symmetric
+        // caps make the two cases indistinguishable.  Display rows still capped
+        // at `HISTORY_CAP`.
         let mut payload = BTreeMap::new();
         payload.insert("filter".to_owned(), HostValue::Str(String::new()));
-        payload.insert("limit".to_owned(), HostValue::Number(200.0));
+        payload.insert("limit".to_owned(), HostValue::Number(HISTORY_OVERFETCH));
         payload.insert("sort".to_owned(), HostValue::Str("recent".to_owned()));
         let arg = HostValue::Map(payload);
         let raw = self
@@ -1151,10 +1157,9 @@ impl ShellApp {
             _ => vec![],
         };
 
-        // The plugin already applies sort="recent" (last_visited descending) and
-        // caps at limit=200; the shell defensively truncates to the same cap.
-        let original_count = items.len();
-        let truncated = original_count > HISTORY_CAP;
+        // truncated iff the plugin returned the overfetch sentinel (HISTORY_CAP+1
+        // rows means there were more in the store).
+        let truncated = items.len() > HISTORY_CAP;
         if truncated {
             items.truncate(HISTORY_CAP);
         }
@@ -2930,9 +2935,12 @@ pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<Stri
 
     const HISTORY_CAP: usize = 200;
 
+    // Overfetch by 1 (same as production `push_history_list`) so truncation
+    // is detectable instead of indistinguishable from "exactly `HISTORY_CAP`."
+    const HISTORY_OVERFETCH: f64 = 201.0;
     let mut map = BTreeMap::new();
     map.insert("filter".to_owned(), HostValue::Str(String::new()));
-    map.insert("limit".to_owned(), HostValue::Number(200.0));
+    map.insert("limit".to_owned(), HostValue::Number(HISTORY_OVERFETCH));
     map.insert("sort".to_owned(), HostValue::Str("recent".to_owned()));
     let arg = HostValue::Map(map);
     let raw = host
@@ -2944,10 +2952,7 @@ pub(crate) fn build_history_list_json(host: &runtime::PluginHost) -> Option<Stri
         _ => vec![],
     };
 
-    // The plugin already sorts by last_visited desc (sort="recent") and caps at
-    // limit=200; the shell defensively truncates to the same cap.
-    let original_count = items.len();
-    let truncated = original_count > HISTORY_CAP;
+    let truncated = items.len() > HISTORY_CAP;
     if truncated {
         items.truncate(HISTORY_CAP);
     }
