@@ -2,7 +2,7 @@
 
 This directory contains Architectural Decision Records (ADRs) for the Mote project, written in [MADR](https://adr.github.io/madr/) format.
 
-ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28).
+ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01).
 
 ## Index
 
@@ -17,6 +17,8 @@ ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 
 | [0007](0007-plugin-management-ui-privileged-async-approval.md) | Plugin Management UI: Privileged-Chrome Surfaces with Async Approval | Accepted |
 | [0008](0008-approval-carve-outs-bundled-and-dev-mode.md) | Approval Carve-Outs: Bundled and Dev-Mode Plugins Auto-Approve | Accepted |
 | [0009](0009-password-manager-provider-non-exclusive-targeted-routing.md) | `password-manager:provider` Non-Exclusive; Secret/Provider Routing is Targeted | Accepted |
+| [0010](0010-collector-dispatch-deadline-budgeting.md) | Collector Dispatch: Runtime Semantics and Deadline Budgeting for Provider Contribution Surfaces | Accepted |
+| [0011](0011-popup-behavior-in-window-tab.md) | Popup Behavior: In-Window Tab + User-Gesture Activation + Opt-Out Path | Accepted |
 
 ## Numbering convention
 
