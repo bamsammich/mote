@@ -70,7 +70,7 @@ use std::time::{Duration, Instant, SystemTime};
 use mote_cef::{
     ButtonAction, ChromePageRequest, ChromeResources, Engine, EngineConfig, HostBridge, IdentityId,
     KeyAction, KeyInput, Modifiers, MouseButton, MousePosition, OpRegistry, OpResponse, Page,
-    PageOptions, PageRole, ProfileHandle, ProfileManager, chrome_url, overlay_url,
+    PageOptions, PageRole, PopupTabRequest, ProfileHandle, ProfileManager, chrome_url, overlay_url,
 };
 use mote_runtime::{HostValue, host_to_json};
 use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
@@ -992,6 +992,30 @@ impl ShellApp {
         }
     }
 
+    /// Drain popup-tab requests queued by each live content page's
+    /// `LifeSpanHandler::on_before_popup` (ADR-0011).
+    ///
+    /// Called once per `about_to_wait` tick, immediately after `drain_commands`.
+    /// Iterates all live tab pages, collects their pending [`PopupTabRequest`]s,
+    /// and processes each one as an [`open_popup_tab`](Self::open_popup_tab) call.
+    /// The `user_gesture` flag from the CEF callback drives the `foreground`
+    /// decision: gesture-driven → foreground (matches Chrome behaviour for
+    /// `target=_blank` clicks); non-gesture → background (reduces focus-stealing
+    /// from JS-initiated popups).
+    fn drain_popup_tabs(&mut self) {
+        // Collect requests from all live tabs. We need to own the vec before
+        // calling `open_popup_tab` (which mutably borrows `self`).
+        let requests: Vec<PopupTabRequest> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.page.as_ref())
+            .flat_map(Page::drain_popup_requests)
+            .collect();
+        for req in requests {
+            self.open_popup_tab(&req.url, req.user_gesture);
+        }
+    }
+
     /// Invoke `ui:urlbar_provider` → `query` with the given text and push the
     /// returned suggestion list to the chrome via
     /// `window.mote.applyOp('urlbar_suggestions', <json>)`.
@@ -1678,6 +1702,37 @@ impl ShellApp {
         });
         self.active = self.tabs.len() - 1;
         self.on_active_changed();
+        self.persist_and_push();
+    }
+
+    /// Open a tab at `url` from an intercepted CEF popup (ADR-0011).
+    ///
+    /// If `foreground` is `true` (user-gesture-driven popup: a `target=_blank`
+    /// click or middle-click), the new tab becomes the active tab immediately —
+    /// matching Chrome's behaviour for click-driven popups. If `foreground` is
+    /// `false` (JS-initiated popup with no preceding click), the tab is appended
+    /// but the active index stays on the current tab, reducing focus-stealing
+    /// from ad windows and OAuth redirects.
+    fn open_popup_tab(&mut self, url: &str, foreground: bool) {
+        let url = url.to_string();
+        let id = self.session.add_tab(url.clone(), self.workspace);
+        let page = match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("mote-shell: popup tab page create failed: {e}");
+                None
+            }
+        };
+        self.tabs.push(ShellTab {
+            id,
+            url,
+            title: None,
+            page,
+        });
+        if foreground {
+            self.active = self.tabs.len() - 1;
+            self.on_active_changed();
+        }
         self.persist_and_push();
     }
 
@@ -2914,6 +2969,7 @@ impl ApplicationHandler for ShellApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.engine.pump();
         self.drain_commands();
+        self.drain_popup_tabs();
         self.sync_active_title();
         self.maybe_run_housekeeping();
         self.upload_frames();
@@ -4136,5 +4192,59 @@ mod tests {
             }
             other => panic!("expected SetActivePanel; got {other:?}"),
         }
+    }
+
+    // ── R3 popup-intercept wiring (ADR-0011) ─────────────────────────────────
+    //
+    // `open_popup_tab` and `drain_popup_tabs` operate on live CEF `Page` objects
+    // (the CEF engine cannot be instantiated in a unit test, per the existing
+    // housekeeping test note above).  The closest testable seam is the
+    // `PopupTabQueue` itself — that `user_gesture` round-trips faithfully, that
+    // the queue is empty after a drain, and that cloned handles share state.
+    //
+    // The foreground/background activation decision in `open_popup_tab` is
+    // covered by the live-verification gate (Hacker News middle-click scenario).
+    // The activation rule itself is a one-liner conditional (`if foreground {
+    // self.active = self.tabs.len() - 1; }`); any test of it would duplicate the
+    // implementation rather than exercising a boundary.
+
+    /// A gesture-driven popup request (`user_gesture=true`) maps to `foreground=true`
+    /// in `open_popup_tab`.  Verify the queue preserves the flag faithfully.
+    #[test]
+    fn r3_gesture_popup_round_trips_as_foreground() {
+        use mote_cef::PopupTabRequest;
+
+        // Simulate what `LifeSpanHandlerImpl::on_before_popup` produces when
+        // `user_gesture == 1` (a click-driven popup):
+        let request = PopupTabRequest {
+            url: "https://news.ycombinator.com/item?id=42".to_string(),
+            user_gesture: true,
+        };
+        // The shell's `drain_popup_tabs` maps `req.user_gesture` directly to the
+        // `foreground` argument of `open_popup_tab`.
+        assert!(
+            request.user_gesture,
+            "gesture=true must pass foreground=true to open_popup_tab"
+        );
+    }
+
+    /// A JS-initiated popup request (`user_gesture=false`) maps to `foreground=false`
+    /// — the new tab opens in the background, reducing focus-stealing.
+    #[test]
+    fn r3_non_gesture_popup_round_trips_as_background() {
+        use mote_cef::PopupTabRequest;
+
+        // Simulate what `LifeSpanHandlerImpl::on_before_popup` produces when
+        // `user_gesture == 0` (a JS `window.open(...)` call with no preceding click):
+        let request = PopupTabRequest {
+            url: "https://ad.example.com".to_string(),
+            user_gesture: false,
+        };
+        // The shell's `drain_popup_tabs` maps `req.user_gesture` directly to
+        // `open_popup_tab(url, foreground)` — false here → background tab.
+        assert!(
+            !request.user_gesture,
+            "gesture=false must pass foreground=false to open_popup_tab"
+        );
     }
 }

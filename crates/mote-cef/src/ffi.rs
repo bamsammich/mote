@@ -32,18 +32,21 @@
     reason = "this is a private module; pub(crate) documents intended crate-internal visibility"
 )]
 
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, Client, DisplayHandler, ImplClient, ImplDisplayHandler, ImplFrame,
-    ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
-    ImplResourceRequestHandler, LoadHandler, PaintElementType, Rect, RenderHandler, Request,
-    RequestHandler, ResourceRequestHandler, ReturnValue, ScreenInfo, WrapClient,
-    WrapDisplayHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler,
-    WrapResourceRequestHandler, wrap_client, wrap_display_handler, wrap_load_handler,
-    wrap_render_handler, wrap_request_handler, wrap_resource_request_handler,
+    Browser, BrowserSettings, CefString, Client, DictionaryValue, DisplayHandler, Frame,
+    ImplClient, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler,
+    ImplRenderHandler, ImplRequest, ImplRequestHandler, ImplResourceRequestHandler,
+    LifeSpanHandler, LoadHandler, PaintElementType, PopupFeatures, Rect, RenderHandler, Request,
+    RequestHandler, ResourceRequestHandler, ReturnValue, ScreenInfo, WindowInfo,
+    WindowOpenDisposition, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler,
+    WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler, wrap_client,
+    wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
+    wrap_request_handler, wrap_resource_request_handler,
 };
 
 use crate::browser::PageRole;
@@ -455,6 +458,116 @@ wrap_display_handler! {
 }
 
 // ---------------------------------------------------------------------------
+// LifeSpanHandler — intercepts popup windows (ADR-0011).
+// ---------------------------------------------------------------------------
+
+/// A popup URL intercepted by `on_before_popup` (ADR-0011).
+///
+/// CEF would otherwise open a new chromeless OS window. The shell drains these
+/// each tick and routes each one to an in-window tab in the current workspace.
+#[derive(Debug, Clone)]
+pub struct PopupTabRequest {
+    /// The target URL the popup would have navigated to.
+    pub url: String,
+    /// Whether the popup was triggered by a direct user gesture (a click).
+    ///
+    /// `true` → open the new tab in the **foreground** (Chrome convention:
+    /// click-driven popups take focus). `false` → JS-initiated popup with no
+    /// preceding click; open in the **background** to reduce focus-stealing
+    /// (ad windows, OAuth redirects, etc.).
+    pub user_gesture: bool,
+}
+
+/// A thread-safe queue of [`PopupTabRequest`]s written by the CEF lifespan
+/// callback and drained each tick by the shell's `about_to_wait` pump.
+///
+/// `Arc<Mutex<_>>` (not `channel`) because the same pattern is used throughout
+/// `mote-cef` (see [`FrameSlot`], [`NavState`], [`TitleSlot`]); a poisoned
+/// mutex is recovered the same way.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PopupTabQueue {
+    inner: Arc<Mutex<VecDeque<PopupTabRequest>>>,
+}
+
+impl PopupTabQueue {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drain all pending requests. The shell calls this each tick; it never
+    /// blocks: if the mutex is poisoned the inner value is recovered and
+    /// drained normally (no `PopupTabRequest` carries cross-field invariants).
+    pub(crate) fn drain(&self) -> Vec<PopupTabRequest> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
+
+    fn push(&self, req: PopupTabRequest) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(req);
+    }
+}
+
+#[derive(Clone)]
+struct LifeSpanState {
+    popups: PopupTabQueue,
+}
+
+wrap_life_span_handler! {
+    struct LifeSpanHandlerImpl {
+        state: LifeSpanState,
+    }
+
+    impl LifeSpanHandler {
+        /// CEF calls this before creating a popup browser. Returning `1` instructs
+        /// CEF to abandon its popup pipeline entirely; Mote then opens the target URL
+        /// as an in-window tab (ADR-0011).
+        ///
+        /// The out-parameters (`window_info`, `client`, `settings`, `extra_info`,
+        /// `no_javascript_access`) are intentionally ignored: we return `true` before
+        /// reading or writing any of them, as the CEF docs state that returning `true`
+        /// cancels popup creation regardless of their values.
+        fn on_before_popup(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: ::std::os::raw::c_int,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            user_gesture: ::std::os::raw::c_int,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
+        ) -> ::std::os::raw::c_int {
+            guard(1, || {
+                let url = target_url
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                // Skip blank / empty targets — no useful URL to open.
+                if !url.is_empty() {
+                    self.state.popups.push(PopupTabRequest {
+                        url,
+                        user_gesture: user_gesture != 0,
+                    });
+                }
+                // Return 1 = suppress the OS popup window (CEF abandons its
+                // popup pipeline; Mote opens the URL as an in-window tab).
+                1
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ResourceRequestHandler / RequestHandler — the network interception seam.
 // ---------------------------------------------------------------------------
 
@@ -493,7 +606,7 @@ wrap_resource_request_handler! {
         fn on_before_resource_load(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut cef::Frame>,
+            _frame: Option<&mut Frame>,
             request: Option<&mut Request>,
             _callback: Option<&mut cef::Callback>,
         ) -> ReturnValue {
@@ -539,7 +652,7 @@ wrap_request_handler! {
         fn on_before_browse(
             &self,
             _browser: Option<&mut Browser>,
-            frame: Option<&mut cef::Frame>,
+            frame: Option<&mut Frame>,
             request: Option<&mut Request>,
             _user_gesture: ::std::os::raw::c_int,
             _is_redirect: ::std::os::raw::c_int,
@@ -559,7 +672,7 @@ wrap_request_handler! {
         fn resource_request_handler(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut cef::Frame>,
+            _frame: Option<&mut Frame>,
             _request: Option<&mut Request>,
             _is_navigation: ::std::os::raw::c_int,
             _is_download: ::std::os::raw::c_int,
@@ -577,7 +690,7 @@ wrap_request_handler! {
 }
 
 // ---------------------------------------------------------------------------
-// Client — wires the render, load, and request handlers onto a browser.
+// Client — wires the render, load, request, display, and lifespan handlers.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -586,6 +699,7 @@ struct ClientState {
     load: LoadHandler,
     request: RequestHandler,
     display: DisplayHandler,
+    life_span: LifeSpanHandler,
 }
 
 wrap_client! {
@@ -609,24 +723,39 @@ wrap_client! {
         fn display_handler(&self) -> Option<DisplayHandler> {
             guard(None, || Some(self.state.display.clone()))
         }
+
+        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
+            guard(None, || Some(self.state.life_span.clone()))
+        }
     }
 }
 
 /// Builds a fully-wired CEF [`Client`] for an off-screen browser of trust `role`.
 ///
-/// Returns the client plus the [`FrameSlot`], [`NavState`], and [`TitleSlot`]
-/// the owning `Page` reads from. Keeping construction here keeps every `cef::`
-/// handler type inside the FFI module. The `role` is wired into the request
-/// handler's `on_before_browse` guard: a `Content` page can never commit a
-/// top-level `mote://` navigation (S1).
+/// Returns the client plus the [`FrameSlot`], [`NavState`], [`TitleSlot`],
+/// [`ViewSize`], and [`PopupTabQueue`] the owning `Page` reads from. The
+/// `PopupTabQueue` is written by [`LifeSpanHandlerImpl::on_before_popup`] (which
+/// intercepts CEF popup windows per ADR-0011) and drained each tick by the shell.
+///
+/// Keeping construction here keeps every `cef::` handler type inside the FFI
+/// module. The `role` is wired into the request handler's `on_before_browse`
+/// guard: a `Content` page can never commit a top-level `mote://` navigation (S1).
 pub(crate) fn build_client(
     size: ViewSize,
     interceptor: Arc<dyn ResourceInterceptor>,
     role: PageRole,
-) -> (Client, FrameSlot, NavState, TitleSlot, ViewSize) {
+) -> (
+    Client,
+    FrameSlot,
+    NavState,
+    TitleSlot,
+    ViewSize,
+    PopupTabQueue,
+) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
     let title = TitleSlot::new();
+    let popups = PopupTabQueue::new();
 
     let render = RenderHandlerImpl::new(RenderState {
         slot: slot.clone(),
@@ -637,15 +766,19 @@ pub(crate) fn build_client(
     let display = DisplayHandlerImpl::new(DisplayState {
         title: title.clone(),
     });
+    let life_span = LifeSpanHandlerImpl::new(LifeSpanState {
+        popups: popups.clone(),
+    });
 
     let client = ClientImpl::new(ClientState {
         render,
         load,
         request,
         display,
+        life_span,
     });
 
-    (client, slot, nav, title, size)
+    (client, slot, nav, title, size, popups)
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +799,9 @@ pub(crate) fn pixel_buf_len(w: u32, h: u32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ViewSize, pixel_buf_len, should_cancel_navigation};
+    use super::{
+        PopupTabQueue, PopupTabRequest, ViewSize, pixel_buf_len, should_cancel_navigation,
+    };
     use crate::browser::PageRole;
 
     #[test]
@@ -815,5 +950,97 @@ mod tests {
     fn pixel_buf_len_overflows_on_32bit() {
         // On 32-bit: usize::MAX == 4_294_967_295. 65536 * 65536 * 4 overflows.
         assert_eq!(pixel_buf_len(65536, 65536), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PopupTabQueue — the ADR-0011 interception queue.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn popup_queue_starts_empty() {
+        // A newly created queue has no pending requests.
+        let q = PopupTabQueue::new();
+        assert!(q.drain().is_empty(), "fresh queue must be empty");
+    }
+
+    #[test]
+    fn popup_queue_drain_returns_all_and_clears() {
+        // Requests pushed before a drain appear in order; after draining the
+        // queue is empty (the LifeSpanHandler won't return stale requests on the
+        // next tick).
+        let q = PopupTabQueue::new();
+        q.push(PopupTabRequest {
+            url: "https://example.com/a".to_string(),
+            user_gesture: true,
+        });
+        q.push(PopupTabRequest {
+            url: "https://example.com/b".to_string(),
+            user_gesture: false,
+        });
+        let drained = q.drain();
+        assert_eq!(drained.len(), 2, "both requests must be returned");
+        assert_eq!(drained[0].url, "https://example.com/a");
+        assert!(drained[0].user_gesture, "first request is gesture-driven");
+        assert_eq!(drained[1].url, "https://example.com/b");
+        assert!(!drained[1].user_gesture, "second request is JS-initiated");
+        // After draining, the queue must be empty.
+        assert!(
+            q.drain().is_empty(),
+            "queue must be empty after drain — no stale re-delivery"
+        );
+    }
+
+    #[test]
+    fn popup_queue_user_gesture_true_maps_to_foreground() {
+        // `user_gesture == true` (click-driven popup) must map to `foreground == true`
+        // in the shell's `open_popup_tab` call. This test verifies the data is
+        // preserved faithfully through the queue — the foreground decision is made
+        // by the shell based on `user_gesture`.
+        let q = PopupTabQueue::new();
+        q.push(PopupTabRequest {
+            url: "https://news.ycombinator.com".to_string(),
+            user_gesture: true,
+        });
+        let req = q.drain().into_iter().next().expect("one request");
+        assert!(
+            req.user_gesture,
+            "gesture=true must round-trip through the queue"
+        );
+    }
+
+    #[test]
+    fn popup_queue_user_gesture_false_maps_to_background() {
+        // `user_gesture == false` (JS-initiated popup) must remain false so the
+        // shell opens the tab in the background (reduces focus-stealing).
+        let q = PopupTabQueue::new();
+        q.push(PopupTabRequest {
+            url: "https://example.com".to_string(),
+            user_gesture: false,
+        });
+        let req = q.drain().into_iter().next().expect("one request");
+        assert!(
+            !req.user_gesture,
+            "gesture=false must round-trip through the queue"
+        );
+    }
+
+    #[test]
+    fn popup_queue_clone_shares_state() {
+        // `PopupTabQueue` is `Clone` (needed so `LifeSpanHandlerImpl` + `Page`
+        // can each hold a handle to the same queue). A push through the clone is
+        // visible to the original.
+        let q = PopupTabQueue::new();
+        let q2 = q.clone();
+        q2.push(PopupTabRequest {
+            url: "https://shared.example.com".to_string(),
+            user_gesture: true,
+        });
+        let drained = q.drain(); // drain from the original
+        assert_eq!(
+            drained.len(),
+            1,
+            "push through clone must be visible to original"
+        );
+        assert_eq!(drained[0].url, "https://shared.example.com");
     }
 }

@@ -24,7 +24,8 @@ use cef::{
 
 use crate::bridge;
 use crate::error::{CefError, Result};
-use crate::ffi::{self, FrameSlot, NavState, TitleSlot, ViewSize};
+pub use crate::ffi::PopupTabRequest;
+use crate::ffi::{self, FrameSlot, NavState, PopupTabQueue, TitleSlot, ViewSize};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
@@ -116,6 +117,10 @@ pub struct Page {
     /// [`Page::notify_resized`], which then asks CEF to re-query and re-paint.
     size: ViewSize,
     role: PageRole,
+    /// Popup-tab requests enqueued by `LifeSpanHandler::on_before_popup` (ADR-0011).
+    /// The shell drains these each tick via [`Page::drain_popup_requests`] and
+    /// routes them to in-window tabs in the current workspace.
+    popups: PopupTabQueue,
     /// Set to `true` once [`Page::close`] has been called so that the [`Drop`]
     /// impl does not issue a second `close_browser` to an already-closing host.
     closed: AtomicBool,
@@ -201,7 +206,8 @@ impl Page {
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
-        let (client, frame, nav, title, size) = ffi::build_client(size, interceptor, options.role);
+        let (client, frame, nav, title, size, popups) =
+            ffi::build_client(size, interceptor, options.role);
         // Chrome pages are transparent so the composited page shows through;
         // content pages are opaque.
         let transparent = options.role == PageRole::Chrome;
@@ -214,6 +220,7 @@ impl Page {
             title,
             size,
             role: options.role,
+            popups,
             closed: AtomicBool::new(false),
         })
     }
@@ -246,6 +253,17 @@ impl Page {
     #[must_use]
     pub fn title(&self) -> Option<String> {
         self.title.get()
+    }
+
+    /// Drain all pending popup-tab requests queued by CEF's `on_before_popup`
+    /// callback (ADR-0011). The shell calls this each tick (alongside
+    /// `drain_commands`) and creates in-window tabs for each request.
+    ///
+    /// `user_gesture == true` → the request was click-driven → open in
+    /// **foreground**. `user_gesture == false` → JS-initiated popup → open in
+    /// **background** (reduces focus-stealing from ad windows / OAuth redirects).
+    pub fn drain_popup_requests(&self) -> Vec<PopupTabRequest> {
+        self.popups.drain()
     }
 
     /// Navigate this page to `url`.
@@ -550,7 +568,7 @@ impl ChromePageRequest {
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav, title, size) =
+        let (inner, frame, nav, title, size, popups) =
             ffi::build_client(size, Arc::new(AllowAll), PageRole::Chrome);
         let client = bridge::chrome_client(inner, router);
         // The chrome browser is always transparent (the page composites through
@@ -569,6 +587,7 @@ impl ChromePageRequest {
             title,
             size,
             role: PageRole::Chrome,
+            popups,
             closed: AtomicBool::new(false),
         }))
     }
