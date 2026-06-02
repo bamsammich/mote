@@ -725,7 +725,12 @@ fn build_chrome_resources() -> ChromeResources {
             mote_ui::WORDMARK_SVG,
             "image/svg+xml",
         )
-        .register("assets/mark.svg", mote_ui::MARK_SVG, "image/svg+xml");
+        .register("assets/mark.svg", mote_ui::MARK_SVG, "image/svg+xml")
+        .register(
+            "assets/lucide-sprite.svg",
+            mote_ui::LUCIDE_SPRITE_SVG,
+            "image/svg+xml",
+        );
     for (name, contents) in mote_ui::COMPONENT_CSS {
         res = res.register(format!("components/{name}.css"), *contents, css);
     }
@@ -5114,6 +5119,55 @@ mod tests {
         assert_eq!(
             classify_chord(Modifiers::NONE, &Key::Named(NamedKey::Enter), 1),
             None
+        );
+    }
+
+    /// Every `assets/*` URL the chrome HTML references must be registered in
+    /// `build_chrome_resources`, otherwise CEF 404s on the request and the
+    /// referenced asset renders as nothing (e.g. lucide-sprite missing → every
+    /// chrome icon disappears, with no console error). This regression test
+    /// scans `CHROME_HTML` for the `assets/<name>` substring pattern and
+    /// asserts each is in the registered resource paths. Closes the P1
+    /// `lucide-sprite.svg`-not-registered bug.
+    #[test]
+    fn chrome_assets_referenced_in_html_are_registered() {
+        use std::collections::HashSet;
+
+        let html = mote_ui::CHROME_HTML;
+        let mut referenced: HashSet<String> = HashSet::new();
+        // Find every `assets/<path>` substring, terminate at the first
+        // character outside the asset-path charset.
+        let bytes = html.as_bytes();
+        let mut i = 0;
+        let needle = b"assets/";
+        while let Some(start) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
+            let abs = i + start;
+            let mut end = abs + needle.len();
+            while end < bytes.len() {
+                let c = bytes[end];
+                if c.is_ascii_alphanumeric() || matches!(c, b'/' | b'.' | b'-' | b'_') {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            referenced.insert(html[abs..end].to_string());
+            i = end;
+        }
+
+        let res = build_chrome_resources();
+        let registered: HashSet<&str> = res.paths().into_iter().collect();
+
+        let mut missing: Vec<&String> = referenced
+            .iter()
+            .filter(|p| !registered.contains(p.as_str()))
+            .collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "chrome.html references assets that are not registered in build_chrome_resources: {missing:?}\n\
+             Registered: {registered:?}\n\
+             Wire each referenced asset (e.g. mote_ui::LUCIDE_SPRITE_SVG) via .register(\"<path>\", BYTES, mime)."
         );
     }
 }
