@@ -122,6 +122,36 @@
               <button type="button" class="btn btn-ghost btn-icon" aria-label="toggle sidebar">
                 ▣
               </button>
+              <!--
+                R4: close-window keycap. Lucide `x` glyph at 16px inside a 28×28
+                keycap. Theme override point: themes can swap this icon via
+                `theme:set_icon("chrome.close_window", "lucide:<name>")` once the
+                themable-icon contract (ADR TBD, P1 wave) is implemented.
+                TODO(P1): wire through theme.icons.close_window when the themable-
+                icon ADR lands.
+              -->
+              <button
+                type="button"
+                class="btn btn-ghost btn-icon close-window-btn"
+                aria-label="close window"
+                title="close window (⌃⇧W)"
+                style="width:28px;height:28px;"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M18 6 6 18" />
+                  <path d="m6 6 12 12" />
+                </svg>
+              </button>
             </div>
           </div>
         </div>

@@ -197,6 +197,137 @@ enum ShellCommand {
     /// `workspace:provider` plugin to validate + persist, then re-point
     /// `self.workspace` and rebuild the visible tab strip.
     SwitchWorkspace(String),
+    /// Close the current window (Ctrl+Shift+W, Ctrl+Q, or Ctrl+W on last tab,
+    /// or the chrome close-button click via the `close_window` op).
+    /// Sets `ShellApp::should_exit = true`; `about_to_wait` calls
+    /// `event_loop.exit()` on the next tick.
+    CloseWindow,
+}
+
+/// The action a keybind chord maps to (ADR-0012 chord table).
+///
+/// Returned by [`classify_chord`] — a pure, testable function that maps
+/// `(modifiers, key, tab_count)` to an action without touching any shell state.
+/// `intercept_keybind` calls this and dispatches; the separation keeps the
+/// chord-classification logic unit-testable without a live `ShellApp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeybindAction {
+    /// Open a new tab in the current workspace.
+    NewTab,
+    /// Close the active tab (tabs > 1) or the window (tabs == 1) — contextual.
+    ///
+    /// ADR-0012: `Ctrl+W` with only one tab open closes the window, matching
+    /// Chrome/Safari/Firefox behavior. `close_tab`'s "re-open fresh tab on last
+    /// close" behavior stays unchanged — the contextual rule lives here, not there.
+    CloseTabOrWindow,
+    /// Close the window unconditionally regardless of tab count.
+    CloseWindow,
+    /// Quit Mote (equivalent to `CloseWindow` in single-window v0.1).
+    Quit,
+    /// Focus the omnibox and select all existing text.
+    FocusOmnibox,
+    /// Reload the active tab.
+    ReloadTab,
+    /// Navigate back in the active tab's history.
+    GoBack,
+    /// Navigate forward in the active tab's history.
+    GoForward,
+    /// Switch to workspace at 1-based index (1..=8).
+    SwitchWorkspaceByIndex(u8),
+    /// Switch to the **last** workspace (Chrome convention for `Ctrl+9`).
+    SwitchWorkspaceLast,
+    /// Cycle to the next tab (existing `Ctrl+Tab` behavior).
+    CycleTab,
+    /// Toggle the integrity panel (existing `Ctrl+Shift+I` behavior).
+    ToggleIntegrity,
+    /// Open the workspace tab picker (existing `Mod+Space` behavior).
+    OpenPicker,
+    /// Dismiss the topmost modal surface (existing `Esc` behavior).
+    DismissModal,
+}
+
+/// Classify a keypress as a keybind action (ADR-0012 chord table, v0.1).
+///
+/// Pure function: takes the current modifier state, the logical key, and the
+/// number of open tabs (needed for the contextual `Ctrl+W` rule). Returns
+/// `Some(action)` if the chord is in the table, `None` if it should be
+/// focus-routed.
+///
+/// **Caller contract**: this function is called only when the event is a
+/// `Pressed` key (not `Released`). The picker-open check (which captures all
+/// keys) happens before this call in `intercept_keybind`.
+///
+/// Uses `Ctrl` (the Linux/dev convention) where the spec writes `⌘`.
+pub(crate) fn classify_chord(
+    modifiers: Modifiers,
+    key: &Key,
+    tab_count: usize,
+) -> Option<KeybindAction> {
+    // Esc: captured-modal scope — closes the topmost modal (integrity, picker,
+    // approval dialog). Fires regardless of modifier state.
+    if matches!(key, Key::Named(NamedKey::Escape)) {
+        return Some(KeybindAction::DismissModal);
+    }
+
+    // Mod+Space (Super or Ctrl): open the workspace tab picker.
+    if matches!(key, Key::Named(NamedKey::Space))
+        && (modifiers.contains(Modifiers::COMMAND) || modifiers.contains(Modifiers::CONTROL))
+    {
+        return Some(KeybindAction::OpenPicker);
+    }
+
+    // All remaining chords require Ctrl.
+    if !modifiers.contains(Modifiers::CONTROL) {
+        return None;
+    }
+
+    let shift = modifiers.contains(Modifiers::SHIFT);
+
+    match key {
+        Key::Character(s) => {
+            match s.as_str() {
+                // Ctrl+Shift+I: toggle integrity panel (case-insensitive).
+                "I" | "i" if shift => Some(KeybindAction::ToggleIntegrity),
+                // Ctrl+Shift+W: close window unconditionally.
+                "W" | "w" if shift => Some(KeybindAction::CloseWindow),
+                // Ctrl+T: new tab.
+                "T" | "t" if !shift => Some(KeybindAction::NewTab),
+                // Ctrl+W: contextual — close window on last tab, close tab otherwise.
+                "w" if !shift => {
+                    if tab_count <= 1 {
+                        Some(KeybindAction::CloseWindow)
+                    } else {
+                        Some(KeybindAction::CloseTabOrWindow)
+                    }
+                }
+                // Ctrl+Q: quit Mote.
+                "Q" | "q" if !shift => Some(KeybindAction::Quit),
+                // Ctrl+L: focus omnibox.
+                "L" | "l" if !shift => Some(KeybindAction::FocusOmnibox),
+                // Ctrl+R: reload active tab.
+                "R" | "r" if !shift => Some(KeybindAction::ReloadTab),
+                // Ctrl+[: go back.
+                "[" if !shift => Some(KeybindAction::GoBack),
+                // Ctrl+]: go forward.
+                "]" if !shift => Some(KeybindAction::GoForward),
+                // Ctrl+1..Ctrl+8: switch to workspace by 1-based index.
+                "1" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(1)),
+                "2" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(2)),
+                "3" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(3)),
+                "4" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(4)),
+                "5" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(5)),
+                "6" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(6)),
+                "7" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(7)),
+                "8" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(8)),
+                // Ctrl+9: switch to the LAST workspace (Chrome convention — not
+                // the literal 9th). ADR-0012 §`⌘9` documents the rationale.
+                "9" if !shift => Some(KeybindAction::SwitchWorkspaceLast),
+                _ => None,
+            }
+        }
+        Key::Named(NamedKey::Tab) if !shift => Some(KeybindAction::CycleTab),
+        _ => None,
+    }
 }
 
 /// Who owns keyboard input (plan §1.3).
@@ -374,6 +505,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         did_initial_load: false,
         first_frame_logged: false,
         started: Instant::now(),
+        should_exit: false,
     };
 
     let event_loop = EventLoop::new()?;
@@ -781,6 +913,18 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
             push(&copy_url_queue, ShellCommand::CopyActiveUrl);
             OpResponse::ok("{\"ok\":true}")
         })
+        // R4: close the window via the chrome close-button click.
+        // Callable only from the privileged `mote://chrome` origin (ADR-0005
+        // origin gate; the host-bridge router is attached only to the chrome
+        // browser). The shell sets `should_exit = true` on the next pump tick
+        // and `about_to_wait` calls `event_loop.exit()`.
+        .register("close_window", {
+            let q = Arc::clone(commands);
+            move |_params: &str| {
+                push(&q, ShellCommand::CloseWindow);
+                OpResponse::ok("{\"ok\":true}")
+            }
+        })
 }
 
 /// Op-boundary structural validation of the dialog's origin globs
@@ -945,6 +1089,9 @@ struct ShellApp {
     first_frame_logged: bool,
     /// When the window opened (for the warm-up log only).
     started: Instant,
+    /// Set to `true` by `drain_commands` when a `CloseWindow` command is
+    /// processed. `about_to_wait` calls `event_loop.exit()` on the next tick.
+    should_exit: bool,
 }
 
 impl std::fmt::Debug for ShellApp {
@@ -1026,6 +1173,10 @@ impl ShellApp {
                 ShellCommand::BookmarkToggle => self.bookmark_toggle(),
                 ShellCommand::SwitchWorkspace(id) => self.switch_workspace(&id),
                 ShellCommand::CopyActiveUrl => self.copy_active_url(),
+                ShellCommand::CloseWindow => {
+                    eprintln!("mote-shell: close window requested; exiting");
+                    self.should_exit = true;
+                }
             }
         }
     }
@@ -2803,11 +2954,20 @@ impl ShellApp {
     }
 
     /// Intercept the chrome keybinds that must always win before the page sees
-    /// the key (plan §1.3 / §6.1): `Ctrl+T` new tab, `Ctrl+W` close active tab,
-    /// `Ctrl+Tab` next tab, `Ctrl+Shift+I` toggle the integrity panel, `Esc`
-    /// closes it. Returns `true` if the key was consumed (not routed).
+    /// the key (ADR-0012 chord table). Returns `true` if the key was consumed
+    /// (not routed).
     ///
     /// Uses `Ctrl` (the Linux/dev convention) where the spec writes `⌘`.
+    ///
+    /// The picker-open fast-path captures every key for the picker's own
+    /// navigation. After that, key classification is delegated to
+    /// [`classify_chord`] (a pure, unit-testable function); this method only
+    /// does the stateful dispatch — each arm is exactly one action.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ADR-0012: the full browser-keybind suite dispatches here by design; \
+                  splitting would make the chord table harder to audit against the ADR"
+    )]
     fn intercept_keybind(&mut self, event: &winit::event::KeyEvent) -> bool {
         // While the tab picker is open it owns ALL keyboard input (filter,
         // navigate, select, close) — route every key to it before anything else.
@@ -2817,61 +2977,7 @@ impl ShellApp {
         if event.state != ElementState::Pressed {
             return false;
         }
-        // Esc closes the integrity panel (either the chrome-rendered one or
-        // the legacy overlay surface, whichever happens to be live).
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            let overlay_was_open = self.integrity_open;
-            let chrome_was_open = self.integrity_chrome_open;
-            if overlay_was_open {
-                self.set_integrity_open(false);
-            }
-            if chrome_was_open {
-                self.integrity_chrome_open = false;
-                self.push_hide_integrity_to_chrome();
-            }
-            if overlay_was_open || chrome_was_open {
-                return true;
-            }
-        }
-        // Mod+Space (Super or Ctrl) opens the workspace tab picker (DESIGN
-        // §The workspace tab picker — default `Mod+Space`). `Mod` is Super on
-        // Linux; we also accept Ctrl+Space for keyboards/WMs that reserve Super.
-        if matches!(event.logical_key, Key::Named(NamedKey::Space))
-            && (self.modifiers.contains(Modifiers::COMMAND)
-                || self.modifiers.contains(Modifiers::CONTROL))
-        {
-            self.set_picker_open(true);
-            return true;
-        }
-        if !self.modifiers.contains(Modifiers::CONTROL) {
-            return false;
-        }
-        // Ctrl+Shift+I toggles the integrity panel (the `i` arrives as upper or
-        // lower case depending on the shift state, so match case-insensitively).
-        // Prefers the chrome-rendered structured-DOM path: serialize the panel
-        // view-model and push it through window.mote.applyOp. The legacy overlay
-        // path stays as a fallback for the chrome-not-ready window so the keybind
-        // never appears broken (legacy-overlay cleanup is a later task).
-        if self.modifiers.contains(Modifiers::SHIFT)
-            && let Key::Character(s) = &event.logical_key
-            && s.eq_ignore_ascii_case("i")
-        {
-            if self.chrome_ready {
-                if self.integrity_chrome_open {
-                    self.integrity_chrome_open = false;
-                    self.push_hide_integrity_to_chrome();
-                } else {
-                    let panel = self.host.build_panel();
-                    if self.push_integrity_panel_to_chrome(&panel) {
-                        self.integrity_chrome_open = true;
-                    }
-                }
-            } else {
-                let open = !self.integrity_open;
-                self.set_integrity_open(open);
-            }
-            return true;
-        }
+
         // Debug-only keybind (Ctrl+Shift+A): push a sample ApprovalRequest into
         // the chrome page so the dialog renders. The buttons call the real
         // `approve_plugin` op (registered in `build_op_registry`); the sample
@@ -2880,6 +2986,7 @@ impl ShellApp {
         // Retained for T7 live verification (this headless box cannot synthesize
         // CEF clicks); remove at T7 close.
         if self.modifiers.contains(Modifiers::SHIFT)
+            && self.modifiers.contains(Modifiers::CONTROL)
             && let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("a")
             && self.chrome_ready
@@ -2897,6 +3004,7 @@ impl ShellApp {
         // the wire-format encoding.
         // Retained for T7 live verification; remove at T7 close.
         if self.modifiers.contains(Modifiers::SHIFT)
+            && self.modifiers.contains(Modifiers::CONTROL)
             && let Key::Character(s) = &event.logical_key
             && s.eq_ignore_ascii_case("x")
             && self.chrome_ready
@@ -2911,24 +3019,145 @@ impl ShellApp {
             self.push_approval_dialog(&req);
             return true;
         }
-        match &event.logical_key {
-            Key::Character(s) if s.eq_ignore_ascii_case("t") => {
+
+        let Some(action) = classify_chord(self.modifiers, &event.logical_key, self.tabs.len())
+        else {
+            return false;
+        };
+
+        match action {
+            KeybindAction::DismissModal => {
+                // Esc closes the integrity panel (either the chrome-rendered one
+                // or the legacy overlay surface, whichever happens to be live).
+                let overlay_was_open = self.integrity_open;
+                let chrome_was_open = self.integrity_chrome_open;
+                if overlay_was_open {
+                    self.set_integrity_open(false);
+                }
+                if chrome_was_open {
+                    self.integrity_chrome_open = false;
+                    self.push_hide_integrity_to_chrome();
+                }
+                // Only consume Esc when a panel was actually open.
+                overlay_was_open || chrome_was_open
+            }
+            KeybindAction::OpenPicker => {
+                self.set_picker_open(true);
+                true
+            }
+            KeybindAction::ToggleIntegrity => {
+                // Prefers the chrome-rendered structured-DOM path. The legacy
+                // overlay path stays as a fallback for the chrome-not-ready
+                // window so the keybind never appears broken.
+                if self.chrome_ready {
+                    if self.integrity_chrome_open {
+                        self.integrity_chrome_open = false;
+                        self.push_hide_integrity_to_chrome();
+                    } else {
+                        let panel = self.host.build_panel();
+                        if self.push_integrity_panel_to_chrome(&panel) {
+                            self.integrity_chrome_open = true;
+                        }
+                    }
+                } else {
+                    let open = !self.integrity_open;
+                    self.set_integrity_open(open);
+                }
+                true
+            }
+            KeybindAction::NewTab => {
                 self.open_tab(None);
                 true
             }
-            Key::Character(s) if s.eq_ignore_ascii_case("w") => {
+            KeybindAction::CloseTabOrWindow => {
+                // tabs.len() > 1 here (classify_chord gates on tab_count > 1);
+                // close the active tab.
                 if let Some(tab) = self.tabs.get(self.active) {
                     let id = tab.id;
                     self.close_tab(id);
                 }
                 true
             }
-            Key::Named(NamedKey::Tab) => {
+            KeybindAction::CloseWindow | KeybindAction::Quit => {
+                eprintln!("mote-shell: close window requested via keybind; exiting");
+                self.should_exit = true;
+                true
+            }
+            KeybindAction::FocusOmnibox => {
+                self.push_focus_omnibox_to_chrome();
+                true
+            }
+            KeybindAction::ReloadTab => {
+                if let Some(page) = self.active_page() {
+                    page.reload();
+                }
+                true
+            }
+            KeybindAction::GoBack => {
+                if let Some(page) = self.active_page() {
+                    page.go_back();
+                }
+                true
+            }
+            KeybindAction::GoForward => {
+                if let Some(page) = self.active_page() {
+                    page.go_forward();
+                }
+                true
+            }
+            KeybindAction::SwitchWorkspaceByIndex(idx) => {
+                if let Some(slug) = self.workspace_slug_by_index(idx) {
+                    self.switch_workspace(&slug);
+                }
+                true
+            }
+            KeybindAction::SwitchWorkspaceLast => {
+                if let Some(slug) = self.workspace_slug_last() {
+                    self.switch_workspace(&slug);
+                }
+                true
+            }
+            KeybindAction::CycleTab => {
                 self.cycle_active_tab();
                 true
             }
-            _ => false,
         }
+    }
+
+    /// Push `applyOp('focus_omnibox', null)` to the chrome page.
+    ///
+    /// The chrome's `host.js` handles this op by calling `input.focus()` on
+    /// the omnibox element and selecting all existing text — the standard
+    /// address-bar `⌘L` / `Ctrl+L` behavior.
+    fn push_focus_omnibox_to_chrome(&self) {
+        self.bridge.page().eval_js(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('focus_omnibox',null);",
+        );
+    }
+
+    /// Return the workspace slug at 1-based `index` from the live workspace
+    /// list (ADR-0012: `Ctrl+1`..`Ctrl+8` switch to workspace by index).
+    ///
+    /// Queries `workspace:provider → list_workspaces` so the ordering follows
+    /// the plugin's canonical list, not a hardcoded index. Returns `None` when
+    /// no workspace exists at that index (index out of range or plugin not loaded).
+    fn workspace_slug_by_index(&self, index: u8) -> Option<String> {
+        workspace_slugs_from_host(&self.host).and_then(|slugs| {
+            let i = usize::from(index).checked_sub(1)?;
+            slugs.into_iter().nth(i)
+        })
+    }
+
+    /// Return the slug of the **last** workspace (ADR-0012: `Ctrl+9` Chrome
+    /// convention — not the literal 9th, but always the final workspace).
+    fn workspace_slug_last(&self) -> Option<String> {
+        workspace_slugs_from_host(&self.host).and_then(|mut slugs| {
+            if slugs.is_empty() {
+                None
+            } else {
+                Some(slugs.remove(slugs.len() - 1))
+            }
+        })
     }
 
     /// Advance the active tab to the next one (wrapping), materializing a
@@ -3088,9 +3317,16 @@ impl ApplicationHandler for ShellApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.engine.pump();
         self.drain_commands();
+        // CloseWindow / Quit commands set `should_exit`; exit after the current
+        // drain cycle so any in-flight commands are consumed first.
+        if self.should_exit {
+            eprintln!("mote-shell: should_exit set; shutting down event loop");
+            event_loop.exit();
+            return;
+        }
         self.drain_popup_tabs();
         self.sync_active_url();
         self.sync_active_title();
@@ -3443,6 +3679,38 @@ pub(crate) fn workspace_id_for_slug(slug: &str) -> Option<WorkspaceId> {
         "work" => Some(WorkspaceId::new(1)),
         _ => None,
     }
+}
+
+/// Query `workspace:provider → list_workspaces` and return the ordered list of
+/// workspace id strings (slugs).
+///
+/// Used by the `Ctrl+1`..`Ctrl+9` keybind dispatch to map a numeric index to a
+/// slug without hardcoding the workspace order in the shell. The ordering is the
+/// plugin's canonical ordering (the same order the workspace strip shows).
+///
+/// Returns `None` when the provider is unavailable (plugin not yet loaded).
+/// Returns `Some([])` when the provider returns an empty list.
+fn workspace_slugs_from_host(host: &runtime::PluginHost) -> Option<Vec<String>> {
+    let arg = HostValue::Map(BTreeMap::new());
+    let raw = host
+        .runtime
+        .invoke_capability("workspace:provider", "list_workspaces", &arg)?;
+    let rows = match raw {
+        HostValue::List(v) => v,
+        // Lua `{}` returns as Map (L3 defensive normalisation).
+        _ => vec![],
+    };
+    let slugs = rows
+        .into_iter()
+        .filter_map(|v| match v {
+            HostValue::Map(m) => match m.get("id") {
+                Some(HostValue::Str(id)) => Some(id.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    Some(slugs)
 }
 
 /// Build the `bookmark_list` applyOp JSON payload from the runtime, without
@@ -4521,6 +4789,331 @@ mod tests {
         assert!(
             should_update,
             "a tab with no cached title must accept the first live title"
+        );
+    }
+
+    // ── R4 keybind-suite chord classification (ADR-0012) ─────────────────────
+    //
+    // `classify_chord` is a pure function — no live `ShellApp` required.
+    // These tests cover:
+    //   • every new chord's classification,
+    //   • the contextual Ctrl+W rule (tab_count <= 1 → CloseWindow),
+    //   • the Ctrl+9 → last-workspace-not-literal-9th rule,
+    //   • the Ctrl+1..8 → 1-based indexing (off-by-one regression guard).
+
+    /// Helper: produce a `Key::Character` for a single-char string.
+    fn char_key(c: &str) -> Key {
+        Key::Character(c.into())
+    }
+
+    /// `Ctrl+T` is classified as `NewTab`.
+    #[test]
+    fn r4_ctrl_t_is_new_tab() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("t"), 1);
+        assert_eq!(action, Some(KeybindAction::NewTab));
+        // Uppercase T (shift held, but Shift alone doesn't change this chord).
+        let action_upper = classify_chord(Modifiers::CONTROL, &char_key("T"), 1);
+        assert_eq!(action_upper, Some(KeybindAction::NewTab));
+    }
+
+    /// `Ctrl+W` with more than one tab → `CloseTabOrWindow` (close tab).
+    #[test]
+    fn r4_ctrl_w_multi_tab_closes_tab() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("w"), 3);
+        assert_eq!(
+            action,
+            Some(KeybindAction::CloseTabOrWindow),
+            "Ctrl+W with >1 tab must produce CloseTabOrWindow"
+        );
+    }
+
+    /// `Ctrl+W` with exactly one tab → `CloseWindow` (contextual rule, ADR-0012).
+    #[test]
+    fn r4_ctrl_w_last_tab_closes_window() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("w"), 1);
+        assert_eq!(
+            action,
+            Some(KeybindAction::CloseWindow),
+            "Ctrl+W with 1 tab must produce CloseWindow (contextual rule, ADR-0012)"
+        );
+    }
+
+    /// `Ctrl+W` with zero tabs (edge case) → `CloseWindow`.
+    #[test]
+    fn r4_ctrl_w_zero_tabs_closes_window() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("w"), 0);
+        assert_eq!(
+            action,
+            Some(KeybindAction::CloseWindow),
+            "Ctrl+W with 0 tabs must produce CloseWindow (tab_count <= 1)"
+        );
+    }
+
+    /// `Ctrl+Shift+W` always closes the window regardless of tab count.
+    #[test]
+    fn r4_ctrl_shift_w_always_closes_window() {
+        let mods = Modifiers::CONTROL | Modifiers::SHIFT;
+        // 1 tab
+        assert_eq!(
+            classify_chord(mods, &char_key("W"), 1),
+            Some(KeybindAction::CloseWindow),
+            "Ctrl+Shift+W with 1 tab must close window"
+        );
+        // Many tabs
+        assert_eq!(
+            classify_chord(mods, &char_key("w"), 5),
+            Some(KeybindAction::CloseWindow),
+            "Ctrl+Shift+W with 5 tabs must close window"
+        );
+    }
+
+    /// `Ctrl+Q` is classified as `Quit`.
+    #[test]
+    fn r4_ctrl_q_is_quit() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("q"), 1);
+        assert_eq!(action, Some(KeybindAction::Quit));
+    }
+
+    /// `Ctrl+L` is classified as `FocusOmnibox`.
+    #[test]
+    fn r4_ctrl_l_is_focus_omnibox() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("l"), 1);
+        assert_eq!(action, Some(KeybindAction::FocusOmnibox));
+    }
+
+    /// `Ctrl+R` is classified as `ReloadTab`.
+    #[test]
+    fn r4_ctrl_r_is_reload() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("r"), 1);
+        assert_eq!(action, Some(KeybindAction::ReloadTab));
+    }
+
+    /// `Ctrl+[` is classified as `GoBack`.
+    #[test]
+    fn r4_ctrl_bracket_open_is_go_back() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("["), 1);
+        assert_eq!(action, Some(KeybindAction::GoBack));
+    }
+
+    /// `Ctrl+]` is classified as `GoForward`.
+    #[test]
+    fn r4_ctrl_bracket_close_is_go_forward() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("]"), 1);
+        assert_eq!(action, Some(KeybindAction::GoForward));
+    }
+
+    /// `Ctrl+1` through `Ctrl+8` are classified as `SwitchWorkspaceByIndex(N)`.
+    /// Off-by-one regression: `Ctrl+1` must be index 1 (not 0), `Ctrl+8` must
+    /// be index 8.
+    #[test]
+    fn r4_ctrl_1_through_8_map_to_1_based_index() {
+        let cases: &[(&str, u8)] = &[
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("4", 4),
+            ("5", 5),
+            ("6", 6),
+            ("7", 7),
+            ("8", 8),
+        ];
+        for (digit, expected_idx) in cases {
+            let action = classify_chord(Modifiers::CONTROL, &char_key(digit), 1);
+            assert_eq!(
+                action,
+                Some(KeybindAction::SwitchWorkspaceByIndex(*expected_idx)),
+                "Ctrl+{digit} must map to index {expected_idx}, got {action:?}"
+            );
+        }
+    }
+
+    /// `Ctrl+9` is `SwitchWorkspaceLast` — the LAST workspace, NOT workspace 9.
+    /// This is the Chrome convention documented in ADR-0012.
+    #[test]
+    fn r4_ctrl_9_is_switch_workspace_last_not_index_9() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("9"), 1);
+        assert_eq!(
+            action,
+            Some(KeybindAction::SwitchWorkspaceLast),
+            "Ctrl+9 must map to SwitchWorkspaceLast (Chrome convention), not index 9"
+        );
+        // Explicitly assert it is NOT SwitchWorkspaceByIndex(9).
+        assert_ne!(
+            action,
+            Some(KeybindAction::SwitchWorkspaceByIndex(9)),
+            "Ctrl+9 must NOT produce SwitchWorkspaceByIndex(9)"
+        );
+    }
+
+    /// `workspace_slug_by_index` returns the slug at the correct 1-based index.
+    /// Uses a live workspace-manager plugin, same as the workspace-list tests.
+    #[test]
+    fn r4_workspace_slug_by_index_is_1_based() {
+        use std::time::Duration;
+
+        use mote_audit::{AuditLog, Config};
+        use mote_storage::Store;
+        use mote_types::{IdentityId, SchemaVersion};
+
+        use crate::runtime::PluginHost;
+
+        const WS_SRC: &str = include_str!("../../../plugins/workspace-manager/init.lua");
+
+        let store = Store::open_in_memory().expect("in-memory store opens");
+        let config = Config {
+            ring_capacity: 256,
+            flush_threshold: 1,
+            flush_interval: Duration::from_millis(5),
+        };
+        let mut log = AuditLog::new(&store, config).expect("audit log starts");
+        let registry = mote_registry::Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+        let runtime = mote_runtime::Runtime::new(registry, store.clone(), log.producer());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut host =
+            PluginHost::boot_in(store, dir.path(), dir.path()).expect("host boots cleanly");
+        host.runtime = runtime;
+        let policy = mote_runtime::GrantAsRequested;
+        let identity = mote_runtime::IdentityContext::new(IdentityId::new(0));
+        host.runtime
+            .load(WS_SRC, identity, &policy)
+            .expect("workspace-manager loads cleanly");
+
+        // index 1 → "default" (the first built-in workspace).
+        let slug1 = workspace_slugs_from_host(&host).and_then(|s| s.into_iter().next());
+        assert_eq!(
+            slug1.as_deref(),
+            Some("default"),
+            "index 0 (1-based index 1) must be 'default'"
+        );
+
+        // index 2 → "work".
+        let slug2 = workspace_slugs_from_host(&host).and_then(|s| s.into_iter().nth(1));
+        assert_eq!(
+            slug2.as_deref(),
+            Some("work"),
+            "index 1 (1-based index 2) must be 'work'"
+        );
+
+        // index 3 → None (only 2 built-in workspaces).
+        let slug3 = workspace_slugs_from_host(&host).and_then(|s| s.into_iter().nth(2));
+        assert!(
+            slug3.is_none(),
+            "index 2 (1-based index 3) must be None (only 2 workspaces exist)"
+        );
+
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+
+    /// `workspace_slug_last` returns the last workspace slug (ADR-0012: `Ctrl+9`
+    /// switches to the last workspace, not the literal 9th). With 2 built-in
+    /// workspaces this must return "work".
+    #[test]
+    fn r4_workspace_slug_last_returns_final_workspace() {
+        use std::time::Duration;
+
+        use mote_audit::{AuditLog, Config};
+        use mote_storage::Store;
+        use mote_types::{IdentityId, SchemaVersion};
+
+        use crate::runtime::PluginHost;
+
+        const WS_SRC: &str = include_str!("../../../plugins/workspace-manager/init.lua");
+
+        let store = Store::open_in_memory().expect("in-memory store opens");
+        let config = Config {
+            ring_capacity: 256,
+            flush_threshold: 1,
+            flush_interval: Duration::from_millis(5),
+        };
+        let mut log = AuditLog::new(&store, config).expect("audit log starts");
+        let registry = mote_registry::Registry::load(SchemaVersion::V1).expect("v1 registry loads");
+        let runtime = mote_runtime::Runtime::new(registry, store.clone(), log.producer());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut host =
+            PluginHost::boot_in(store, dir.path(), dir.path()).expect("host boots cleanly");
+        host.runtime = runtime;
+        let policy = mote_runtime::GrantAsRequested;
+        let identity = mote_runtime::IdentityContext::new(IdentityId::new(0));
+        host.runtime
+            .load(WS_SRC, identity, &policy)
+            .expect("workspace-manager loads cleanly");
+
+        let slugs = workspace_slugs_from_host(&host).expect("workspace:provider is available");
+        let last = slugs.last().cloned();
+        assert_eq!(
+            last.as_deref(),
+            Some("work"),
+            "the last workspace must be 'work' (the 2nd built-in); \
+             Ctrl+9 navigates here, not to a literal 9th workspace"
+        );
+
+        log.shutdown().expect("audit log shuts down cleanly");
+    }
+
+    /// `close_window` op is registered in the op registry.
+    #[test]
+    fn r4_close_window_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"close_window"),
+            "close_window must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// Calling the `close_window` op enqueues `ShellCommand::CloseWindow`.
+    #[test]
+    fn r4_close_window_op_enqueues_command() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        push(&queue, ShellCommand::CloseWindow);
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::CloseWindow => {} // correct
+            other => panic!("expected CloseWindow; got {other:?}"),
+        }
+    }
+
+    /// `Esc` is classified as `DismissModal` — does not require Ctrl.
+    #[test]
+    fn r4_esc_dismisses_modal_without_modifiers() {
+        let esc = Key::Named(NamedKey::Escape);
+        assert_eq!(
+            classify_chord(Modifiers::NONE, &esc, 1),
+            Some(KeybindAction::DismissModal),
+        );
+        // Also works when Ctrl is held (e.g. accidental chord).
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &esc, 1),
+            Some(KeybindAction::DismissModal),
+        );
+    }
+
+    /// `Ctrl+Tab` is classified as `CycleTab`.
+    #[test]
+    fn r4_ctrl_tab_cycles_tabs() {
+        let tab = Key::Named(NamedKey::Tab);
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &tab, 2),
+            Some(KeybindAction::CycleTab),
+        );
+    }
+
+    /// Keys without Ctrl (and not Esc or Mod+Space) return `None`.
+    #[test]
+    fn r4_non_chord_keys_are_not_consumed() {
+        // Plain 't' with no modifiers must NOT be consumed (it's a typed char).
+        assert_eq!(classify_chord(Modifiers::NONE, &char_key("t"), 1), None);
+        // Alt+T is not in the chord table.
+        assert_eq!(classify_chord(Modifiers::ALT, &char_key("t"), 1), None);
+        // Plain Enter is not a chord.
+        assert_eq!(
+            classify_chord(Modifiers::NONE, &Key::Named(NamedKey::Enter), 1),
+            None
         );
     }
 }

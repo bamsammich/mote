@@ -913,10 +913,45 @@
     }
   }
 
+  // R4: wire the close-window button in the top-right of the header.
+  // Sends the `close_window` op to the shell, which sets `should_exit = true`
+  // and exits the event loop on the next tick.
+  function wireCloseWindowButton() {
+    var btn = document.querySelector(".close-window-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (window.mote && window.mote.invoke) {
+        window.mote.invoke("close_window", {}).catch(function () {});
+      }
+    });
+  }
+
+  // R4: handle the `focus_omnibox` applyOp pushed by `Ctrl+L`.
+  // Focuses the omnibox input and selects all existing text — the standard
+  // address-bar behavior. Chained via prevApplyOp so existing handlers are
+  // preserved.
+  function wireFocusOmniboxOp() {
+    var prevApplyOp =
+      typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
+
+    window.mote.applyOp = function (op, payload) {
+      if (op !== "focus_omnibox") {
+        if (prevApplyOp) prevApplyOp(op, payload);
+        return;
+      }
+      var input = document.getElementById("omnibox-input");
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    };
+  }
+
   function boot() {
     installInvoke();
     wireOmnibox();
     wireBookmarkToggle();
+    wireCloseWindowButton();
     wireNewTab();
     wireNewTabShortcut();
     // Chain the urlbar_suggestions applyOp handler after the base handler is
@@ -931,6 +966,9 @@
     // toggle + popover interaction.  Must run after all prior applyOp handlers
     // are chained so the prevApplyOp capture is complete.
     wireWorkspaceStrip();
+    // R4: chain the focus_omnibox applyOp handler (Ctrl+L). Must run after
+    // wireOmnibox installs the initial applyOp so prevApplyOp is defined.
+    wireFocusOmniboxOp();
   }
 
   if (document.readyState === "loading") {
