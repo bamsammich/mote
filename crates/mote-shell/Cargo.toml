@@ -51,6 +51,8 @@ serde = { version = "1.0", features = ["derive"] }
 # Proper, object-anchored JSON parsing of the chrome bootstrap's op `params`
 # (replaces the hand-rolled first-substring field extractors). Crate-local dep.
 serde_json = "1.0"
+# System clipboard (R2: copy_active_url op writes the active tab's URL).
+arboard = { workspace = true }
 
 [dev-dependencies]
 # Tempdirs for headless PluginHost boot tests (config/cache dirs + path plugins).

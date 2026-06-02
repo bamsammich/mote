@@ -25,7 +25,7 @@ use cef::{
 use crate::bridge;
 use crate::error::{CefError, Result};
 pub use crate::ffi::PopupTabRequest;
-use crate::ffi::{self, FrameSlot, NavState, PopupTabQueue, TitleSlot, ViewSize};
+use crate::ffi::{self, FrameSlot, NavState, PopupTabQueue, TitleSlot, UrlSlot, ViewSize};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
@@ -113,6 +113,11 @@ pub struct Page {
     nav: NavState,
     /// The latest document title CEF reported via `DisplayHandler::on_title_change`.
     title: TitleSlot,
+    /// The latest committed main-frame URL CEF reported via
+    /// `DisplayHandler::on_address_change`. `None` until the first navigation
+    /// commits. The shell polls this each tick via `sync_active_url` to mirror
+    /// navigation into the omnibox and the session tab URL field.
+    url: UrlSlot,
     /// The shared OSR viewport size CEF reads via `view_rect`. Updated by
     /// [`Page::notify_resized`], which then asks CEF to re-query and re-paint.
     size: ViewSize,
@@ -206,7 +211,7 @@ impl Page {
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
-        let (client, frame, nav, title, size, popups) =
+        let (client, frame, nav, title, url_slot, size, popups) =
             ffi::build_client(size, interceptor, options.role);
         // Chrome pages are transparent so the composited page shows through;
         // content pages are opaque.
@@ -218,6 +223,7 @@ impl Page {
             frame,
             nav,
             title,
+            url: url_slot,
             size,
             role: options.role,
             popups,
@@ -253,6 +259,18 @@ impl Page {
     #[must_use]
     pub fn title(&self) -> Option<String> {
         self.title.get()
+    }
+
+    /// The most recently committed main-frame URL, as reported by CEF's
+    /// `DisplayHandler::on_address_change`.
+    ///
+    /// `None` until the first navigation commits (CEF fires `on_address_change`
+    /// after the URL changes, so it lags the `load_url` call by at least one
+    /// message-loop pump). The shell polls this each tick via `sync_active_url`
+    /// to mirror navigation into the omnibox after link-clicks inside a page.
+    #[must_use]
+    pub fn current_url(&self) -> Option<String> {
+        self.url.get()
     }
 
     /// Drain all pending popup-tab requests queued by CEF's `on_before_popup`
@@ -568,7 +586,7 @@ impl ChromePageRequest {
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav, title, size, popups) =
+        let (inner, frame, nav, title, url_slot, size, popups) =
             ffi::build_client(size, Arc::new(AllowAll), PageRole::Chrome);
         let client = bridge::chrome_client(inner, router);
         // The chrome browser is always transparent (the page composites through
@@ -585,6 +603,7 @@ impl ChromePageRequest {
             frame,
             nav,
             title,
+            url: url_slot,
             size,
             role: PageRole::Chrome,
             popups,

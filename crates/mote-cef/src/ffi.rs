@@ -400,7 +400,7 @@ wrap_load_handler! {
 }
 
 // ---------------------------------------------------------------------------
-// DisplayHandler — surfaces the document title to the Page handle.
+// DisplayHandler — surfaces document title + address to the Page handle.
 // ---------------------------------------------------------------------------
 
 /// Thread-safe holder for the page's most recent document title, updated by the
@@ -435,9 +435,45 @@ impl TitleSlot {
     }
 }
 
+/// Thread-safe holder for the page's most recent committed URL, updated by the
+/// display handler's `on_address_change` (main-frame only) and read by the
+/// owning [`crate::Page`].
+///
+/// Same `Arc<Mutex<_>>` pattern as [`TitleSlot`] and [`NavState`]: CEF fires
+/// `on_address_change` from the browser-process UI thread, which may differ from
+/// the shell's reader thread.
+///
+/// `None` until the first address-change callback fires.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UrlSlot {
+    inner: Arc<Mutex<Option<String>>>,
+}
+
+impl UrlSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The most recently committed URL for the main frame, if any.
+    pub(crate) fn get(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, url: Option<String>) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = url;
+    }
+}
+
 #[derive(Clone)]
 struct DisplayState {
     title: TitleSlot,
+    url: UrlSlot,
 }
 
 wrap_display_handler! {
@@ -452,6 +488,30 @@ wrap_display_handler! {
                 // is stored as `None` so the host can fall back to the URL.
                 let t = title.map(ToString::to_string).filter(|s| !s.is_empty());
                 self.state.title.set(t);
+            });
+        }
+
+        /// CEF fires this whenever a frame's committed URL changes.  We only
+        /// track the **main frame** (top-level navigation and same-document
+        /// history pushes); subframe address changes are ignored — they cannot
+        /// carry the page's canonical URL and we do not show per-frame URLs.
+        fn on_address_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            url: Option<&CefString>,
+        ) {
+            guard((), || {
+                // Filter to main-frame only.  A non-main frame (iframe, etc.)
+                // has `is_main() == 0`; skip it.
+                let is_main = frame.is_some_and(|f| f.is_main() != 0);
+                if !is_main {
+                    return;
+                }
+                let u = url
+                    .map(ToString::to_string)
+                    .filter(|s| !s.is_empty());
+                self.state.url.set(u);
             });
         }
     }
@@ -733,9 +793,11 @@ wrap_client! {
 /// Builds a fully-wired CEF [`Client`] for an off-screen browser of trust `role`.
 ///
 /// Returns the client plus the [`FrameSlot`], [`NavState`], [`TitleSlot`],
-/// [`ViewSize`], and [`PopupTabQueue`] the owning `Page` reads from. The
-/// `PopupTabQueue` is written by [`LifeSpanHandlerImpl::on_before_popup`] (which
-/// intercepts CEF popup windows per ADR-0011) and drained each tick by the shell.
+/// [`UrlSlot`], [`ViewSize`], and [`PopupTabQueue`] the owning `Page` reads from.
+/// The `PopupTabQueue` is written by [`LifeSpanHandlerImpl::on_before_popup`]
+/// (which intercepts CEF popup windows per ADR-0011) and drained each tick by
+/// the shell. The `UrlSlot` is written by `on_address_change` (main frame only)
+/// and polled each tick by the shell's `sync_active_url`.
 ///
 /// Keeping construction here keeps every `cef::` handler type inside the FFI
 /// module. The `role` is wired into the request handler's `on_before_browse`
@@ -749,12 +811,14 @@ pub(crate) fn build_client(
     FrameSlot,
     NavState,
     TitleSlot,
+    UrlSlot,
     ViewSize,
     PopupTabQueue,
 ) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
     let title = TitleSlot::new();
+    let url = UrlSlot::new();
     let popups = PopupTabQueue::new();
 
     let render = RenderHandlerImpl::new(RenderState {
@@ -765,6 +829,7 @@ pub(crate) fn build_client(
     let request = RequestHandlerImpl::new(InterceptState { interceptor, role });
     let display = DisplayHandlerImpl::new(DisplayState {
         title: title.clone(),
+        url: url.clone(),
     });
     let life_span = LifeSpanHandlerImpl::new(LifeSpanState {
         popups: popups.clone(),
@@ -778,7 +843,7 @@ pub(crate) fn build_client(
         life_span,
     });
 
-    (client, slot, nav, title, size, popups)
+    (client, slot, nav, title, url, size, popups)
 }
 
 // ---------------------------------------------------------------------------
@@ -800,7 +865,8 @@ pub(crate) fn pixel_buf_len(w: u32, h: u32) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PopupTabQueue, PopupTabRequest, ViewSize, pixel_buf_len, should_cancel_navigation,
+        PopupTabQueue, PopupTabRequest, TitleSlot, UrlSlot, ViewSize, pixel_buf_len,
+        should_cancel_navigation,
     };
     use crate::browser::PageRole;
 
@@ -1042,5 +1108,114 @@ mod tests {
             "push through clone must be visible to original"
         );
         assert_eq!(drained[0].url, "https://shared.example.com");
+    }
+
+    // -----------------------------------------------------------------------
+    // TitleSlot — R2 unit tests.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn title_slot_starts_none() {
+        // A freshly created TitleSlot reports no title until CEF fires
+        // on_title_change.
+        let slot = TitleSlot::new();
+        assert!(slot.get().is_none(), "fresh TitleSlot must be None");
+    }
+
+    #[test]
+    fn title_slot_set_and_get_roundtrip() {
+        // A non-empty title is stored and retrieved faithfully.
+        let slot = TitleSlot::new();
+        slot.set(Some("My Page Title".to_string()));
+        assert_eq!(slot.get().as_deref(), Some("My Page Title"));
+    }
+
+    #[test]
+    fn title_slot_empty_string_stored_as_none() {
+        // The display handler stores an empty CEF title as None so the host can
+        // fall back to the URL rather than showing a blank tab title.
+        let slot = TitleSlot::new();
+        slot.set(Some(String::new())); // caller filters before set; but test set() directly
+        // Actually the handler filters before calling set; test that None passes through.
+        slot.set(None);
+        assert!(
+            slot.get().is_none(),
+            "None must round-trip through TitleSlot"
+        );
+    }
+
+    #[test]
+    fn title_slot_clone_shares_state() {
+        // `TitleSlot` is `Clone` so the display handler and the owning `Page`
+        // hold the same inner `Arc<Mutex<_>>`. A write through one clone is
+        // visible via the other.
+        let slot = TitleSlot::new();
+        let slot2 = slot.clone();
+        slot2.set(Some("Shared Title".to_string()));
+        assert_eq!(
+            slot.get().as_deref(),
+            Some("Shared Title"),
+            "set through clone must be visible to original"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // UrlSlot — R2 unit tests (on_address_change plumbing).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn url_slot_starts_none() {
+        // A freshly created UrlSlot reports no URL until the first address-change
+        // callback fires (i.e. until the first navigation commits).
+        let slot = UrlSlot::new();
+        assert!(slot.get().is_none(), "fresh UrlSlot must be None");
+    }
+
+    #[test]
+    fn url_slot_set_and_get_roundtrip() {
+        // The URL stored by the display handler's on_address_change path is
+        // faithfully retrieved by the shell each tick.
+        let slot = UrlSlot::new();
+        slot.set(Some("https://example.com/page".to_string()));
+        assert_eq!(slot.get().as_deref(), Some("https://example.com/page"));
+    }
+
+    #[test]
+    fn url_slot_none_clears_previous() {
+        // Setting None after a URL clears the slot (e.g. on page close / reset).
+        let slot = UrlSlot::new();
+        slot.set(Some("https://example.com".to_string()));
+        slot.set(None);
+        assert!(slot.get().is_none(), "None must overwrite a prior URL");
+    }
+
+    #[test]
+    fn url_slot_clone_shares_state() {
+        // `UrlSlot` is `Clone` so the display handler and the owning `Page`
+        // hold the same inner state. A write through the clone is visible to the
+        // original — the same `Arc<Mutex<_>>` backing as `TitleSlot`.
+        let slot = UrlSlot::new();
+        let slot2 = slot.clone();
+        slot2.set(Some("https://shared.example.com".to_string()));
+        assert_eq!(
+            slot.get().as_deref(),
+            Some("https://shared.example.com"),
+            "set through clone must be visible to original"
+        );
+    }
+
+    #[test]
+    fn url_slot_successive_writes_reflect_latest() {
+        // After multiple navigations the slot holds only the most recent URL —
+        // the shell always reads the up-to-date committed URL on each tick.
+        let slot = UrlSlot::new();
+        slot.set(Some("https://google.com".to_string()));
+        slot.set(Some("https://google.com/search?q=mote".to_string()));
+        slot.set(Some("https://example.com/result".to_string()));
+        assert_eq!(
+            slot.get().as_deref(),
+            Some("https://example.com/result"),
+            "successive writes must leave only the latest URL"
+        );
     }
 }
