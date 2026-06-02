@@ -512,6 +512,25 @@ fn housekeeping_interval() -> Duration {
     env_secs(HOUSEKEEPING_ENV).unwrap_or(HOUSEKEEPING_INTERVAL)
 }
 
+/// Whether a popup URL is allowed to create a new in-window tab.
+///
+/// The S1 navigation guard (`RequestHandlerImpl::on_before_browse`) cancels
+/// any top-level `mote://` navigation on a `PageRole::Content` page. If we
+/// create a tab and then have its initial load cancelled, the tab persists in
+/// the sidebar at a broken URL — a phantom tab the user can't dismiss
+/// meaningfully. Pre-filter `mote://` popups before tab creation so the guard
+/// never has to fire on a popup-shaped path.
+///
+/// URL schemes are case-insensitive per RFC 3986; CEF normalises to lowercase
+/// before invoking `on_before_popup`, but defensively lowercase-compare the
+/// scheme prefix here.
+fn is_popup_url_allowed(url: &str) -> bool {
+    let scheme_lower = url
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    !matches!(scheme_lower.as_deref(), Some("mote"))
+}
+
 /// The reverse-DNS application identifier used for the window's Wayland `app_id`
 /// / X11 `WM_CLASS`. Compositors key window rules, icons, and taskbar grouping
 /// off this; leaving it empty makes Mote an unidentified window.
@@ -748,8 +767,15 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
             )
         })
         // R2: copy the active tab's URL to the system clipboard.
-        // Capability gate for plugins: `read-tabs` (chrome origin is privileged
-        // and implicitly trusted; the gate applies when a plugin routes here).
+        //
+        // This op is callable ONLY from `mote://chrome` JS via the host-bridge
+        // origin gate (ADR-0005); the plugin host API (`mote-runtime::hostapi`)
+        // does not expose `mote.invoke(op, params)` to Lua, so plugins cannot
+        // reach this code path. If a future change exposes ops to plugins, this
+        // op MUST gain a `read-tabs` capability check at that boundary — the
+        // gate doesn't exist here because there's no plugin-reachable path to
+        // gate today, not because chrome is somehow exempt.
+        //
         // The clipboard write is host-side (arboard); nothing leaves via JS.
         .register("copy_active_url", move |_params: &str| {
             push(&copy_url_queue, ShellCommand::CopyActiveUrl);
@@ -1015,13 +1041,18 @@ impl ShellApp {
     /// `target=_blank` clicks); non-gesture → background (reduces focus-stealing
     /// from JS-initiated popups).
     fn drain_popup_tabs(&mut self) {
-        // Collect requests from all live tabs. We need to own the vec before
-        // calling `open_popup_tab` (which mutably borrows `self`).
+        // Collect requests from all live tabs AND the chrome page. We need to
+        // own the vec before calling `open_popup_tab` (which mutably borrows
+        // `self`). Draining the chrome page's queue too prevents an unbounded
+        // VecDeque growth if chrome JS ever legitimately calls `window.open(...)`
+        // (currently it doesn't, but the queue exists on every `Page` and a
+        // chrome-side popup would otherwise leak indefinitely).
         let requests: Vec<PopupTabRequest> = self
             .tabs
             .iter()
             .filter_map(|t| t.page.as_ref())
             .flat_map(Page::drain_popup_requests)
+            .chain(self.bridge.page().drain_popup_requests())
             .collect();
         for req in requests {
             self.open_popup_tab(&req.url, req.user_gesture);
@@ -1726,6 +1757,16 @@ impl ShellApp {
     /// but the active index stays on the current tab, reducing focus-stealing
     /// from ad windows and OAuth redirects.
     fn open_popup_tab(&mut self, url: &str, foreground: bool) {
+        // Pre-filter URLs the S1 navigation guard would block. Without this,
+        // we'd create a tab and add it to the session, then have CEF's
+        // `on_before_browse` cancel the load (Content-role pages cannot
+        // navigate to `mote://`), leaving a phantom tab in the sidebar with
+        // a broken URL. Drop the request silently — content pages calling
+        // `window.open('mote://...')` is malicious-shaped, not legitimate.
+        if !is_popup_url_allowed(url) {
+            eprintln!("mote-shell: dropped popup with disallowed scheme: {url}");
+            return;
+        }
         let url = url.to_string();
         let id = self.session.add_tab(url.clone(), self.workspace);
         let page = match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
@@ -4308,6 +4349,37 @@ mod tests {
             request.user_gesture,
             "gesture=true must pass foreground=true to open_popup_tab"
         );
+    }
+
+    /// `is_popup_url_allowed` rejects `mote://` URLs (S1 navigation guard would
+    /// cancel the load on a Content-role page, leaving a phantom tab). All other
+    /// schemes the content engine can navigate to are passed through.
+    ///
+    /// Covers the security-review INFO-3 finding: phantom tab on
+    /// `window.open('mote://chrome/...')`.
+    #[test]
+    fn popup_url_allowed_rejects_mote_scheme() {
+        // mote:// is reserved for trusted shell-loaded surfaces; content pages
+        // cannot navigate to it (S1 guard). Pre-filter before tab creation.
+        assert!(!is_popup_url_allowed("mote://chrome/index.html"));
+        assert!(!is_popup_url_allowed("mote://overlay/picker.html"));
+        // Case-insensitive scheme matching (RFC 3986).
+        assert!(!is_popup_url_allowed("MOTE://chrome/index.html"));
+        assert!(!is_popup_url_allowed("Mote://chrome/index.html"));
+
+        // Schemes the popup pipeline legitimately handles:
+        assert!(is_popup_url_allowed("https://example.com/"));
+        assert!(is_popup_url_allowed("http://example.com/"));
+        assert!(is_popup_url_allowed("data:text/html,<p>hi</p>"));
+        // file:// and javascript: are blocked by Chromium itself, not the S1
+        // guard, so they do NOT create a phantom tab — let them through and
+        // rely on Chromium's policy to do the right thing.
+        assert!(is_popup_url_allowed("file:///etc/passwd"));
+        assert!(is_popup_url_allowed("javascript:alert(1)"));
+        // No-scheme URLs (relative, malformed) — let CEF handle them; not our
+        // job to second-guess the URL parser.
+        assert!(is_popup_url_allowed("foobar"));
+        assert!(is_popup_url_allowed(""));
     }
 
     /// A JS-initiated popup request (`user_gesture=false`) maps to `foreground=false`
