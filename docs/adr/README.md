@@ -2,7 +2,7 @@
 
 This directory contains Architectural Decision Records (ADRs) for the Mote project, written in [MADR](https://adr.github.io/madr/) format.
 
-ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADR-0012 is **Accepted** (approved by the maintainer 2026-06-02).
+ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0014 are **Accepted** (approved by the maintainer 2026-06-02).
 
 ## Index
 
@@ -20,6 +20,8 @@ ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 
 | [0010](0010-collector-dispatch-deadline-budgeting.md) | Collector Dispatch: Runtime Semantics and Deadline Budgeting for Provider Contribution Surfaces | Accepted |
 | [0011](0011-popup-behavior-in-window-tab.md) | Popup Behavior: In-Window Tab + User-Gesture Activation + Opt-Out Path | Accepted |
 | [0012](0012-browser-keybind-suite.md) | Browser-Keybind Suite: Chord Table, Scope Rules, Contextual `⌘W`, and Plugin-Keybind Closure for v0.1 | Accepted |
+| [0013](0013-themable-icon-contract.md) | Themable Icon Contract: `theme.icons.<action>` Mapping + `theme:set_icon` API | Accepted |
+| [0014](0014-rail-as-plugin-declarable-slot.md) | Rail as a Plugin-Declarable Slot: Isolation Boundary, Declaration Model, Collision Policy | Accepted |
 
 ## Numbering convention
 
