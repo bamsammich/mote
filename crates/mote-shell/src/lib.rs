@@ -76,7 +76,9 @@ use mote_runtime::{HostValue, host_to_json};
 use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
 use mote_storage::Store;
 use mote_types::{TabId, WorkspaceId};
-use mote_ui::{ApprovalRequest, Compositor, IntegrityPanel, PixelFormat, ViewportRect};
+use mote_ui::{
+    ApprovalRequest, Compositor, CompositorError, IntegrityPanel, PixelFormat, ViewportRect,
+};
 
 use crate::picker::{PickerEntry, PickerState};
 use winit::application::ApplicationHandler;
@@ -2401,21 +2403,24 @@ impl ShellApp {
     }
 
     /// React to a DPI scale-factor change: recompute the (logical-pixel) chrome
-    /// insets at the new scale and resize the active page's surface to the new
-    /// physical viewport (high-DPI, plan §1.3).
+    /// insets at the new scale and resize ALL live pages to the new physical
+    /// viewport (high-DPI, plan §1.3; R1: previously only the active page was
+    /// notified, leaving inactive tabs at the old scale after a monitor change).
     fn on_scale_factor_changed(&mut self, scale: f64) {
         self.scale_factor = scale;
         let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
-        if let Some(page) = self.active_page() {
-            page.notify_resized(vw, vh, scale);
-        }
+        self.notify_all_pages_of_size_change(self.width, self.height, vw, vh, scale);
         self.content_paints = 0;
     }
 
-    /// Resize: reconfigure the surface, tell the chrome + active page their new
-    /// sizes, and force a re-upload.
+    /// Resize: reconfigure the surface, tell **all** live pages their new sizes,
+    /// and force a re-upload.
+    ///
+    /// Called on `WindowEvent::Resized`, and also on `Focused(true)` / `Occluded(false)`
+    /// after a workspace bounce where Hyprland does not always emit `Resized` even
+    /// though the Xwayland surface was reconfigured (R1 fix).
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -2426,22 +2431,68 @@ impl ShellApp {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.resize(size.width, size.height);
         }
-        self.bridge
-            .page()
-            .notify_resized(size.width, size.height, scale);
-        // The integrity overlay (if live) is full-window like the chrome.
-        if let Some(page) = self.integrity_page.as_ref() {
-            page.notify_resized(size.width, size.height, scale);
-        }
-        // The picker overlay (if live) is full-window like the chrome too.
-        if let Some(page) = self.picker_page.as_ref() {
-            page.notify_resized(size.width, size.height, scale);
-        }
         let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
-        if let Some(page) = self.active_page() {
-            page.notify_resized(vw, vh, scale);
+        self.notify_all_pages_of_size_change(size.width, size.height, vw, vh, scale);
+    }
+
+    /// Fan out a window-size change to every live page.
+    ///
+    /// Full-window surfaces (chrome, overlays) receive the window dimensions;
+    /// content pages receive the viewport dimensions. All inactive tab pages are
+    /// included — not just the active one — so a tab switch post-resize shows the
+    /// correct layout (R1 fix; previously only the active page was notified).
+    ///
+    /// `win_w / win_h`: physical window pixels (chrome and overlays).
+    /// `vp_w / vp_h`: physical viewport pixels (content pages).
+    /// `scale`: device scale factor.
+    fn notify_all_pages_of_size_change(
+        &self,
+        win_w: u32,
+        win_h: u32,
+        vp_w: u32,
+        vp_h: u32,
+        scale: f64,
+    ) {
+        // Chrome page (full-window).
+        self.bridge.page().notify_resized(win_w, win_h, scale);
+        // Integrity overlay (full-window, if live).
+        if let Some(page) = self.integrity_page.as_ref() {
+            page.notify_resized(win_w, win_h, scale);
+        }
+        // Picker overlay (full-window, if live).
+        if let Some(page) = self.picker_page.as_ref() {
+            page.notify_resized(win_w, win_h, scale);
+        }
+        // All tab content pages — active AND inactive (viewport-sized).
+        for tab in &self.tabs {
+            if let Some(page) = tab.page.as_ref() {
+                page.notify_resized(vp_w, vp_h, scale);
+            }
+        }
+    }
+
+    /// Re-query the window's physical size and drive a resize cascade.
+    ///
+    /// Called when `Focused(true)` or `Occluded(false)` fires after a workspace
+    /// bounce.  Hyprland does not always deliver `WindowEvent::Resized` for
+    /// hide-then-re-show transitions (the window returns to the same geometry, so
+    /// no geometry delta is reported), but the Xwayland surface may have been
+    /// recycled by the compositor.  Calling `handle_resize` here:
+    /// 1. Reconfigures the wgpu surface (via `compositor.resize`), recovering from
+    ///    an `Outdated`/`Lost` state the previous render cycle left it in.
+    /// 2. Re-notifies every live CEF page (`was_resized` + `notify_screen_info_changed`),
+    ///    which flushes new paint callbacks even when dimensions are unchanged.
+    fn on_window_shown(&mut self) {
+        if let Some(window) = self.window.clone() {
+            let size = window.inner_size();
+            self.handle_resize(size);
+            // Reset both paint counters so the very next frames produced by the
+            // CEF repaint are uploaded unconditionally (not skipped as "already
+            // seen at this count").
+            self.chrome_paints = 0;
+            self.content_paints = 0;
         }
     }
 
@@ -2811,6 +2862,14 @@ impl ApplicationHandler for ShellApp {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.on_scale_factor_changed(scale_factor);
             }
+            // R1 fix: when the window is re-shown after a workspace bounce,
+            // Hyprland/winit may not deliver `Resized` (the geometry is
+            // unchanged), but the Xwayland surface is recycled.  Re-querying
+            // the actual window size and calling `handle_resize` reconfigures
+            // the wgpu surface and flushes new CEF paints.
+            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+                self.on_window_shown();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (cursor_px(position.x), cursor_px(position.y));
                 self.route_mouse_move();
@@ -2830,10 +2889,22 @@ impl ApplicationHandler for ShellApp {
                 self.route_key(&event);
             }
             WindowEvent::RedrawRequested => {
-                if let Some(compositor) = self.compositor.as_mut()
-                    && let Err(e) = compositor.render()
-                {
-                    eprintln!("mote-shell: render failed: {e}");
+                if let Some(compositor) = self.compositor.as_mut() {
+                    match compositor.render() {
+                        // Surface recycled (Xwayland workspace bounce).
+                        // Reconfigure so the next render attempt can succeed.
+                        Err(CompositorError::SurfaceOutdated) => {
+                            if let Some(compositor) = self.compositor.as_mut() {
+                                compositor.resize(self.width, self.height);
+                            }
+                        }
+                        Ok(())
+                        // Occluded = window hidden (other workspace); skip silently.
+                        | Err(CompositorError::AcquireFrame("occluded")) => {}
+                        Err(e) => {
+                            eprintln!("mote-shell: render failed: {e}");
+                        }
+                    }
                 }
             }
             _ => {}
@@ -3360,6 +3431,55 @@ mod tests {
         assert_eq!(w, 1280 - VIEWPORT_LEFT);
         assert_eq!(h, 800 - VIEWPORT_TOP);
         assert_eq!(viewport_size(0, 0, VIEWPORT_LEFT, VIEWPORT_TOP), (1, 1));
+    }
+
+    // ── R1 resize-cascade coverage ────────────────────────────────────────────
+    //
+    // `notify_all_pages_of_size_change` touches live CEF `Page` objects which
+    // require an active engine; we cannot instantiate `ShellApp` in a unit test.
+    // The closest testable seam is the size-arithmetic that determines what each
+    // page class receives: chrome + overlays get the window dims, content pages
+    // get the viewport dims (window minus scaled insets).  These tests pin that
+    // arithmetic for a 1859×2098 window at 1.25× scale — the exact geometry
+    // observed in the diagnostic log — so a regression in the inset computation
+    // would immediately surface here.
+
+    /// At the repro geometry (1859×2098, scale 1.25) the content pages must
+    /// receive a viewport that is narrower by exactly the scaled left inset and
+    /// shorter by exactly the scaled top inset.
+    #[test]
+    fn r1_fanout_content_size_at_repro_geometry() {
+        let win_w = 1859_u32;
+        let win_h = 2098_u32;
+        let scale = 1.25_f64;
+        let left = scale_inset(VIEWPORT_LEFT, scale);
+        let top = scale_inset(VIEWPORT_TOP, scale);
+        let (vw, vh) = viewport_size(win_w, win_h, left, top);
+        // Chrome / overlays → full window.
+        assert_eq!((win_w, win_h), (1859, 2098));
+        // Content pages → window minus scaled insets.
+        assert_eq!(left, 395, "VIEWPORT_LEFT={VIEWPORT_LEFT} × 1.25 = 395");
+        assert_eq!(top, 55, "VIEWPORT_TOP={VIEWPORT_TOP} × 1.25 = 55");
+        assert_eq!(
+            vw,
+            1859 - 395,
+            "content width must exclude scaled left inset"
+        );
+        assert_eq!(
+            vh,
+            2098 - 55,
+            "content height must exclude scaled top inset"
+        );
+    }
+
+    /// The size-zero guard in `handle_resize` prevents a zero-dim configure.
+    #[test]
+    fn r1_zero_size_guard_prevents_zero_dim_viewport() {
+        // viewport_size clamps to 1 so CEF never sees a 0-dim view_rect.
+        assert_eq!(viewport_size(0, 0, VIEWPORT_LEFT, VIEWPORT_TOP), (1, 1));
+        // A window exactly as wide as the inset leaves 1px for content.
+        let (vw, _) = viewport_size(VIEWPORT_LEFT, 800, VIEWPORT_LEFT, VIEWPORT_TOP);
+        assert_eq!(vw, 1, "saturating_sub + clamp-to-1 must produce 1");
     }
 
     #[test]

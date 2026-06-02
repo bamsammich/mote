@@ -121,9 +121,15 @@ pub enum CompositorError {
         /// Declared height.
         height: u32,
     },
-    /// Acquiring the next surface frame failed (timeout, lost, outdated, ...).
+    /// Acquiring the next surface frame failed (timeout, ...).
     #[error("failed to acquire surface frame: {0}")]
     AcquireFrame(&'static str),
+    /// The wgpu surface is outdated or lost (e.g. after a workspace bounce
+    /// recycles the Xwayland surface).  The caller should call
+    /// [`Compositor::resize`] with the current window dimensions to reconfigure
+    /// the surface before retrying [`Compositor::render`].
+    #[error("wgpu surface is outdated or lost; reconfigure needed")]
+    SurfaceOutdated,
     /// Reading back the offscreen target failed.
     #[error("failed to map offscreen readback buffer")]
     Readback,
@@ -509,13 +515,13 @@ impl Compositor {
                 return Err(CompositorError::AcquireFrame("timeout"));
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                // Window is hidden (e.g. on another workspace); skip silently.
                 return Err(CompositorError::AcquireFrame("occluded"));
             }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                return Err(CompositorError::AcquireFrame("outdated"));
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(CompositorError::AcquireFrame("lost"));
+            // Surface was recycled (Xwayland workspace transition).  Signal the
+            // caller to reconfigure via `resize()` before retrying.
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(CompositorError::SurfaceOutdated);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err(CompositorError::AcquireFrame("validation"));
