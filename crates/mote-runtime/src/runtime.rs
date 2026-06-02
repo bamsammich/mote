@@ -35,7 +35,9 @@ use mote_dispatch::{
     BroadcastOutcome, DispatchEngine, FilterChainOutcome, HookType, KeybindOutcome, NullAudit,
     Registration,
 };
-use mote_lua::{IdentityScope as ManifestIdentityScope, LoadedPlugin, Manifest, load_plugin};
+use mote_lua::{
+    IdentityScope as ManifestIdentityScope, LoadedPlugin, Manifest, RailBinding, load_plugin,
+};
 use mote_permissions::{EffectiveGrants, GrantSet, GrantSetGatekeeper, Permission};
 use mote_registry::{EventDispatch, Registry};
 use mote_secrets::{SecretProviderRouter, SecretResolver};
@@ -388,6 +390,9 @@ impl Runtime {
 
         // --- Step 3: contract conformance -------------------------------------
         self.registry.check_conformance(&loaded)?;
+        // Step 3 also covers rail binding validation (ADR-0014): icon format
+        // (ADR-0013) and capability subset checks happen here, before approval.
+        Self::validate_rail_bindings(loaded.rail_bindings(), &manifest)?;
 
         // --- Step 4: permission approval --------------------------------------
         let effective = Self::approve(&manifest, policy)?;
@@ -486,6 +491,8 @@ impl Runtime {
         self.registry
             .check_conformance(&loaded)
             .map_err(LoadError::from)?;
+        Self::validate_rail_bindings(loaded.rail_bindings(), &manifest)
+            .map_err(LifecycleError::Load)?;
         let effective = Self::approve(&manifest, policy).map_err(LifecycleError::Load)?;
         self.commit(&loaded, manifest, identity, &effective)
             .map_err(LifecycleError::Load)
@@ -529,6 +536,57 @@ impl Runtime {
     }
 
     // --- pipeline helpers ----------------------------------------------------
+
+    /// Step-3 rail binding validation (ADR-0014).
+    ///
+    /// Checks two things per rail entry:
+    /// 1. The `icon` field is a valid ADR-0013 source string: `"lucide:<name>"`
+    ///    where `<name>` is in the set of icons bundled in the Lucide sprite. This
+    ///    mirrors the `IconRegistry` check in `mote-ui` without importing that
+    ///    crate (which carries a wgpu dependency). The bundled name list here MUST
+    ///    be kept in sync with `mote-ui::icon_registry::BUNDLED_LUCIDE_NAMES`.
+    /// 2. Every capability declared in the rail binding's `capabilities` array is
+    ///    also declared in the plugin's manifest `capabilities` list (a subset).
+    ///
+    /// On success, emits a deferral log message for each binding (ADR-0014 §v0.1
+    /// scope): the binding is accepted but not rendered in v0.1.
+    fn validate_rail_bindings(
+        bindings: &[RailBinding],
+        manifest: &Manifest,
+    ) -> Result<(), LoadError> {
+        for (idx, binding) in bindings.iter().enumerate() {
+            let index = idx + 1; // 1-based for error messages
+
+            // --- 1. Icon format check (ADR-0013) ---
+            validate_rail_icon(&binding.icon, index)?;
+
+            // --- 2. Capabilities subset check (ADR-0014) ---
+            for cap in &binding.capabilities {
+                if !manifest.capabilities.contains(cap) {
+                    return Err(LoadError::RailBinding {
+                        index,
+                        reason: format!(
+                            "icon slot `{}` requires capability `{cap}` which is not declared \
+                             in the plugin's manifest capabilities",
+                            binding.slot_id
+                        ),
+                    });
+                }
+            }
+
+            // --- Deferral log: accepted but not rendered in v0.1 ---
+            // ADR-0014 §v0.1 scope: "Plugin authors get a real head start; the
+            // project gets manifest-validation test coverage early; the schema is
+            // concrete and testable."
+            log::info!(
+                "mote-shell: plugin `{}` declared rail binding `{}` \
+                 (accepted; rendering deferred to a future Mote version)",
+                manifest.name.as_str(),
+                binding.slot_id
+            );
+        }
+        Ok(())
+    }
 
     /// Step-1 dangling-consumer resolution (DESIGN §Resolution at load time).
     fn resolve_consumes(&self, manifest: &Manifest) -> Result<(), LoadError> {
@@ -772,6 +830,61 @@ fn run_setup(module: &mote_lua::Table) -> Result<(), String> {
     if let mote_lua::Value::Function(f) = setup {
         f.call::<()>(()).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Validates an ADR-0013 icon source string for a rail binding entry.
+///
+/// Accepts only `"lucide:<name>"` where `<name>` is a name bundled in the
+/// Lucide sprite (`chrome/assets/lucide-sprite.svg`). This list mirrors
+/// `mote_ui::icon_registry::BUNDLED_LUCIDE_NAMES` and must be kept in sync
+/// with that constant and the sprite file.
+fn validate_rail_icon(icon: &str, index: usize) -> Result<(), LoadError> {
+    // --- v0.1 bundled Lucide names (mirrors mote-ui icon_registry) ---
+    const BUNDLED: &[&str] = &[
+        "arrow-left",
+        "arrow-right",
+        "bookmark",
+        "circle-plus",
+        "clock",
+        "layers",
+        "lock",
+        "panel-left-close",
+        "plus",
+        "rotate-cw",
+        "rss",
+        "settings",
+        "triangle-alert",
+        "x",
+    ];
+
+    let Some((pack, name)) = icon.split_once(':') else {
+        return Err(LoadError::RailBinding {
+            index,
+            reason: format!(
+                "icon `{icon}` is not in `<pack>:<name>` format; expected e.g. `lucide:rss`"
+            ),
+        });
+    };
+
+    if pack != "lucide" {
+        return Err(LoadError::RailBinding {
+            index,
+            reason: format!("unknown icon pack `{pack}` in `{icon}`; registered packs: lucide"),
+        });
+    }
+
+    if !BUNDLED.contains(&name) {
+        return Err(LoadError::RailBinding {
+            index,
+            reason: format!(
+                "unknown lucide icon `{name}` in `{icon}`; \
+                 valid names: {}",
+                BUNDLED.join(", ")
+            ),
+        });
+    }
+
     Ok(())
 }
 

@@ -1,0 +1,73 @@
+/*
+ * tooltip.css — the P1 tooltip primitive. Per the polish-phase design doc §P1
+ * and cross-cutting principle 1 ("every visible element does something").
+ *
+ * Activation: add `data-tooltip="…"` (and optionally `data-tooltip-kbd="⌘T"`)
+ * to any element. A single delegated event listener at the chrome root handles
+ * all tooltips — no per-element JS wiring.
+ *
+ * Spec:
+ *   200ms hover delay
+ *   surface-2 bg, 1px var(--border), sharp corners (max var(--radius-2))
+ *   caption text + optional <kbd> chord on the right
+ *   positions below trigger; flips to above when clipped
+ *   exposed via theme.tokens.tooltip_* for Lua theme override
+ *
+ * Token overrides (via theme:set_token / CSS var):
+ *   --tooltip-bg      defaults to var(--surface-2)
+ *   --tooltip-border  defaults to var(--border)
+ *   --tooltip-fg      defaults to var(--fg)
+ *   --tooltip-radius  defaults to var(--radius-2)
+ */
+
+:root {
+  --tooltip-bg: var(--surface-2);
+  --tooltip-border: var(--border);
+  --tooltip-fg: var(--fg);
+  --tooltip-radius: var(--radius-2);
+  --tooltip-delay: 200ms;
+}
+
+/* The tooltip popover element — injected by host.js into <body>, removed on
+ * hide. position: fixed so it escapes any overflow:hidden ancestor. */
+.mote-tooltip {
+  position: fixed;
+  z-index: 9000;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 8px;
+  background: var(--tooltip-bg);
+  border: 1px solid var(--tooltip-border);
+  border-radius: var(--tooltip-radius);
+  font: var(--text-mono-sm);
+  color: var(--tooltip-fg);
+  white-space: nowrap;
+  pointer-events: none;          /* never intercepts mouse */
+  /* No shadow on inline tooltip — per design rule 5 (shadows only on
+   * floating SURFACES: palette, modal, completion popup). The tooltip is a
+   * micro-informational overlay, not a floating surface in that sense. */
+  /* Entry animation — restrained, 80ms micro */
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    opacity var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+}
+
+.mote-tooltip.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* The kbd chord inside the tooltip — inherits --text-kbd. */
+.mote-tooltip kbd {
+  font: var(--text-kbd);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;      /* keycap construction, even inside tooltip */
+  border-radius: var(--radius-1);
+  padding: 0 4px;
+  color: var(--fg-1);
+  line-height: 1.6;
+}

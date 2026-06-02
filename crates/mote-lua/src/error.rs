@@ -111,4 +111,42 @@ pub enum LuaError {
     /// reading a field raised a metamethod error).
     #[error("Lua operation failed while inspecting the module: {0}")]
     Lua(#[source] mlua::Error),
+
+    /// The `M.rail` top-level field is present but not a Lua table (array).
+    #[error("module field `rail` is present but not a table (got {got})")]
+    RailNotATable {
+        /// The Lua type actually present.
+        got: &'static str,
+    },
+
+    /// A `M.rail[i]` entry is not a table.
+    #[error("module `rail` entry at index {index} is not a table (got {got})")]
+    RailEntryNotATable {
+        /// The 1-based index of the offending entry.
+        index: usize,
+        /// The Lua type actually present.
+        got: &'static str,
+    },
+
+    /// A required field inside a `M.rail[i]` entry is missing or wrong type.
+    #[error("rail entry {index} field `{field}` has wrong type: expected {expected}, got {got}")]
+    RailEntryFieldType {
+        /// The 1-based index of the offending entry.
+        index: usize,
+        /// The field name.
+        field: &'static str,
+        /// The expected Lua type.
+        expected: &'static str,
+        /// The actual Lua type.
+        got: &'static str,
+    },
+
+    /// A required field inside a `M.rail[i]` entry is absent.
+    #[error("rail entry {index} is missing required field `{field}`")]
+    RailEntryMissingField {
+        /// The 1-based index of the offending entry.
+        index: usize,
+        /// The absent required key.
+        field: &'static str,
+    },
 }

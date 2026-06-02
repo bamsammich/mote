@@ -263,6 +263,193 @@ fn runtime_error_in_module_body_is_a_clear_error() {
     assert!(matches!(err, LuaError::Evaluate(_)), "got {err:?}");
 }
 
+// ---- Rail binding extraction (ADR-0014) ------------------------------------
+
+#[test]
+fn absent_rail_field_gives_empty_bindings() {
+    // No `M.rail` — absent is fine; returns empty slice.
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "no-rail", version = "1.0.0" }
+        return M
+    "#;
+    let plugin = load_plugin(source, "no-rail").expect("loads");
+    assert!(
+        plugin.rail_bindings().is_empty(),
+        "absent M.rail must yield empty bindings"
+    );
+}
+
+#[test]
+fn valid_rail_bindings_are_extracted() {
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "rss-reader", version = "1.0.0" }
+        M.rail = {
+          {
+            slot_id    = "rss-reader",
+            label      = "RSS",
+            icon       = "lucide:rss",
+            panel_path = "panels/main.html",
+            capabilities = { "net:fetch_any_https" },
+          },
+        }
+        return M
+    "#;
+    let plugin = load_plugin(source, "rss-reader").expect("loads");
+    let bindings = plugin.rail_bindings();
+    assert_eq!(bindings.len(), 1);
+    let b = &bindings[0];
+    assert_eq!(b.slot_id, "rss-reader");
+    assert_eq!(b.label, "RSS");
+    assert_eq!(b.icon, "lucide:rss");
+    assert_eq!(b.panel_path, "panels/main.html");
+    assert_eq!(b.capabilities, vec!["net:fetch_any_https"]);
+}
+
+#[test]
+fn rail_binding_without_capabilities_field_has_empty_capabilities() {
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "simple-panel", version = "1.0.0" }
+        M.rail = {
+          {
+            slot_id    = "simple",
+            label      = "Simple",
+            icon       = "lucide:layers",
+            panel_path = "panels/simple.html",
+          },
+        }
+        return M
+    "#;
+    let plugin = load_plugin(source, "simple").expect("loads");
+    let b = &plugin.rail_bindings()[0];
+    assert!(
+        b.capabilities.is_empty(),
+        "absent capabilities field must yield empty Vec"
+    );
+}
+
+#[test]
+fn multiple_rail_bindings_are_extracted_in_order() {
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "multi-panel", version = "1.0.0" }
+        M.rail = {
+          {
+            slot_id = "first",
+            label = "First",
+            icon = "lucide:bookmark",
+            panel_path = "a.html",
+            capabilities = {},
+          },
+          {
+            slot_id = "second",
+            label = "Second",
+            icon = "lucide:clock",
+            panel_path = "b.html",
+            capabilities = {},
+          },
+        }
+        return M
+    "#;
+    let plugin = load_plugin(source, "multi").expect("loads");
+    let bindings = plugin.rail_bindings();
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0].slot_id, "first");
+    assert_eq!(bindings[1].slot_id, "second");
+}
+
+#[test]
+fn rail_not_a_table_is_a_clear_error() {
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "bad-rail", version = "1.0.0" }
+        M.rail = "not a table"
+        return M
+    "#;
+    let err = load_plugin(source, "bad").expect_err("must fail");
+    assert!(
+        matches!(err, LuaError::RailNotATable { .. }),
+        "expected RailNotATable, got {err:?}"
+    );
+}
+
+#[test]
+fn rail_entry_not_a_table_is_a_clear_error() {
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "bad-entry", version = "1.0.0" }
+        M.rail = { "not-a-table-entry" }
+        return M
+    "#;
+    let err = load_plugin(source, "bad").expect_err("must fail");
+    assert!(
+        matches!(err, LuaError::RailEntryNotATable { index: 1, .. }),
+        "expected RailEntryNotATable at index 1, got {err:?}"
+    );
+}
+
+#[test]
+fn rail_entry_missing_required_field_is_a_clear_error() {
+    // Missing `icon` field.
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "missing-icon", version = "1.0.0" }
+        M.rail = {
+          {
+            slot_id = "panel",
+            label = "Panel",
+            panel_path = "panels/main.html",
+            capabilities = {},
+          },
+        }
+        return M
+    "#;
+    let err = load_plugin(source, "bad").expect_err("must fail");
+    assert!(
+        matches!(
+            err,
+            LuaError::RailEntryMissingField {
+                index: 1,
+                field: "icon"
+            }
+        ),
+        "expected RailEntryMissingField for icon at index 1, got {err:?}"
+    );
+}
+
+#[test]
+fn rail_entry_wrong_type_field_is_a_clear_error() {
+    // `label` is a number, not a string.
+    let source = r#"
+        local M = {}
+        M.manifest = { schema = "v1", name = "bad-type", version = "1.0.0" }
+        M.rail = {
+          {
+            slot_id = "panel",
+            label = 42,
+            icon = "lucide:rss",
+            panel_path = "panels/main.html",
+            capabilities = {},
+          },
+        }
+        return M
+    "#;
+    let err = load_plugin(source, "bad").expect_err("must fail");
+    assert!(
+        matches!(
+            err,
+            LuaError::RailEntryFieldType {
+                index: 1,
+                field: "label",
+                ..
+            }
+        ),
+        "expected RailEntryFieldType for label at index 1, got {err:?}"
+    );
+}
+
 #[test]
 fn invalid_identity_scope_is_a_clear_error() {
     let source = r#"

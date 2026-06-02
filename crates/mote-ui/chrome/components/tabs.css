@@ -32,26 +32,57 @@
   white-space: nowrap;
 }
 
+/* P1: favicon placeholder uses a 14px faint dot-grid square instead of the
+ * old solid surface-3 square (which read as a checkbox). The dot-grid motif
+ * at 30% accent-mute opacity conveys "favicon not yet loaded" without
+ * suggesting an interactive checkbox. Per ui-polish-phase-design §P1. */
 .tab .favicon {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   flex: none;
   border-radius: var(--radius-1);
-  background: var(--surface-3);
 }
 
-.tab .close {
+.tab .favicon-placeholder {
+  background-image: radial-gradient(var(--accent-mute) 1px, transparent 1px);
+  background-size: 3px 3px;
+  background-position: 0 0;
+}
+
+/* P1: Close button is hover-only, uses the lucide icon via .tab-close.
+ * Keycap construction per the design contract. */
+.tab .close,
+.tab .tab-close {
   display: none;
-  border: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 1px solid transparent;
+  border-bottom-width: 2px; /* keycap */
+  border-radius: var(--radius-1);
   background: transparent;
   color: var(--fg-2);
   cursor: pointer;
-  padding: 0 2px;
-  font: var(--text-mono-sm);
+  padding: 0;
+  transition:
+    background var(--dur-micro) var(--ease-out),
+    border-color var(--dur-micro) var(--ease-out),
+    border-bottom-width var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
 }
 
-.tab .close:hover {
+.tab .close:hover,
+.tab .tab-close:hover {
   color: var(--fg);
+  background: var(--surface-3);
+  border-color: var(--border);
+}
+
+.tab .tab-close:active {
+  border-bottom-width: 1px;
+  transform: translateY(1px);
 }
 
 .tab .load,
@@ -63,17 +94,23 @@
   background: var(--surface-2);
 }
 
-.tab:hover .close {
+.tab:hover .close,
+.tab:hover .tab-close {
   display: inline-flex;
 }
 
+/* P1: Active tab — 2px var(--accent) left-stripe + surface-2 bg lift +
+ * var(--fg) text color (stronger than the old var(--bg) background which was
+ * too subtle). Per ui-polish-phase-design §P1 "active indicator today is
+ * too subtle." */
 .tab.is-active {
-  background: var(--bg);
+  background: var(--surface-2);  /* lifted above surface-1 sidebar */
   color: var(--fg);
   border-top: 2px solid var(--accent);
 }
 
-.tab.is-active .close {
+.tab.is-active .close,
+.tab.is-active .tab-close {
   display: inline-flex;
 }
 
@@ -167,9 +204,16 @@
   border-right: 0;
   border-top: 0;
   border-left: 2px solid transparent;
+  /* P1: vertical active state overrides. is-active sets border-top in the
+   * base rule; we reset it here so only the left-stripe shows in vertical. */
 }
 
+/* P1: vertical active — left-stripe is the primary indicator (sidebar tabs
+ * are vertical, so a top-stripe makes no visual sense). Override the base
+ * .tab.is-active border-top back to transparent. */
 .theme-vertical .tab.is-active {
-  border-top: 0;
+  border-top: 2px solid transparent; /* override base — vertical uses left */
   border-left: 2px solid var(--accent);
+  background: var(--surface-2);
+  color: var(--fg);
 }

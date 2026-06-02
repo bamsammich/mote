@@ -82,13 +82,35 @@ pub struct Manifest {
     pub checksum: Option<String>,
 }
 
+/// A single rail binding declared in `M.rail[i]` (ADR-0014).
+///
+/// The runtime validates these at load-step 3 (contract conformance), checking
+/// that each `icon` parses via the ADR-0013 source format and each `capability`
+/// is a subset of the manifest's declared capabilities. In v0.1 the binding is
+/// accepted but not rendered; a deferral log message is emitted instead.
+#[derive(Debug, Clone)]
+pub struct RailBinding {
+    /// Unique identifier for this rail slot within the plugin.
+    pub slot_id: String,
+    /// Human-readable label shown in the rail tooltip.
+    pub label: String,
+    /// The icon source string (`"lucide:<name>"` — validated per ADR-0013).
+    pub icon: String,
+    /// Path to the panel HTML, served from `mote://overlay/plugins/<plugin>/<path>`.
+    pub panel_path: String,
+    /// Capabilities required for the panel to function (must be a subset of the
+    /// manifest's declared `capabilities`).
+    pub capabilities: Vec<String>,
+}
+
 /// A plugin whose module body has been evaluated and whose declarative surface
 /// has been extracted — but whose `setup()` has **not** been called.
 ///
 /// Holds the validated [`Manifest`], the declared key names from
-/// `M.hooks` / `M.events` / `M.api`, a flag for whether `M.setup` is present,
-/// and a handle to the loaded `M` table for a later `setup()` / dispatch layer.
-/// The owning [`Lua`] state is retained so the module handle stays valid.
+/// `M.hooks` / `M.events` / `M.api`, the rail bindings from `M.rail`, a flag
+/// for whether `M.setup` is present, and a handle to the loaded `M` table for
+/// a later `setup()` / dispatch layer.  The owning [`Lua`] state is retained so
+/// the module handle stays valid.
 #[derive(Debug)]
 pub struct LoadedPlugin {
     lua: Lua,
@@ -97,6 +119,8 @@ pub struct LoadedPlugin {
     hook_keys: Vec<String>,
     event_keys: Vec<String>,
     api_keys: Vec<String>,
+    /// Rail bindings declared in `M.rail` (ADR-0014). Absent ⇒ empty.
+    rail_bindings: Vec<RailBinding>,
     has_setup: bool,
 }
 
@@ -127,6 +151,17 @@ impl LoadedPlugin {
     #[must_use]
     pub fn api_keys(&self) -> &[String] {
         &self.api_keys
+    }
+
+    /// Rail bindings declared in `M.rail` (ADR-0014).
+    ///
+    /// Absent or empty ⇒ empty slice. The schema is structurally validated at
+    /// load time (required fields are strings, `capabilities` is an array of
+    /// strings); semantic validation (icon registry check, capabilities subset)
+    /// is performed at load-step 3 in `mote-runtime`.
+    #[must_use]
+    pub fn rail_bindings(&self) -> &[RailBinding] {
+        &self.rail_bindings
     }
 
     /// Whether the module declares a `setup` field.
@@ -199,6 +234,7 @@ pub fn load_plugin_in(lua: Lua, source: &str, chunk_name: &str) -> Result<Loaded
     let hook_keys = string_keys(&module, "hooks")?;
     let event_keys = string_keys(&module, "events")?;
     let api_keys = string_keys(&module, "api")?;
+    let rail_bindings = extract_rail_bindings(&module)?;
 
     // Detect `setup` presence WITHOUT invoking it (ADR-0001). We only read the
     // field; we never call it.
@@ -212,6 +248,7 @@ pub fn load_plugin_in(lua: Lua, source: &str, chunk_name: &str) -> Result<Loaded
         hook_keys,
         event_keys,
         api_keys,
+        rail_bindings,
         has_setup,
     })
 }
@@ -318,6 +355,113 @@ fn optional_string(m: &Table, field: &'static str) -> Result<Option<String>, Lua
             got: other.type_name(),
         }),
     }
+}
+
+/// Extracts the optional top-level `M.rail` array (ADR-0014).
+///
+/// Absent ⇒ empty. Present-but-not-a-table ⇒ [`LuaError::RailNotATable`].
+/// Each entry must be a table with required string fields `slot_id`, `label`,
+/// `icon`, `panel_path`, and an optional array-of-strings `capabilities`.
+/// Missing required fields or wrong types ⇒ the matching `RailEntry*` error.
+///
+/// **Semantic validation** (icon registry check, capabilities subset) is
+/// **not** performed here — that is `mote-runtime`'s load-step 3 concern.
+fn extract_rail_bindings(module: &Table) -> Result<Vec<RailBinding>, LuaError> {
+    let value: Value = module.get("rail").map_err(LuaError::Lua)?;
+    let table = match value {
+        Value::Nil => return Ok(Vec::new()),
+        Value::Table(t) => t,
+        other => {
+            return Err(LuaError::RailNotATable {
+                got: other.type_name(),
+            });
+        }
+    };
+
+    let mut bindings = Vec::new();
+    for (idx, item) in table.sequence_values::<Value>().enumerate() {
+        let index = idx + 1; // 1-based for error messages
+        let entry_val = item.map_err(LuaError::Lua)?;
+        let Value::Table(entry) = entry_val else {
+            return Err(LuaError::RailEntryNotATable {
+                index,
+                got: entry_val.type_name(),
+            });
+        };
+
+        let slot_id = rail_required_string(&entry, index, "slot_id")?;
+        let label = rail_required_string(&entry, index, "label")?;
+        let icon = rail_required_string(&entry, index, "icon")?;
+        let panel_path = rail_required_string(&entry, index, "panel_path")?;
+        let capabilities = rail_string_array(&entry, index, "capabilities")?;
+
+        bindings.push(RailBinding {
+            slot_id,
+            label,
+            icon,
+            panel_path,
+            capabilities,
+        });
+    }
+    Ok(bindings)
+}
+
+/// Reads a required string field from a rail entry table.
+fn rail_required_string(
+    entry: &Table,
+    index: usize,
+    field: &'static str,
+) -> Result<String, LuaError> {
+    match entry.get::<Value>(field).map_err(LuaError::Lua)? {
+        Value::String(s) => Ok(s.to_str().map_err(LuaError::Lua)?.to_owned()),
+        Value::Nil => Err(LuaError::RailEntryMissingField { index, field }),
+        other => Err(LuaError::RailEntryFieldType {
+            index,
+            field,
+            expected: "string",
+            got: other.type_name(),
+        }),
+    }
+}
+
+/// Reads the optional `capabilities` array from a rail entry table.
+///
+/// Absent ⇒ empty. Present-but-not-a-table or non-string element ⇒
+/// [`LuaError::RailEntryFieldType`].
+fn rail_string_array(
+    entry: &Table,
+    index: usize,
+    field: &'static str,
+) -> Result<Vec<String>, LuaError> {
+    let value: Value = entry.get(field).map_err(LuaError::Lua)?;
+    let cap_table = match value {
+        Value::Nil => return Ok(Vec::new()),
+        Value::Table(t) => t,
+        other => {
+            return Err(LuaError::RailEntryFieldType {
+                index,
+                field,
+                expected: "table (array of strings)",
+                got: other.type_name(),
+            });
+        }
+    };
+
+    let mut out = Vec::new();
+    for item in cap_table.sequence_values::<Value>() {
+        match item.map_err(LuaError::Lua)? {
+            Value::String(s) => out.push(s.to_str().map_err(LuaError::Lua)?.to_owned()),
+            other => {
+                return Err(LuaError::RailEntryFieldType {
+                    index,
+                    field,
+                    expected: "string element",
+                    got: other.type_name(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Reads an optional array-of-strings manifest field.

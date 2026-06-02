@@ -75,6 +75,9 @@
   --info: var(--dusk-blue);
   --special: var(--plum);
   --focus: var(--amber);
+  /* Muted accent for faint UI elements (favicon placeholder, empty-zone dots at
+   * reduced opacity). Dusk: 30% opacity amber on the sunk surface. */
+  --accent-mute: rgba(224, 164, 88, 0.30);
 
   /* ---- Color — syntax (code blocks, Lua editing). ---- */
   --syn-keyword: var(--dusk-blue-soft);
@@ -147,6 +150,7 @@
   --tracking-mono: -0.01em;
 
   /* ---- Layout (Mote-specific). ---- */
+  --chrome-header: 52px;        /* P1: one-row header (workspace + omnibox + actions) */
   --chrome-tabbar: 40px;
   --chrome-omnibox: 36px;
   --chrome-statusline: 22px;
@@ -187,6 +191,7 @@
   --info: #3f5f86;
   --special: #6f5184;
   --focus: var(--amber-deep);
+  --accent-mute: rgba(180, 124, 54, 0.25); /* amber-deep at 25% on paper */
 
   /* Syntax recomputed for the light surface. */
   --syn-keyword: #3f5f86;

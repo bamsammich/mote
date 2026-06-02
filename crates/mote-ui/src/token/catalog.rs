@@ -181,7 +181,14 @@ pub static CANONICAL_TOKENS: &[TokenEntry] = &[
     e("tracking-normal", R("0"), None),
     e("tracking-wide", R("0.04em"), None),
     e("tracking-mono", R("-0.01em"), None),
+    // ---- Color — accent-mute (P1: favicon placeholder, empty-zone dots) ----
+    e(
+        "accent-mute",
+        R("rgba(224, 164, 88, 0.30)"),
+        Some(R("rgba(180, 124, 54, 0.25)")),
+    ),
     // ---- Layout (Mote-specific) ----
+    e("chrome-header", D(52), None), // P1: one-row header
     e("chrome-tabbar", D(40), None),
     e("chrome-omnibox", D(36), None),
     e("chrome-statusline", D(22), None),

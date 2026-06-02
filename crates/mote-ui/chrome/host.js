@@ -374,7 +374,12 @@
   // tab is built with structured DOM construction + text nodes — NEVER innerHTML
   // of page-derived strings (bridge.rs §"Discipline the caller must uphold":
   // titles/URLs are injection vectors into the privileged document). Clicking a
-  // tab selects it; the ✕ closes it — both ride the `select_tab`/`close_tab` ops.
+  // tab selects it; the .tab-close closes it — both ride `select_tab`/`close_tab`.
+  //
+  // P1 changes:
+  //   - .favicon-placeholder dot-grid (not a checkbox-looking surface-3 square)
+  //   - .tab-close renders via lucide sprite <use>, is hover-only via CSS
+  //   - Active tab: surface-2 bg lift + 2px left-stripe (handled by CSS)
   function renderTabs(tabs) {
     var strip = document.getElementById("tabstrip");
     if (!strip || !Array.isArray(tabs)) return;
@@ -385,9 +390,14 @@
       row.className = tab.active ? "tab is-active" : "tab";
       row.setAttribute("role", "tab");
       row.setAttribute("aria-selected", tab.active ? "true" : "false");
+      if (tab.title) {
+        row.setAttribute("data-tooltip", (tab.title || tab.url || "new tab"));
+      }
 
+      // P1: dot-grid favicon placeholder — not a solid square (not a checkbox).
       var favicon = document.createElement("span");
-      favicon.className = "favicon";
+      favicon.className = "favicon favicon-placeholder";
+      favicon.setAttribute("aria-hidden", "true");
       row.appendChild(favicon);
 
       var title = document.createElement("span");
@@ -396,17 +406,33 @@
       title.textContent = tab.title || tab.url || "new tab";
       row.appendChild(title);
 
-      var close = document.createElement("button");
-      close.className = "tab-close";
-      close.setAttribute("aria-label", "close tab");
-      close.textContent = "✕";
-      close.addEventListener("click", function (ev) {
+      // P1: close button uses the lucide sprite (not a unicode ✕ glyph).
+      // The button is hidden by default; CSS .tab:hover .tab-close reveals it.
+      var closeBtn = document.createElement("button");
+      closeBtn.className = "tab-close";
+      closeBtn.setAttribute("aria-label", "close tab");
+      closeBtn.setAttribute("tabindex", "-1");
+      // Build the <svg><use> without innerHTML.
+      var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "icon");
+      svg.setAttribute("aria-hidden", "true");
+      var use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+      use.setAttributeNS(
+        "http://www.w3.org/1999/xlink",
+        "xlink:href",
+        "assets/lucide-sprite.svg#icon-x"
+      );
+      // Also set the non-namespaced href for modern browsers.
+      use.setAttribute("href", "assets/lucide-sprite.svg#icon-x");
+      svg.appendChild(use);
+      closeBtn.appendChild(svg);
+      closeBtn.addEventListener("click", function (ev) {
         ev.stopPropagation();
         if (window.mote && window.mote.invoke) {
           window.mote.invoke("close_tab", { id: tab.id }).catch(function () {});
         }
       });
-      row.appendChild(close);
+      row.appendChild(closeBtn);
 
       row.addEventListener("click", function () {
         if (window.mote && window.mote.invoke) {
@@ -418,8 +444,9 @@
   }
 
   function wireNewTab() {
-    // The omnibox "+" affordance lives in the tabs panel header meta region; if a
-    // new-tab control is present, wire it. Falls back to nothing if absent.
+    // P1: the [⊕] new-tab button moved from the sidebar header into the global
+    // chrome header. The selector targets the first [data-action='new-tab']
+    // element, which is the header button in the new HTML. Falls back gracefully.
     var btn = document.querySelector("[data-action='new-tab']");
     if (!btn) return;
     btn.addEventListener("click", function () {
@@ -450,12 +477,16 @@
   //   2. Switch the visible [data-panel] container via is-active-panel.
   //   3. Update the [tabs]/[bookmarks]/[history] lockup .name in the header.
   //   4. Invoke set_active_panel so the shell pushes fresh data for the panel.
+  //
+  // P1: plugin-placeholder slots (data-rail-slot="plugin-4/5") are wired
+  // separately in wireRailPlaceholders() — they open the command palette.
   function wireActivityBar() {
     var panels = ["tabs", "bookmarks", "history"];
     var buttons = {};
     var containers = {};
     var nameEl = document.querySelector(".sidepanel-slot .name");
-    var metaEl = document.querySelector(".sidepanel-meta");
+    // P1: no sidepanel-meta; we now have .tab-count-chip (tabs panel only).
+    var metaEl = null; // retained for wireActivityBar return shape compat
 
     panels.forEach(function (name) {
       var btn = document.querySelector(".activity-btn[aria-label='" + name + "']");
@@ -552,9 +583,15 @@
       case "set_tabs":
         if (payload && Array.isArray(payload.tabs)) {
           renderTabs(payload.tabs);
-          var meta = document.querySelector(".sidepanel-meta");
-          if (meta) {
-            meta.textContent = payload.tabs.length + " open";
+          // P1: count chip shows just the number (e.g. "3" not "3 open").
+          var countChip = document.querySelector(".tab-count-chip");
+          if (countChip) {
+            countChip.textContent = String(payload.tabs.length);
+          }
+          // P1: also update the status-line tab count segment.
+          var slTabSeg = document.querySelector(".sl .seg[data-sl-tabs]");
+          if (slTabSeg) {
+            slTabSeg.textContent = payload.tabs.length + " tabs";
           }
         }
         break;
@@ -741,31 +778,30 @@
     };
   }
 
-  // ---- Workspace strip + popover ----------------------------------------
+  // ---- Workspace chip + popover ----------------------------------------
   //
-  // Wires the workspace strip at the top of the left sidebar.  The strip
-  // shows the active workspace as a [name] lockup and a › chevron; clicking
-  // toggles the workspace popover dropdown.  The popover lists all workspaces;
-  // clicking a row invokes set_active_workspace.  The strip updates whenever
-  // the shell pushes a workspace_list applyOp (on boot + after each switch).
+  // P1: the workspace strip moved from the left sidebar into the chrome header
+  // as a .ws-chip keycap button. The ws-chip shows "[ws] <name> ›" and
+  // clicking toggles the workspace popover dropdown.
   //
-  // Accessibility: role="button" + aria-haspopup on the strip; role="listbox"
-  // on the popover.  Esc closes; click-outside closes; Tab leaves the strip.
+  // Accessibility: role="button" + aria-haspopup on the chip; role="listbox"
+  // on the popover. Esc closes; click-outside closes; Tab leaves the chip.
   //
   // DOM-build discipline (ADR-0005): createElement + textContent only.
   // NEVER innerHTML on payload content.
   function wireWorkspaceStrip() {
-    var strip = document.querySelector(".workspace-strip");
+    var strip = document.querySelector(".ws-chip");
     var popover = document.getElementById("workspace-popover");
     if (!strip || !popover) return;
 
-    // Seed the popover with at least the current strip name as a placeholder
+    // Seed the popover with at least the current chip name as a placeholder
     // row so the first click renders SOMETHING visible even if the shell's
     // workspace_list push hasn't arrived (or got missed due to timing).  The
     // real list replaces this once the applyOp fires.
     function seedFallbackRow() {
       if (popover.childElementCount > 0) return;
-      var nameEl = strip.querySelector(".name");
+      // P1: workspace name is in .ws-name inside the .ws-chip.
+      var nameEl = strip.querySelector(".ws-name");
       var current = nameEl ? nameEl.textContent : "";
       if (!current) return;
       var row = document.createElement("div");
@@ -893,9 +929,14 @@
       if (renderedCount > 0) {
         popover.textContent = "";
         popover.appendChild(frag);
-        var nameEl = strip.querySelector(".name");
+        // P1: the workspace name is in .ws-name inside the .ws-chip button.
+        var nameEl = strip.querySelector(".ws-name");
         if (nameEl && activeRow && typeof activeRow.name === "string") {
           nameEl.textContent = activeRow.name;
+        }
+        // Also update aria-label on the chip for accessibility.
+        if (activeRow && typeof activeRow.name === "string") {
+          strip.setAttribute("aria-label", "workspace: " + activeRow.name);
         }
       }
       // else: keep whatever was in the popover (typically the seeded fallback).
@@ -924,6 +965,163 @@
         window.mote.invoke("close_window", {}).catch(function () {});
       }
     });
+  }
+
+  // ---- P1: Tooltip primitive (Group B) ------------------------------------
+  //
+  // A single delegated event listener at the chrome root handles all tooltips.
+  // No per-element JS wiring required — just add data-tooltip="..." to an
+  // element. Optionally add data-tooltip-kbd="⌘T" for a keyboard shortcut.
+  //
+  // Spec (polish-phase-design §P1):
+  //   200ms hover delay
+  //   surface-2 bg, 1px var(--border), sharp corners (var(--radius-2))
+  //   caption text + optional <kbd> chord on right
+  //   positions below trigger; flips to above when clipped
+  //
+  // The tooltip element is injected into <body> on first use and reused.
+  // It is removed from view (not from DOM) by opacity + pointer-events: none.
+  function wireTooltip() {
+    var tip = null;         // the .mote-tooltip element (created lazily)
+    var hoverTimer = null;  // setTimeout handle for the 200ms delay
+    var currentTarget = null; // the element currently being timed/shown
+
+    function getOrCreateTip() {
+      if (!tip) {
+        tip = document.createElement("div");
+        tip.className = "mote-tooltip";
+        tip.setAttribute("role", "tooltip");
+        document.body.appendChild(tip);
+      }
+      return tip;
+    }
+
+    function showTip(target) {
+      var text = target.getAttribute("data-tooltip");
+      if (!text) return;
+
+      var el = getOrCreateTip();
+      el.textContent = ""; // clear previous content (textContent, not innerHTML)
+
+      // Caption span.
+      var caption = document.createElement("span");
+      caption.className = "tooltip-caption";
+      caption.textContent = text;
+      el.appendChild(caption);
+
+      // Optional kbd chord.
+      var kbd = target.getAttribute("data-tooltip-kbd");
+      if (kbd) {
+        // Build individual <kbd> elements for each key in the chord.
+        // The chord string may be something like "⌘T" or "⌘⇧W".
+        // We split on space to allow multi-key chords like "⌘ K".
+        var parts = kbd.split(/\s+/);
+        parts.forEach(function (part) {
+          if (!part) return;
+          var k = document.createElement("kbd");
+          k.textContent = part;
+          el.appendChild(k);
+        });
+      }
+
+      // Position below the trigger; flip to above if clipped by viewport bottom.
+      el.classList.remove("is-visible");
+      el.style.left = "-9999px";
+      el.style.top = "-9999px";
+
+      // Force layout so we can measure.
+      var rect = target.getBoundingClientRect();
+      var tipW = el.offsetWidth || 120;
+      var tipH = el.offsetHeight || 28;
+
+      var left = rect.left;
+      var top = rect.bottom + 4;
+
+      // Clamp to viewport.
+      var vpW = window.innerWidth || document.documentElement.clientWidth;
+      var vpH = window.innerHeight || document.documentElement.clientHeight;
+
+      if (left + tipW > vpW - 4) {
+        left = Math.max(4, vpW - tipW - 4);
+      }
+
+      // Flip to above if below would clip.
+      if (top + tipH > vpH - 4) {
+        top = rect.top - tipH - 4;
+      }
+
+      el.style.left = left + "px";
+      el.style.top = top + "px";
+      el.classList.add("is-visible");
+    }
+
+    function hideTip() {
+      if (hoverTimer) {
+        clearTimeout(hoverTimer);
+        hoverTimer = null;
+      }
+      currentTarget = null;
+      if (tip) {
+        tip.classList.remove("is-visible");
+      }
+    }
+
+    document.addEventListener("mouseover", function (ev) {
+      var target = ev.target.closest("[data-tooltip]");
+      if (!target) {
+        // Moved to a non-tooltip element: cancel pending timer.
+        if (hoverTimer) {
+          clearTimeout(hoverTimer);
+          hoverTimer = null;
+        }
+        return;
+      }
+      if (target === currentTarget) return; // still on same target
+      hideTip();
+      currentTarget = target;
+      hoverTimer = setTimeout(function () {
+        hoverTimer = null;
+        showTip(target);
+      }, 200); // 200ms delay per spec
+    });
+
+    document.addEventListener("mouseout", function (ev) {
+      // If leaving the document entirely or moving to a non-tooltip area, hide.
+      var related = ev.relatedTarget;
+      if (!related || !related.closest("[data-tooltip]")) {
+        hideTip();
+      }
+    });
+
+    // Hide on scroll or pointer down (tooltip is purely informational).
+    document.addEventListener("pointerdown", hideTip, { passive: true });
+    document.addEventListener("scroll", hideTip, { passive: true, capture: true });
+    // Hide when keyboard focus moves away.
+    document.addEventListener("focusin", function (ev) {
+      if (!ev.target.closest("[data-tooltip]")) hideTip();
+    });
+  }
+
+  // ---- P1: Rail plugin-placeholder click ----------------------------------
+  //
+  // Clicking slots 4 or 5 (rail-plugin-placeholder) opens the command palette.
+  // The palette doesn't have a filter mechanism in P1, so we just open it.
+  // Per ADR-0014 §v0.1 scope + the brief: "don't expand scope here."
+  function wireRailPlaceholders() {
+    var placeholders = document.querySelectorAll(".rail-plugin-placeholder");
+    for (var i = 0; i < placeholders.length; i++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          // Open the command palette — the nearest integration point for
+          // plugin discovery. The palette toggle op opens the palette widget.
+          if (window.mote && window.mote.invoke) {
+            window.mote
+              .invoke("open_palette", {})
+              .catch(function () {});
+          }
+        });
+      })(placeholders[i]);
+    }
   }
 
   // R4: handle the `focus_omnibox` applyOp pushed by `Ctrl+L`.
@@ -962,13 +1160,17 @@
     // Chain the bookmark_list + history_list applyOp handlers last so they wrap
     // all prior handlers.
     wireSidePanelOps(activityBar);
-    // Chain the workspace_list applyOp handler and wire the workspace strip
-    // toggle + popover interaction.  Must run after all prior applyOp handlers
-    // are chained so the prevApplyOp capture is complete.
+    // P1: wire the workspace chip (moved to chrome-header) + popover.
+    // Must run after all prior applyOp handlers are chained so the
+    // prevApplyOp capture is complete.
     wireWorkspaceStrip();
     // R4: chain the focus_omnibox applyOp handler (Ctrl+L). Must run after
     // wireOmnibox installs the initial applyOp so prevApplyOp is defined.
     wireFocusOmniboxOp();
+    // P1: install the tooltip primitive (delegated listener at the root).
+    wireTooltip();
+    // P1: wire the rail plugin-placeholder click handlers.
+    wireRailPlaceholders();
   }
 
   if (document.readyState === "loading") {

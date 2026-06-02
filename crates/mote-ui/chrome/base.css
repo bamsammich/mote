@@ -58,6 +58,160 @@ body {
   background: var(--bg);
 }
 
+/* ---- P1: One-row 52px header (.chrome-header) ----
+ *
+ * Replaces the old stacked workspace-strip + omnibar-row (two bars).
+ * Left:   ws-chip (keycap, fixed width)
+ * Center: omnibar-row (flex: 1, fills remaining space)
+ * Right:  nav group + action group
+ *
+ * 1px var(--border) bottom hairline separates the header from the sidebar.
+ * The omnibox form inherits position: relative for the completion dropdown.
+ */
+.chrome-header {
+  display: flex;
+  align-items: center;
+  height: var(--chrome-header); /* 52px */
+  padding: 0 var(--space-2);
+  gap: var(--space-2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  position: relative; /* workspace popover anchor */
+}
+
+/* Workspace bracket-chip — keycap construction */
+.ws-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 28px;
+  padding: 0 var(--space-2);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px; /* keycap */
+  border-radius: var(--radius-1);
+  font: var(--text-mono-sm);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background var(--dur-micro) var(--ease-out),
+    border-bottom-width var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+}
+
+.ws-chip:hover {
+  background: var(--surface-2);
+}
+
+.ws-chip:active {
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+
+.ws-chip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.ws-chip[aria-expanded="true"] {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.ws-chip .ws-lockup .br { color: var(--accent); }
+.ws-chip .ws-lockup .name { color: var(--fg-2); }
+.ws-chip .ws-name { color: var(--fg); }
+.ws-chip .ws-chevron { color: var(--fg-2); margin-left: 2px; }
+
+/* Omnibar-row: fills the center, anchors the completion dropdown */
+.chrome-header .omnibar-row {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.chrome-header .omni {
+  height: 32px;
+}
+
+/* Nav keycap group — three icon keycaps flush together */
+.header-nav-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.header-nav-group .nav-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+/* Disabled nav buttons (P1 placeholder — wired in P2) */
+.header-nav-group .nav-btn[aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Right action group */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  margin-left: var(--space-1);
+  border-left: 1px solid var(--border);
+  padding-left: var(--space-2);
+}
+
+.header-actions .btn-icon {
+  width: 28px;
+  height: 28px;
+}
+
+/* Workspace popover: absolute below the ws-chip in .chrome-header */
+.chrome-header .workspace-popover {
+  position: absolute;
+  top: calc(var(--chrome-header) - 1px); /* just below header bottom-border */
+  left: var(--space-2); /* aligns with ws-chip */
+  min-width: 200px;
+  z-index: 700;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-top: 0;
+  box-shadow: var(--shadow-2);
+  font: var(--text-mono);
+}
+
+.chrome-header .workspace-popover[hidden] {
+  display: none;
+}
+
+/* Reuse the existing .workspace-popover row styles from sidebar.css */
+
+/* ---- Icon sizing (used by lucide sprite <use> elements) ---- */
+.icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---- P1: Keycap utility class ----
+ * All interactive keycaps share the keycap pressed-state contract.
+ * Applied to .ws-chip and any `.keycap` element. */
+.keycap {
+  /* the per-element border-bottom-width: 2px is set in component rules */
+}
+
 /* The page region: transparent so the compositor blits the web view through
  * it (spike proved `background: transparent` on the page slot works). */
 .mote-page {

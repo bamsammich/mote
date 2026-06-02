@@ -11,13 +11,14 @@
 .sidebar {
   display: flex;
   flex-direction: column;
-  position: relative; /* popover anchor */
+  position: relative; /* reserved for future anchored popovers from sidebar */
   border-right: 1px solid var(--border);
   background: var(--surface-1);
 }
 
-/* The activitybar + sidepanel grid — unchanged proportions, now nested inside
- * .sidebar-body so the workspace strip can sit above it. */
+/* P1: the workspace strip moved to the chrome-header. The sidebar-body now
+ * directly contains the activitybar + sidepanel grid, expanding to fill
+ * the full height below the 52px header. */
 .sidebar-body {
   display: grid;
   grid-template-columns: 36px 280px; /* activitybar + panel */
@@ -37,65 +38,9 @@
   grid-template-columns: 280px 36px;
 }
 
-/* ---- Workspace strip ---- */
-
-/* Full-width header above the sidebar body. Brand lockup + chevron; click
- * toggles the workspace popover. Height matches .sidepanel-head rhythm. */
-.workspace-strip {
-  height: 30px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-1);
-  font: var(--text-mono-sm);
-  color: var(--fg);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  user-select: none;
-  flex-shrink: 0;
-}
-
-.workspace-strip:hover {
-  background: var(--surface-2);
-}
-
-.workspace-strip:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-}
-
-/* Strip content: `workspace · default ›`.  No brand lockup here — the strip
- * is a CONTEXTUAL selector, not a slot/mode identifier; reusing the bracket
- * lockup pattern alongside [url] and [tabs] read as a confusing third "mode"
- * (E4 design feedback 2026-06-01). Plain labelled text + chevron instead. */
-.workspace-strip .label   { color: var(--fg-2); margin-right: 6px; }
-.workspace-strip .sep     { color: var(--fg-2); margin-right: 6px; }
-.workspace-strip .name    { color: var(--fg); }
-.workspace-strip .spacer  { flex: 1; }
-.workspace-strip .chevron { color: var(--fg-2); margin-left: 8px; }
-
-/* ---- Workspace popover ---- */
-
-/* Sidebar-wide floating dropdown below the strip (floating surface — shadow
- * per rule 5; docked sidebar itself has no shadow). */
-.workspace-popover {
-  position: absolute;
-  top: 30px; /* below the strip */
-  left: 0;
-  right: 0;
-  z-index: 700;
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  border-top: 0;
-  box-shadow: var(--shadow-2);
-  font: var(--text-mono);
-}
-
-.workspace-popover[hidden] {
-  display: none;
-}
-
+/* ---- Workspace popover ----
+ * P1: the popover is now anchored from .chrome-header (see base.css).
+ * These row styles are reused by the popover rendered inside .chrome-header. */
 .workspace-popover .row {
   display: grid;
   grid-template-columns: 20px 1fr;
@@ -104,6 +49,7 @@
   padding: 6px 12px;
   color: var(--fg);
   cursor: pointer;
+  font: var(--text-mono-sm);
 }
 
 .workspace-popover .row:hover {
@@ -206,43 +152,21 @@
   color: var(--fg-2);
 }
 
-/* Right-edge group keeps `N open` and the `+` together so `space-between` on
- * .sidepanel-head pushes the lockup to the left and the whole right-group to
- * the right — instead of stranding the meta in the middle. */
+/* Right-edge group in the sidepanel header. P1: the `+` button moved to the
+ * global header [⊕]; only the count chip remains here. */
 .sidepanel-head-right {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.sidepanel-head .new-tab-btn {
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-bottom-width: 2px; /* keycap construction */
-  border-radius: var(--radius-1);
+/* Tab count chip: shows just the number (e.g. "3" not "3 open").
+ * Faint mono text — secondary metadata, not a primary label. */
+.tab-count-chip {
+  font: var(--text-mono-sm);
   color: var(--fg-2);
-  cursor: pointer;
-}
-
-.sidepanel-head .new-tab-btn:hover {
-  color: var(--fg);
-  background: var(--surface-2);
-}
-
-.sidepanel-head .new-tab-btn:active {
-  /* keycap press: bottom collapses, transform 1px down */
-  border-bottom-width: 1px;
-  transform: translateY(1px);
-}
-
-.sidepanel-head .new-tab-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+  min-width: 1.5ch;
+  text-align: right;
 }
 
 .sidepanel-body {
@@ -359,4 +283,29 @@
   font: var(--text-mono-sm);
   color: var(--fg-2);
   text-align: center;
+}
+
+/* ---- P1: Sidebar empty zone ----
+ * The area below the tab list signals "intentional space" with the canonical
+ * dot-grid motif at 20% opacity. Uses var(--dots) from tokens.css.
+ * Not a slot-empty (no .empty-card inside) — just ambient texture.
+ */
+.sidebar-empty-zone {
+  flex: 1;
+  min-height: var(--space-7); /* at least 32px to register visually */
+  background-image: var(--dots);
+  opacity: 0.20;
+  pointer-events: none;
+}
+
+/* ---- P1: Rail plugin placeholder icons ----
+ * Slots 4 & 5 in the activitybar show a faint [+] glyph when unbound.
+ * They're visually dimmer than first-party icons to signal "available."
+ */
+.activity-btn.rail-plugin-placeholder {
+  opacity: 0.45;
+}
+
+.activity-btn.rail-plugin-placeholder:hover {
+  opacity: 1;
 }

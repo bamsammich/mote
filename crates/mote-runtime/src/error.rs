@@ -99,6 +99,17 @@ pub enum LoadError {
     /// `setup()` raised a Lua error while binding handlers.
     #[error("plugin setup() failed: {0}")]
     Setup(String),
+
+    /// **Step 3 — rail binding validation.** A `M.rail` entry declared an icon
+    /// that the ADR-0013 registry rejects, or a capability that the plugin did
+    /// not declare in its manifest (ADR-0014).
+    #[error("rail binding validation failed (step 3): {reason}")]
+    RailBinding {
+        /// The 1-based index of the offending rail entry.
+        index: usize,
+        /// A human-readable description of the validation failure.
+        reason: String,
+    },
 }
 
 /// A failure when reloading or unloading a plugin that was not loaded.

@@ -57,6 +57,9 @@ keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
 # System clipboard access (R2: copy_active_url op). Used only by mote-shell;
 # mote-cef stays CEF-only per DISCIPLINES.md §1.
 arboard = "3"
+# Structured logging facade. Crates emit via log::info!/warn!/error!; the
+# application (mote-app / shell) installs the subscriber.
+log = "0.4"
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.

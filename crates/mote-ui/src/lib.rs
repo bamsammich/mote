@@ -30,6 +30,7 @@
 mod compositor;
 mod element;
 mod host;
+pub mod icon_registry;
 pub mod integrity;
 mod layout;
 mod slot;
@@ -38,6 +39,7 @@ mod token;
 pub use compositor::{Compositor, CompositorError, PixelFormat, ViewportRect};
 pub use element::{Element, ElementKind, ElementRef, RefSelector};
 pub use host::{Node, UiHost};
+pub use icon_registry::{IconRegistry, LucideIcon, SetIconError};
 pub use integrity::{
     ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
     NarrowMode, NarrowablePermission, PermissionRow, PluginAction, PluginKind, PluginRow,
@@ -110,6 +112,8 @@ pub const COMPONENT_CSS: &[(&str, &str)] = &[
         "approval-dialog",
         include_str!("../chrome/components/approval-dialog.css"),
     ),
+    // P1: tooltip primitive (Group B).
+    ("tooltip", include_str!("../chrome/components/tooltip.css")),
 ];
 
 /// The `[mote]` wordmark SVG.
@@ -117,6 +121,10 @@ pub const WORDMARK_SVG: &str = include_str!("../chrome/assets/wordmark.svg");
 
 /// The `[·]` mark / favicon SVG.
 pub const MARK_SVG: &str = include_str!("../chrome/assets/mark.svg");
+
+/// The bundled Lucide icon sprite (ADR-0013). All chrome icons route through
+/// this sprite set; no external fetches, no string interpolation.
+pub const LUCIDE_SPRITE_SVG: &str = include_str!("../chrome/assets/lucide-sprite.svg");
 
 #[cfg(test)]
 mod tests {
@@ -374,7 +382,16 @@ mod tests {
 
     #[test]
     fn chrome_html_declares_all_six_slots() {
-        for slot in Slot::ALL {
+        // P1: right-sidebar is intentionally absent from the default HTML
+        // (the slot still exists in the architecture model; plugins / custom
+        // themes may declare it). All other slots must be present.
+        let mandatory: &[Slot] = &[
+            Slot::TopBar,
+            Slot::LeftSidebar,
+            Slot::BottomBar,
+            Slot::TabRow,
+        ];
+        for slot in mandatory {
             let attr = format!("data-slot=\"{}\"", slot.name());
             assert!(
                 CHROME_HTML.contains(&attr),
@@ -382,9 +399,13 @@ mod tests {
                 slot.name()
             );
         }
-        // boots in dusk, includes the empty-slot motif and no AI surfaces.
+        // right-sidebar is explicitly absent from the P1 default theme.
+        assert!(
+            !CHROME_HTML.contains("data-slot=\"right-sidebar\""),
+            "chrome.html must NOT render right-sidebar in the P1 default theme"
+        );
+        // boots in dusk; no AI surfaces.
         assert!(CHROME_HTML.contains("data-theme=\"dusk\""));
-        assert!(CHROME_HTML.contains("slot-empty"));
         assert!(!CHROME_HTML.contains("[ask]"));
         assert!(!CHROME_HTML.contains("aria-label=\"assistant\""));
     }
@@ -406,6 +427,8 @@ mod tests {
             "empty-slot",
             "integrity-panel",
             "approval-dialog",
+            // P1: tooltip primitive (Group B).
+            "tooltip",
         ] {
             assert!(names.contains(&want), "missing component css: {want}");
         }

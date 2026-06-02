@@ -40,6 +40,7 @@
     <link rel="stylesheet" href="components/empty-slot.css" />
     <link rel="stylesheet" href="components/integrity-panel.css" />
     <link rel="stylesheet" href="components/approval-dialog.css" />
+    <link rel="stylesheet" href="components/tooltip.css" />
     <!--
       host.js: the privileged chrome↔Rust bootstrap. Wraps window.cefQuery into
       window.mote.invoke (structured ops, never eval) and wires the omnibox to
@@ -53,37 +54,61 @@
   </head>
 
   <!--
+    P1 chrome anatomy (ADR-0013 / ADR-0014 / ui-polish-phase-design.md §P1).
+
     The slot grid. `data-theme="dusk"` is the boot default; a theme switch is an
     instant CSS-var swap on this attribute. Each region is a `[data-slot]` div
     the runtime owns; structure inside a slot is owned by the bound element.
 
-    Default layout (spec/01 + plan §5.2):
-      top-bar       = { tabstrip, urlbar }   (tab-row + urlbar-inline nest here)
-      left-sidebar  = { sidebar-panel:* }    (tabs panel default)
-      right-sidebar = {}                     (empty-slot motif)
-      bottom-bar    = { status-indicator:* } (the status line)
+    Default layout (P1 revised):
+      top-bar       = one 52px header row (workspace chip + omnibox + nav + actions)
+      left-sidebar  = { activitybar + sidebar-panel:* }  (tabs panel default)
+      right-sidebar = DROPPED from default theme (94px reclaimed by viewport)
+      bottom-bar    = { status-indicator:* }              (the status line)
     The page <main> is transparent — the compositor blits the web view through.
 
     NO AI surfaces: the reserved assist sidebar panel and the reserved ask
     omnibox mode are names only (ADR-0002); nothing here binds them.
+
+    Lucide sprite: all chrome icons are rendered via <use href="assets/lucide-sprite.svg#icon-<name>">
+    in keycap buttons. The icon registry (ADR-0013) validates theme:set_icon
+    calls in Rust; the HTML reads the sprite directly at display time.
   -->
   <body class="mote-root" data-theme="dusk">
-    <!-- ========================= TOP BAR =========================
-      Maintainer decision (interactive-slice): the tabstrip moved to the
-      left-sidebar. The top-bar keeps the omnibox (+ inline actions). -->
-    <div data-slot="top-bar">
-      <!-- the urlbar element; urlbar-inline nests inside .right -->
+
+    <!-- ====================== TOP BAR (P1: one 52px row) ====================
+      Left:  [ws] Default › bracket-chip (keycap; opens workspace popover)
+      Center: [url] omnibox with mode prefix
+      Right of omnibox: [‹][›][↻] nav keycaps (disabled in P1; wired in P2)
+      Far right: [⊕] new-tab · [🔖] bookmark · [✕] close-window
+    -->
+    <div data-slot="top-bar" class="chrome-header">
+
+      <!-- Workspace bracket-chip (keycap construction; opens workspace popover) -->
+      <button
+        class="ws-chip keycap"
+        role="button"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+        aria-label="workspace: default"
+        data-tooltip="switch workspace"
+        data-tooltip-kbd="⌘⇧W"
+      >
+        <span class="ws-lockup lockup" aria-hidden="true">
+          <span class="br">[</span><span class="name">ws</span><span class="br">]</span>
+        </span>
+        <span class="ws-name" aria-live="polite">default</span>
+        <span class="ws-chevron" aria-hidden="true">›</span>
+      </button>
+
+      <!-- Omnibox: full-width, centers between the chip and action buttons -->
       <form class="omnibar-row" role="search" aria-label="omnibox">
         <div class="omni mode-url">
           <span class="mode lockup" aria-hidden="true">
-            <span class="br">[</span><span class="name">url</span
-            ><span class="br">]</span>
+            <span class="br">[</span><span class="name">url</span><span class="br">]</span>
           </span>
           <div class="body">
             <span class="secure" aria-label="connection">⎈</span>
-            <!-- The editable omnibox. Submitting (Enter) invokes the `navigate`
-                 host op; host.js handles the wiring. The static host-dim/host/
-                 path coloring is a display concern deferred to Wave C. -->
             <input
               id="omnibox-input"
               class="omni-input"
@@ -97,62 +122,6 @@
               aria-controls="omnibox-completions"
               aria-expanded="false"
             />
-            <!-- urlbar-inline: urlbar-extension elements nest here -->
-            <div class="right" data-slot="urlbar-inline">
-              <button
-                type="button"
-                class="btn btn-ghost btn-icon bookmark-toggle"
-                aria-label="bookmark page"
-                aria-pressed="false"
-              >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
-                </svg>
-              </button>
-              <button type="button" class="btn btn-ghost btn-icon" aria-label="toggle sidebar">
-                ▣
-              </button>
-              <!--
-                R4: close-window keycap. Lucide `x` glyph at 16px inside a 28×28
-                keycap. Theme override point: themes can swap this icon via
-                `theme:set_icon("chrome.close_window", "lucide:<name>")` once the
-                themable-icon contract (ADR TBD, P1 wave) is implemented.
-                TODO(P1): wire through theme.icons.close_window when the themable-
-                icon ADR lands.
-              -->
-              <button
-                type="button"
-                class="btn btn-ghost btn-icon close-window-btn"
-                aria-label="close window"
-                title="close window (⌃⇧W)"
-                style="width:28px;height:28px;"
-              >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </button>
-            </div>
           </div>
         </div>
         <div
@@ -164,222 +133,262 @@
           <!-- rows are appended by host.js via DOM-build (never innerHTML) -->
         </div>
       </form>
-    </div>
+
+      <!-- Nav keycap group: [‹] [›] [↻]
+           Disabled in P1 (wired to CEF in P2). Rendered as disabled keycaps
+           with aria-disabled and tooltips explaining availability. -->
+      <div class="header-nav-group" role="group" aria-label="navigation">
+        <button
+          class="keycap btn btn-ghost btn-icon nav-btn"
+          aria-label="go back"
+          aria-disabled="true"
+          data-tooltip="go back (available in p2)"
+          data-tooltip-kbd="⌘["
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="assets/lucide-sprite.svg#icon-arrow-left"/>
+          </svg>
+        </button>
+        <button
+          class="keycap btn btn-ghost btn-icon nav-btn"
+          aria-label="go forward"
+          aria-disabled="true"
+          data-tooltip="go forward (available in p2)"
+          data-tooltip-kbd="⌘]"
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="assets/lucide-sprite.svg#icon-arrow-right"/>
+          </svg>
+        </button>
+        <button
+          class="keycap btn btn-ghost btn-icon nav-btn"
+          aria-label="reload"
+          aria-disabled="true"
+          data-tooltip="reload (available in p2)"
+          data-tooltip-kbd="⌘R"
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="assets/lucide-sprite.svg#icon-rotate-cw"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Right action group: [⊕] · [🔖] · [✕] -->
+      <div class="header-actions" role="group" aria-label="browser actions">
+
+        <!-- [⊕] new tab -->
+        <button
+          type="button"
+          class="keycap btn btn-ghost btn-icon new-tab-btn"
+          data-action="new-tab"
+          aria-label="new tab"
+          data-tooltip="new tab"
+          data-tooltip-kbd="⌘T"
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="assets/lucide-sprite.svg#icon-plus"/>
+          </svg>
+        </button>
+
+        <!-- [🔖] bookmark current page -->
+        <button
+          type="button"
+          class="keycap btn btn-ghost btn-icon bookmark-toggle"
+          aria-label="bookmark page"
+          aria-pressed="false"
+          data-tooltip="bookmark page"
+          data-tooltip-kbd="⌘D"
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="assets/lucide-sprite.svg#icon-bookmark"/>
+          </svg>
+        </button>
+
+        <!-- [✕] close window (R4; wire complete) -->
+        <button
+          type="button"
+          class="keycap btn btn-ghost btn-icon close-window-btn"
+          aria-label="close window"
+          data-tooltip="close window"
+          data-tooltip-kbd="⌘⇧W"
+        >
+          <svg class="icon" aria-hidden="true">
+            <use href="assets/lucide-sprite.svg#icon-x"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Workspace popover: below the ws-chip -->
+      <div
+        id="workspace-popover"
+        class="workspace-popover"
+        role="listbox"
+        aria-label="workspaces"
+        hidden
+      >
+        <!-- rows appended by host.js applyOp('workspace_list', …) -->
+      </div>
+    </div><!-- /.chrome-header -->
 
     <!-- ========================= BODY ROW ========================= -->
     <div class="mote-body">
-      <!-- left-sidebar: tabs panel bound by default -->
+
+      <!-- left-sidebar: tabs panel bound by default.
+           P1: activitybar has 5 rail slots (3 first-party + 2 plugin placeholders)
+           + collapse button at bottom. The workspace strip has moved to the header. -->
       <aside data-slot="left-sidebar" class="sidebar" aria-label="sidebar">
-        <!-- Workspace strip: always-visible workspace context + switcher.
-             Populated by host.js applyOp('workspace_list', {rows}). -->
-        <div
-          class="workspace-strip"
-          role="button"
-          aria-haspopup="listbox"
-          aria-expanded="false"
-          tabindex="0"
-        >
-          <span class="label" aria-hidden="true">workspace</span>
-          <span class="sep" aria-hidden="true">·</span>
-          <span class="name">default</span>
-          <span class="spacer"></span>
-          <span class="chevron" aria-hidden="true">›</span>
-        </div>
         <div class="sidebar-body">
-        <nav class="activitybar" aria-label="sidebar panels">
-          <button class="activity-btn is-active" aria-label="tabs" aria-pressed="true">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
+
+          <!-- Activity bar / rail: 5 icon slots + spacer + collapse -->
+          <nav class="activitybar" aria-label="sidebar panels">
+
+            <!-- Slot 1: tabs (rail.tabs, default: layers) -->
+            <button
+              class="activity-btn is-active"
+              aria-label="tabs"
+              aria-pressed="true"
+              data-tooltip="tabs"
             >
-              <path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
-              <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
-              <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
-            </svg>
-          </button>
-          <button class="activity-btn" aria-label="bookmarks" aria-pressed="false">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
-            </svg>
-          </button>
-          <button class="activity-btn" aria-label="history" aria-pressed="false">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M12 7v5l4 2" />
-            </svg>
-          </button>
-          <button class="activity-btn" aria-label="plugins" aria-pressed="false">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 19.39a1 1 0 0 1-1.414 0l-1.683-1.683a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L12.39 4.39a1 1 0 0 1 1.414 0z" />
-            </svg>
-          </button>
-          <button class="activity-btn" aria-label="config" aria-pressed="false">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5a2 2 0 0 0 2 2h1" />
-              <path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1" />
-            </svg>
-          </button>
-          <div class="activitybar-spacer"></div>
-          <button class="activity-btn" aria-label="close sidebar" aria-pressed="false">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <rect width="18" height="18" x="3" y="3" rx="2" />
-              <path d="M9 3v18" />
-              <path d="m16 15-3-3 3-3" />
-            </svg>
-          </button>
-        </nav>
-        <div class="sidepanel">
-          <header class="sidepanel-head">
-            <span class="sidepanel-slot lockup" aria-live="polite">
-              <span class="br">[</span><span class="name">tabs</span
-              ><span class="br">]</span>
-            </span>
-            <span class="sidepanel-head-right">
-              <span class="sidepanel-meta">0 open</span>
-              <button
-                type="button"
-                class="new-tab-btn"
-                data-action="new-tab"
-                aria-label="new tab"
-                title="new tab (⌘T)"
-              >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M5 12h14" />
-                <path d="M12 5v14" />
+              <svg class="icon" aria-hidden="true">
+                <use href="assets/lucide-sprite.svg#icon-layers"/>
               </svg>
-              </button>
-            </span>
-          </header>
-          <div class="sidepanel-body">
-            <div data-panel="tabs" class="is-active-panel">
-              <!--
-                tab-row: the tabstrip element nests here (maintainer decision —
-                tabs render vertically in the sidebar, not the top-bar). The
-                `theme-vertical` tabbar variant stacks the rows.
-              -->
-              <div data-slot="tab-row">
-                <div
-                  id="tabstrip"
-                  class="tabbar theme-vertical"
-                  role="tablist"
-                  aria-label="open tabs"
-                >
-                  <!-- host.js rebuilds these rows from the runtime tab list. A
-                       single seed row keeps the panel non-empty before first
-                       paint. -->
-                  <div class="tab is-active" role="tab" aria-selected="true">
-                    <span class="favicon"></span>
-                    <span class="title">new tab</span>
+            </button>
+
+            <!-- Slot 2: bookmarks (rail.bookmarks, default: bookmark) -->
+            <button
+              class="activity-btn"
+              aria-label="bookmarks"
+              aria-pressed="false"
+              data-tooltip="bookmarks"
+            >
+              <svg class="icon" aria-hidden="true">
+                <use href="assets/lucide-sprite.svg#icon-bookmark"/>
+              </svg>
+            </button>
+
+            <!-- Slot 3: history (rail.history, default: clock) -->
+            <button
+              class="activity-btn"
+              aria-label="history"
+              aria-pressed="false"
+              data-tooltip="history"
+            >
+              <svg class="icon" aria-hidden="true">
+                <use href="assets/lucide-sprite.svg#icon-clock"/>
+              </svg>
+            </button>
+
+            <!-- Slot 4: plugin placeholder (rail.plugin_unbound) — ADR-0014 -->
+            <button
+              class="activity-btn rail-plugin-placeholder"
+              aria-label="available plugin panel slot"
+              aria-pressed="false"
+              data-tooltip="available — plugins can add panels here"
+              data-rail-slot="plugin-4"
+            >
+              <svg class="icon" aria-hidden="true">
+                <use href="assets/lucide-sprite.svg#icon-circle-plus"/>
+              </svg>
+            </button>
+
+            <!-- Slot 5: plugin placeholder (rail.plugin_unbound) — ADR-0014 -->
+            <button
+              class="activity-btn rail-plugin-placeholder"
+              aria-label="available plugin panel slot"
+              aria-pressed="false"
+              data-tooltip="available — plugins can add panels here"
+              data-rail-slot="plugin-5"
+            >
+              <svg class="icon" aria-hidden="true">
+                <use href="assets/lucide-sprite.svg#icon-circle-plus"/>
+              </svg>
+            </button>
+
+            <div class="activitybar-spacer"></div>
+
+            <!-- Collapse sidebar (bottom of rail) -->
+            <button
+              class="activity-btn collapse-sidebar-btn"
+              aria-label="collapse sidebar"
+              aria-pressed="false"
+              data-tooltip="collapse sidebar"
+            >
+              <svg class="icon" aria-hidden="true">
+                <use href="assets/lucide-sprite.svg#icon-panel-left-close"/>
+              </svg>
+            </button>
+          </nav>
+
+          <!-- Side panel: tabbed content area -->
+          <div class="sidepanel">
+            <header class="sidepanel-head">
+              <!-- [tabs] bracket lockup + count chip (P1: just "3", no "open") -->
+              <span class="sidepanel-slot lockup" aria-live="polite">
+                <span class="br">[</span><span class="name">tabs</span><span class="br">]</span>
+              </span>
+              <span class="sidepanel-head-right">
+                <!-- Count chip: shows just the number (e.g. "3") -->
+                <span class="tab-count-chip" aria-label="open tab count">0</span>
+              </span>
+            </header>
+
+            <div class="sidepanel-body">
+              <div data-panel="tabs" class="is-active-panel">
+                <!--
+                  tab-row: the tabstrip element. Vertical theme variant stacks rows.
+                  P1: .favicon uses the dot-grid motif (not a checkbox).
+                  Active tab: 2px var(--accent) left-stripe + surface-2 bg lift.
+                  Close X: hover-only via .tab-close (keycap construction in CSS).
+                -->
+                <div data-slot="tab-row">
+                  <div
+                    id="tabstrip"
+                    class="tabbar theme-vertical"
+                    role="tablist"
+                    aria-label="open tabs"
+                  >
+                    <!-- host.js rebuilds these rows from the runtime tab list. A
+                         single seed row keeps the panel non-empty before first
+                         paint. -->
+                    <div class="tab is-active" role="tab" aria-selected="true">
+                      <span class="favicon favicon-placeholder" aria-hidden="true"></span>
+                      <span class="title">new tab</span>
+                      <button class="tab-close" aria-label="close tab" tabindex="-1">
+                        <svg class="icon" aria-hidden="true">
+                          <use href="assets/lucide-sprite.svg#icon-x"/>
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                 </div>
+
+                <!-- Empty zone below tab list: faint dot-grid motif at 20% opacity
+                     signals "intentional space." Per spec/components/empty-slot.md. -->
+                <div class="sidebar-empty-zone" aria-hidden="true"></div>
+              </div>
+
+              <div data-panel="bookmarks">
+                <!-- rows rendered by host.js applyOp("bookmark_list", …) -->
+              </div>
+              <div data-panel="history">
+                <!-- rows rendered by host.js applyOp("history_list", …) -->
               </div>
             </div>
-            <div data-panel="bookmarks">
-              <!-- rows rendered by host.js applyOp("bookmark_list", …) -->
-            </div>
-            <div data-panel="history">
-              <!-- rows rendered by host.js applyOp("history_list", …) -->
-            </div>
-          </div>
-        </div>
+          </div><!-- /.sidepanel -->
+
         </div><!-- /.sidebar-body -->
-        <!-- Workspace popover: floating dropdown below the strip.
-             Rows appended by host.js via DOM-build (never innerHTML). -->
-        <div
-          id="workspace-popover"
-          class="workspace-popover"
-          role="listbox"
-          aria-label="workspaces"
-          hidden
-        >
-          <!-- rows appended by host.js applyOp('workspace_list', …) -->
-        </div>
       </aside>
 
-      <!-- the page region: transparent; compositor blits the web view through -->
+      <!-- Viewport: the page region is transparent; compositor blits through it.
+           P1: right-sidebar is removed from default theme so the viewport
+           extends to the right edge of the window (ADR-0014 §right slot). -->
       <main class="mote-page" data-slot="viewport" aria-label="page"></main>
 
-      <!-- right-sidebar: declared but unbound -> empty-slot motif -->
-      <aside
-        data-slot="right-sidebar"
-        class="slot-empty"
-        aria-label="empty slot: right-sidebar"
-      >
-        <div class="empty-card">
-          <span class="glyph lockup" aria-hidden="true">[ ]</span>
-          <span class="name">right-sidebar</span>
-          <span class="hint">no element bound</span>
-        </div>
-      </aside>
-    </div>
+      <!-- Right sidebar INTENTIONALLY ABSENT from the default theme per ADR-0014.
+           Plugins / custom themes can re-declare it. The 94px is reclaimed by
+           the viewport's `flex: 1` expansion in base.css. -->
+
+    </div><!-- /.mote-body -->
 
     <!-- ========================= BOTTOM BAR ========================= -->
     <div data-slot="bottom-bar">
@@ -387,17 +396,14 @@
         <div class="seg mode" aria-label="vim mode: NORMAL">NORMAL</div>
         <div class="seg"><span class="dot ok"></span>https · tls 1.3</div>
         <div class="seg spacer"></div>
-        <div class="seg" style="color: var(--fg-2)">7 tabs · 142mb</div>
-        <div class="seg theme-btn">theme: dusk</div>
+        <div class="seg" style="color: var(--fg-2)">0 tabs</div>
       </div>
     </div>
 
     <!--
       Mount roots for the integrity panel (Ctrl+Shift+I) and the permission
       approval dialog. Both are populated by panels.js from JSON the shell
-      pushes via window.mote.applyOp — never as HTML strings. They are hidden
-      until a render op fires. The chrome-overlay container fills the viewport
-      so the panel sits above page content the same way the legacy overlay did.
+      pushes via window.mote.applyOp — never as HTML strings.
     -->
     <div
       id="mote-integrity-root"
@@ -414,7 +420,6 @@
 
     <!--
       Command palette overlay (widget kind). Hidden until invoked (⌘⇧P).
-      Rendered here for reference/structure; the runtime toggles its presence.
     -->
     <template id="palette-template">
       <div
@@ -426,15 +431,10 @@
         <div class="palette">
           <div class="palette-input">
             <span class="prompt">›_</span>
-            <input value="theme" placeholder="search commands" aria-label="command palette" />
-            <span class="count">12</span>
+            <input value="" placeholder="search commands" aria-label="command palette" />
+            <span class="count">0</span>
           </div>
           <div class="palette-list" role="listbox">
-            <div class="palette-row is-sel" role="option" aria-selected="true">
-              <span class="cat">theme</span>
-              <span class="name"><b>theme</b> switch — dusk</span>
-              <span class="keys"><kbd class="kbd-sm">⏎</kbd></span>
-            </div>
           </div>
         </div>
       </div>
