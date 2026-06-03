@@ -1002,6 +1002,31 @@ fn validate_statusline_elements(
     Ok(())
 }
 
+/// Tests whether `icon` is a valid ADR-0013 source string referencing a
+/// bundled lucide name. Returns `Ok(())` on success and the rejection reason
+/// on failure (the caller frames the error). Shared by the load-time
+/// [`validate_statusline_icon`] and the runtime `mote.statusline.set`
+/// host API in [`crate::hostapi`].
+pub(crate) fn check_statusline_icon_source(icon: &str) -> Result<(), String> {
+    let Some((pack, name)) = icon.split_once(':') else {
+        return Err(format!(
+            "icon `{icon}` is not in `<pack>:<name>` format; expected e.g. `lucide:lock`"
+        ));
+    };
+    if pack != "lucide" {
+        return Err(format!(
+            "icon uses unknown pack `{pack}` in `{icon}`; registered packs: lucide"
+        ));
+    }
+    if !BUNDLED_LUCIDE_NAMES.contains(&name) {
+        return Err(format!(
+            "icon uses unknown lucide name `{name}` in `{icon}`; valid names: {}",
+            BUNDLED_LUCIDE_NAMES.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Validates an ADR-0013 icon source string for a statusline element.
 fn validate_statusline_icon(icon: &str, element_id: &str, index: usize) -> Result<(), LoadError> {
     let Some((pack, name)) = icon.split_once(':') else {

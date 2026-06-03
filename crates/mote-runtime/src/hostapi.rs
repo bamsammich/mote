@@ -519,8 +519,28 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
 
                 // Flatten: `Some(Some(s))` → pass the inner `Some(s)` as the
                 // "update this field" signal; `None` (key absent) → skip.
+                //
+                // Security hardening (post-polish-phase security review): if
+                // an icon override is being set, validate it against the ADR-
+                // 0013 contract here at the host boundary, the same way the
+                // load-time statusline validator does. Without this, a plugin
+                // could push an `icon = "lucide:bogus"` (or any pack/name
+                // outside the bundled set) and the chrome would silently fail
+                // to render it. Not a privilege escalation today (the chrome
+                // render path is safe), but defense-in-depth: every plugin
+                // path that touches an icon string fails closed at v0.1.
+                let icon_update = icon.flatten();
+                if let Some(ref icon_str) = icon_update
+                    && let Err(reason) = crate::runtime::check_statusline_icon_source(icon_str)
+                {
+                    log::warn!(
+                        "mote.statusline.set(`{id}`): icon update rejected — {reason}; \
+                         element will not be updated"
+                    );
+                    return Ok(false);
+                }
                 let found =
-                    core.statusline_set(&fq_id, text.flatten(), icon.flatten(), color, tooltip);
+                    core.statusline_set(&fq_id, text.flatten(), icon_update, color, tooltip);
 
                 if !found {
                     log::warn!(

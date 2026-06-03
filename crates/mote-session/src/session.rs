@@ -336,7 +336,10 @@ impl Session {
     /// Returns [`SessionError::Internal`] if the plugin name is somehow invalid
     /// (should never happen in practice — the name is a compile-time constant).
     pub fn plugin_name() -> Result<PluginName, SessionError> {
-        PluginName::new("mote-session")
+        // Internal pseudo-plugin name — uses the reserved `mote-*` namespace,
+        // so it must go through `new_internal` (which skips the reservation
+        // check that `new` enforces against user-supplied names).
+        PluginName::new_internal("mote-session")
             .map_err(|e| SessionError::Internal(format!("invalid plugin name: {e}")))
     }
 
@@ -616,7 +619,7 @@ mod tests {
     // ── Persistence ───────────────────────────────────────────────────────────
 
     fn session_ns(store: &mote_storage::Store, identity: IdentityId) -> Namespace {
-        let plugin = PluginName::new("mote-session").unwrap();
+        let plugin = PluginName::new_internal("mote-session").unwrap();
         store.namespace(&plugin, IdentityScope::PerIdentity(identity))
     }
 

@@ -140,10 +140,13 @@ impl ApprovalStore {
     #[must_use]
     pub fn new(store: &Store) -> Self {
         // STORE_PLUGIN_NAME is a compile-time constant validated at startup.
-        // PluginName::new panics on invalid names; this is the intended
-        // "programmer error" guard at initialisation time.
-        let reserved =
-            PluginName::new(STORE_PLUGIN_NAME).expect("STORE_PLUGIN_NAME is a valid PluginName");
+        // It deliberately lives in the reserved `mote-*` namespace (an
+        // internal Mote pseudo-plugin for the per-identity approval store),
+        // so it must use `new_internal` which skips the user-namespace
+        // reservation. Panic on invalid is the intended "programmer error"
+        // guard at initialisation time.
+        let reserved = PluginName::new_internal(STORE_PLUGIN_NAME)
+            .expect("STORE_PLUGIN_NAME is a valid PluginName");
         Self {
             namespace: store.namespace(&reserved, IdentityScope::Global),
         }

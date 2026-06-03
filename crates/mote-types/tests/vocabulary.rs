@@ -3,8 +3,8 @@
 //! These exercise only the public API, exactly as a downstream crate would.
 
 use mote_types::{
-    Checksum, Glob, GlobSet, IdentityId, Match, Origin, PluginName, SchemaVersion, TabId,
-    WorkspaceId,
+    Checksum, Glob, GlobSet, IdentityId, Match, Origin, PluginName, PluginNameError, SchemaVersion,
+    TabId, WorkspaceId,
 };
 
 // --- SchemaVersion ----------------------------------------------------------
@@ -56,6 +56,32 @@ fn plugin_name_rejects_invalid() {
         "slash/name",  // path separator
     ] {
         assert!(PluginName::new(bad).is_err(), "{bad:?} must be rejected");
+    }
+}
+
+/// The `mote` and `mote-*` plugin names are reserved for built-in identifiers
+/// (ADR-0016 status-line built-ins use `mote.<id>`; future built-in namespaces
+/// follow the same convention). Reservation prevents id-collision attacks where
+/// a malicious plugin named `mote` could overwrite a built-in element's state.
+#[test]
+fn plugin_name_rejects_reserved_mote_prefix() {
+    for reserved in [
+        "mote",
+        "mote-extra",
+        "mote-anything",
+        "mote-", // technically caught earlier (trailing hyphen) but reserve regardless
+    ] {
+        let err = PluginName::new(reserved).expect_err(&format!("{reserved:?} must be rejected"));
+        // Validate the specific error so a future refactor that changes the
+        // rejection mechanism keeps the reservation intent intact.
+        match err {
+            PluginNameError::ReservedName(_) | PluginNameError::TrailingHyphen => {}
+            other => panic!("{reserved:?} rejected with unexpected error: {other:?}"),
+        }
+    }
+    // Sanity: similarly-prefixed but distinct names still parse.
+    for ok in ["motel", "moth", "mot", "motes-of-dust"] {
+        PluginName::new(ok).unwrap_or_else(|e| panic!("{ok:?} should parse: {e}"));
     }
 }
 

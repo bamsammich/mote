@@ -2042,6 +2042,19 @@
           label: "view source",
           action: function () {
             // Get current URL from omnibox; open view-source: in a new tab.
+            //
+            // Security note (post-polish-phase security-review item):
+            // concatenating the omnibox value directly into a navigation URL
+            // is SAFE in this codepath because the omnibox value is set only
+            // by the chrome's own `set_url` applyOp, which receives a URL
+            // sourced from CEF's OnAddressChange — i.e. the real address of
+            // the active tab, not any content-supplied text. An attacker
+            // cannot smuggle `javascript:` or similar into the omnibox via
+            // page content. If a future change ever lets untrusted content
+            // populate the omnibox value (e.g. an auto-suggest path that
+            // reflects user-typed text), this concatenation MUST be
+            // replaced with a structured op that takes the active tab's
+            // URL from the shell instead.
             var input = document.getElementById("omnibox-input");
             var url = (input && input.value) ? input.value : "";
             if (url && window.mote && window.mote.invoke) {

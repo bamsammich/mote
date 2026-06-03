@@ -5163,7 +5163,7 @@ mod tests {
 
         let store = Store::open_in_memory().unwrap();
         let identity = IdentityId::new(1);
-        let plugin = mote_types::PluginName::new("mote-session").unwrap();
+        let plugin = mote_types::PluginName::new_internal("mote-session").unwrap();
         let ns = store.namespace(&plugin, mote_storage::IdentityScope::PerIdentity(identity));
         let workspace = WorkspaceId::new(0);
 
