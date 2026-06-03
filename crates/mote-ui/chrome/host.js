@@ -1124,6 +1124,24 @@
     }
   }
 
+  // P6: wire the settings rail button — navigates to the settings panel.
+  //
+  // The cog is slot 4 of the activity bar ([data-action='open-settings']).
+  // Clicking it invokes `navigate` to `mote://chrome/settings/general`, which
+  // the shell routes to the general section HTML (ADR-0017 deep-link contract).
+  // The settings page is a full document load, not a sidebar panel switch.
+  function wireSettingsButton() {
+    var btn = document.querySelector("[data-action='open-settings']");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (window.mote && window.mote.invoke) {
+        window.mote
+          .invoke("navigate", { url: "mote://chrome/settings/general" })
+          .catch(function () {});
+      }
+    });
+  }
+
   // R4: handle the `focus_omnibox` applyOp pushed by `Ctrl+L`.
   // Focuses the omnibox input and selects all existing text — the standard
   // address-bar behavior. Chained via prevApplyOp so existing handlers are
@@ -1171,6 +1189,8 @@
     wireTooltip();
     // P1: wire the rail plugin-placeholder click handlers.
     wireRailPlaceholders();
+    // P6: wire the settings rail button (slot 4 → navigate to settings panel).
+    wireSettingsButton();
   }
 
   if (document.readyState === "loading") {

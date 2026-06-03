@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; connect-src 'self';"
+    />
+    <title>settings — plugins</title>
+    <link rel="stylesheet" href="../tokens.css" />
+    <link rel="stylesheet" href="../base.css" />
+    <link rel="stylesheet" href="../components/kbd.css" />
+    <link rel="stylesheet" href="../components/button.css" />
+    <link rel="stylesheet" href="../components/field.css" />
+    <link rel="stylesheet" href="../components/badge.css" />
+    <link rel="stylesheet" href="settings.css" />
+    <script src="settings.js" defer></script>
+  </head>
+  <body class="mote-root" data-theme="dusk">
+    <div class="settings-root">
+
+      <!-- [settings] header + section tab strip -->
+      <header class="settings-header">
+        <div class="settings-title">
+          <span class="settings-lockup lockup" aria-label="settings panel">
+            <span class="br">[</span><span class="name">settings</span><span class="br">]</span>
+          </span>
+        </div>
+        <nav class="settings-tabs" aria-label="settings sections" role="tablist">
+          <button class="settings-tab" data-section="general" role="tab" aria-label="general settings">general</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="plugins" role="tab" aria-label="plugins settings">plugins</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="integrity" role="tab" aria-label="integrity settings">integrity</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="keybinds" role="tab" aria-label="keybinds reference">keybinds</button>
+        </nav>
+      </header>
+
+      <!-- plugins section content -->
+      <main class="settings-body" role="main">
+        <section class="settings-section" aria-label="plugins settings">
+
+          <!-- filter + install bar -->
+          <div class="settings-filter-bar">
+            <input
+              id="plugin-search"
+              class="settings-search"
+              type="search"
+              placeholder="filter plugins"
+              aria-label="filter installed plugins"
+              spellcheck="false"
+            />
+            <button
+              id="plugin-install-btn"
+              class="btn btn-secondary"
+              type="button"
+              aria-label="install plugin from file"
+            >
+              install plugin
+            </button>
+            <!--
+              URL install button intentionally absent in v0.1. See ADR-0017
+              "URL-source plugin install deferral" for the rationale.
+            -->
+          </div>
+
+          <!-- plugin list: populated by the shell's applyOp('plugin_list', …).
+               In v0.1 the three bundled plugins are seed rows shown until the
+               shell pushes the live list. -->
+          <div class="plugin-list" role="list" aria-label="installed plugins">
+
+            <!-- bookmarks (bundled) -->
+            <div class="plugin-row" role="listitem" data-plugin="bookmarks">
+              <span class="plugin-name">bookmarks</span>
+              <span class="plugin-version">v0.1.0</span>
+              <span class="badge info">bundled</span>
+              <div class="plugin-chips" aria-label="granted capabilities">
+                <button class="capability-chip" data-cap="ui:sidebar_panel" type="button" aria-label="capability: ui:sidebar_panel">ui:sidebar_panel</button>
+                <button class="capability-chip" data-cap="ui:bookmarks_provider" type="button" aria-label="capability: ui:bookmarks_provider">ui:bookmarks_provider</button>
+              </div>
+              <div class="plugin-actions" role="group" aria-label="plugin actions for bookmarks">
+                <button class="btn btn-ghost btn-sm" type="button" data-action="plugin-disable" data-plugin="bookmarks" aria-label="disable bookmarks plugin">disable</button>
+                <button class="btn btn-danger btn-sm" type="button" data-action="plugin-uninstall" data-plugin="bookmarks" aria-disabled="true" aria-label="bundled plugins cannot be uninstalled">uninstall</button>
+              </div>
+            </div>
+
+            <!-- history (bundled) -->
+            <div class="plugin-row" role="listitem" data-plugin="history">
+              <span class="plugin-name">history</span>
+              <span class="plugin-version">v0.1.0</span>
+              <span class="badge info">bundled</span>
+              <div class="plugin-chips" aria-label="granted capabilities">
+                <button class="capability-chip" data-cap="ui:sidebar_panel" type="button" aria-label="capability: ui:sidebar_panel">ui:sidebar_panel</button>
+                <button class="capability-chip" data-cap="ui:history_provider" type="button" aria-label="capability: ui:history_provider">ui:history_provider</button>
+              </div>
+              <div class="plugin-actions" role="group" aria-label="plugin actions for history">
+                <button class="btn btn-ghost btn-sm" type="button" data-action="plugin-disable" data-plugin="history" aria-label="disable history plugin">disable</button>
+                <button class="btn btn-danger btn-sm" type="button" data-action="plugin-uninstall" data-plugin="history" aria-disabled="true" aria-label="bundled plugins cannot be uninstalled">uninstall</button>
+              </div>
+            </div>
+
+            <!-- workspace-manager (bundled) -->
+            <div class="plugin-row" role="listitem" data-plugin="workspace-manager">
+              <span class="plugin-name">workspace-manager</span>
+              <span class="plugin-version">v0.1.0</span>
+              <span class="badge info">bundled</span>
+              <div class="plugin-chips" aria-label="granted capabilities">
+                <button class="capability-chip" data-cap="workspace:provider" type="button" aria-label="capability: workspace:provider">workspace:provider</button>
+              </div>
+              <div class="plugin-actions" role="group" aria-label="plugin actions for workspace-manager">
+                <button class="btn btn-ghost btn-sm" type="button" data-action="plugin-disable" data-plugin="workspace-manager" aria-label="disable workspace-manager plugin">disable</button>
+                <button class="btn btn-danger btn-sm" type="button" data-action="plugin-uninstall" data-plugin="workspace-manager" aria-disabled="true" aria-label="bundled plugins cannot be uninstalled">uninstall</button>
+              </div>
+            </div>
+
+          </div><!-- /.plugin-list -->
+
+        </section>
+
+        <!-- capability detail popover (floating; shadow is correct for floating surfaces) -->
+        <div id="cap-detail" class="cap-detail" role="tooltip" aria-live="polite">
+          <div class="cap-detail-name"></div>
+          <div class="cap-detail-desc"></div>
+        </div>
+
+      </main>
+    </div>
+  </body>
+</html>

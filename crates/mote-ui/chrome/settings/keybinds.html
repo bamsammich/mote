@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; connect-src 'self';"
+    />
+    <title>settings — keybinds</title>
+    <link rel="stylesheet" href="../tokens.css" />
+    <link rel="stylesheet" href="../base.css" />
+    <link rel="stylesheet" href="../components/kbd.css" />
+    <link rel="stylesheet" href="../components/button.css" />
+    <link rel="stylesheet" href="../components/field.css" />
+    <link rel="stylesheet" href="../components/badge.css" />
+    <link rel="stylesheet" href="settings.css" />
+    <script src="settings.js" defer></script>
+  </head>
+  <body class="mote-root" data-theme="dusk">
+    <div class="settings-root">
+
+      <!-- [settings] header + section tab strip -->
+      <header class="settings-header">
+        <div class="settings-title">
+          <span class="settings-lockup lockup" aria-label="settings panel">
+            <span class="br">[</span><span class="name">settings</span><span class="br">]</span>
+          </span>
+        </div>
+        <nav class="settings-tabs" aria-label="settings sections" role="tablist">
+          <button class="settings-tab" data-section="general" role="tab" aria-label="general settings">general</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="plugins" role="tab" aria-label="plugins settings">plugins</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="integrity" role="tab" aria-label="integrity settings">integrity</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="keybinds" role="tab" aria-label="keybinds reference">keybinds</button>
+        </nav>
+      </header>
+
+      <!-- keybinds section content -->
+      <main class="settings-body" role="main">
+        <section class="settings-section" aria-label="keyboard shortcuts">
+
+          <!-- search filter -->
+          <div class="settings-filter-bar">
+            <input
+              id="keybinds-search"
+              class="settings-search"
+              type="search"
+              placeholder="filter shortcuts"
+              aria-label="filter keyboard shortcuts"
+              spellcheck="false"
+            />
+          </div>
+
+          <!--
+            Keybind table, grouped by scope (ADR-0012 scope model):
+              global        — works regardless of focus owner
+              chrome        — works only when chrome has focus
+              content       — works only when a content page has focus
+              captured-modal — works when a modal (integrity, picker, approval) is open
+
+            Columns: action · chord · source (built-in / plugin / user override)
+            Source is built-in for all v0.1 entries; plugin + user override are
+            reserved per ADR-0012.
+
+            settings.js wireKeybindsSection() calls keybinds_list op and replaces
+            the seed rows with live data; if the op is unavailable the seed rows
+            below remain as a static fallback.
+          -->
+
+          <!-- global scope -->
+          <div id="scope-block-global" class="keybinds-scope-block">
+            <div class="keybinds-section-head">
+              <span class="keybinds-lockup lockup" aria-hidden="true">
+                <span class="br">[</span><span>global</span><span class="br">]</span>
+              </span>
+              <span style="color: var(--fg-2); font: var(--text-mono-sm)">works regardless of focus owner</span>
+            </div>
+            <table class="keybinds-table" aria-label="global keybinds">
+              <thead>
+                <tr>
+                  <th scope="col">action</th>
+                  <th scope="col">chord</th>
+                  <th scope="col">source</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="kb-action">new tab</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>T</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">close tab / window</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>W</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">close window</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>Shift</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>W</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">quit mote</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>Q</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">switch workspace 1</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>1</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">switch workspace 2</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>2</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">switch workspace 3–8</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>3</kbd>–<kbd>8</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">switch to last workspace</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>9</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">open workspace picker</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>Space</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- chrome scope -->
+          <div id="scope-block-chrome" class="keybinds-scope-block">
+            <div class="keybinds-section-head">
+              <span class="keybinds-lockup lockup" aria-hidden="true">
+                <span class="br">[</span><span>chrome</span><span class="br">]</span>
+              </span>
+              <span style="color: var(--fg-2); font: var(--text-mono-sm)">works when the omnibox or chrome panel has focus</span>
+            </div>
+            <table class="keybinds-table" aria-label="chrome keybinds">
+              <thead>
+                <tr>
+                  <th scope="col">action</th>
+                  <th scope="col">chord</th>
+                  <th scope="col">source</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="kb-action">focus omnibox</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>L</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">reload page</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>R</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">go back</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>[</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">go forward</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>]</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">cycle tab</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>Tab</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+                <tr>
+                  <td class="kb-action">toggle integrity panel</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>Shift</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>I</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- content scope -->
+          <div id="scope-block-content" class="keybinds-scope-block">
+            <div class="keybinds-section-head">
+              <span class="keybinds-lockup lockup" aria-hidden="true">
+                <span class="br">[</span><span>content</span><span class="br">]</span>
+              </span>
+              <span style="color: var(--fg-2); font: var(--text-mono-sm)">works when a web page has focus</span>
+            </div>
+            <table class="keybinds-table" aria-label="content keybinds">
+              <thead>
+                <tr>
+                  <th scope="col">action</th>
+                  <th scope="col">chord</th>
+                  <th scope="col">source</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- Ctrl+L is forwarded even from content focus; listed here
+                     for discoverability. Other content-only chords land in v2. -->
+                <tr>
+                  <td class="kb-action">focus omnibox</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Ctrl</kbd><span style="color:var(--fg-2);margin:0 1px">+</span><kbd>L</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- captured-modal scope -->
+          <div id="scope-block-captured-modal" class="keybinds-scope-block">
+            <div class="keybinds-section-head">
+              <span class="keybinds-lockup lockup" aria-hidden="true">
+                <span class="br">[</span><span>captured-modal</span><span class="br">]</span>
+              </span>
+              <span style="color: var(--fg-2); font: var(--text-mono-sm)">works when a modal dialog is open</span>
+            </div>
+            <table class="keybinds-table" aria-label="captured-modal keybinds">
+              <thead>
+                <tr>
+                  <th scope="col">action</th>
+                  <th scope="col">chord</th>
+                  <th scope="col">source</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="kb-action">dismiss modal</td>
+                  <td class="kb-chord"><span class="chord-group"><kbd>Esc</kbd></span></td>
+                  <td><span class="source-badge">built-in</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p style="color: var(--fg-2); font: var(--text-mono-sm)">
+            user chord customization is deferred per adr-0012 · plugin keybinds will appear here when registered
+          </p>
+
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

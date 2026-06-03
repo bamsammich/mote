@@ -1,0 +1,450 @@
+/*
+ * settings.css — shared layout for the four settings sections.
+ *
+ * Loaded by each settings/*.html page. Follows Mote design tokens; no raw hex,
+ * no gradients, no shadows on inline elements (ADR-0017, mote-design rules).
+ *
+ * Layout:
+ *   .settings-root        — full-height flex column (fills the settings panel)
+ *   .settings-header      — [settings] lockup + section tab strip
+ *   .settings-tabs        — section nav (general · plugins · integrity · keybinds)
+ *   .settings-body        — scrollable content area for the active section
+ *   .settings-section     — one section's content wrapper
+ *   .settings-group       — a labeled group of related fields within a section
+ *   .settings-row         — one row: label + control + optional reflect
+ */
+
+/* ---- Root shell ---- */
+
+.settings-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--text-body);
+}
+
+/* ---- Header: [settings] lockup + section tab strip ---- */
+
+.settings-header {
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+.settings-title {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* [settings] bracket-lockup pattern */
+.settings-lockup {
+  font: var(--text-mono);
+  font-weight: 600;
+  user-select: none;
+}
+
+.settings-lockup .br {
+  color: var(--accent);
+}
+
+.settings-lockup .name {
+  color: var(--fg);
+}
+
+/* Section tab strip: general · plugins · integrity · keybinds */
+.settings-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 var(--space-4);
+  height: 36px;
+}
+
+.settings-tab {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 var(--space-3);
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  cursor: pointer;
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  text-transform: lowercase;
+  transition:
+    color var(--dur-micro) var(--ease-out),
+    border-color var(--dur-micro) var(--ease-out);
+}
+
+.settings-tab:hover {
+  color: var(--fg);
+}
+
+.settings-tab.is-active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+.settings-tab-sep {
+  color: var(--border-strong);
+  font: var(--text-mono-sm);
+  padding: 0 2px;
+  user-select: none;
+}
+
+/* ---- Body: scrollable content ---- */
+
+.settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5) var(--space-6);
+  min-height: 0;
+}
+
+/* ---- Section ---- */
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* ---- Group: a labeled block of related fields ---- */
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-group-label {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* ---- Row: one setting ---- */
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 36px;
+}
+
+.settings-row-label {
+  flex: 0 0 200px;
+  font: var(--text-body);
+  color: var(--fg-1);
+}
+
+.settings-row-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row-reflect {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+}
+
+/* ---- Managed indicator: shown when a value is overridden via managed.lua ---- */
+
+.managed-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  font: var(--text-mono-sm);
+  font-size: 9px;
+  color: var(--accent);
+  border: 1px solid rgba(224, 164, 88, 0.35);
+  border-radius: var(--radius-1);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- Plugin list (plugins + integrity sections) ---- */
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--border);
+  overflow: hidden;
+}
+
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-1);
+  cursor: pointer;
+  transition: background var(--dur-micro) var(--ease-out);
+}
+
+.plugin-row:hover {
+  background: var(--surface-2);
+}
+
+.plugin-name {
+  font: var(--text-mono);
+  font-weight: 600;
+  color: var(--fg);
+  flex: 0 0 auto;
+}
+
+.plugin-version {
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  flex: 0 0 auto;
+}
+
+.plugin-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  flex: 1;
+}
+
+.capability-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  font: var(--text-mono-sm);
+  font-size: 10px;
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-1);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition:
+    background var(--dur-micro) var(--ease-out),
+    border-color var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out),
+    border-bottom-width var(--dur-micro) var(--ease-out);
+}
+
+.capability-chip:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.capability-chip:active {
+  border-bottom-width: 1px;
+  transform: translateY(1px);
+}
+
+.plugin-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+/* ---- Integrity table ---- */
+
+.integrity-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font: var(--text-mono-sm);
+}
+
+.integrity-table th {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.integrity-table th:hover {
+  color: var(--fg);
+}
+
+.integrity-table th.sorted-asc::after {
+  content: " ↑";
+  color: var(--accent);
+}
+
+.integrity-table th.sorted-desc::after {
+  content: " ↓";
+  color: var(--accent);
+}
+
+.integrity-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--fg);
+}
+
+.integrity-table tbody tr {
+  cursor: pointer;
+  transition: background var(--dur-micro) var(--ease-out);
+}
+
+.integrity-table tbody tr:hover td {
+  background: var(--surface-1);
+}
+
+.integrity-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ---- Keybinds table ---- */
+
+.keybinds-section-head {
+  margin-top: var(--space-5);
+  margin-bottom: var(--space-2);
+  font: var(--text-mono-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.keybinds-section-head:first-child {
+  margin-top: 0;
+}
+
+.keybinds-lockup .br {
+  color: var(--accent);
+}
+
+.keybinds-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font: var(--text-mono-sm);
+  margin-bottom: var(--space-3);
+}
+
+.keybinds-table th {
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.keybinds-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--fg);
+}
+
+.keybinds-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.chord-group {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  font: var(--text-mono-sm);
+  font-size: 9px;
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  text-transform: lowercase;
+}
+
+/* ---- Search / filter bar ---- */
+
+.settings-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.settings-search {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: var(--radius-1);
+  padding: 6px 10px;
+  font: var(--text-mono-sm);
+}
+
+.settings-search:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.settings-filter-select {
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: var(--radius-1);
+  padding: 6px 10px;
+  font: var(--text-mono-sm);
+}
+
+.settings-filter-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- Cap detail popover ---- */
+
+.cap-detail {
+  position: fixed;
+  z-index: 200;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-2);
+  padding: var(--space-3) var(--space-4);
+  font: var(--text-mono-sm);
+  color: var(--fg);
+  max-width: 280px;
+  display: none;
+}
+
+.cap-detail.is-visible {
+  display: block;
+}
+
+.cap-detail-name {
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: var(--space-2);
+}
