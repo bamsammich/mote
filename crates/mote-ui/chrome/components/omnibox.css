@@ -17,9 +17,14 @@
   overflow: hidden;
 }
 
+/* P2: 2px accent outset via sharp double-border — NO glow (design rule 9).
+ * Implemented as a 2px solid outline with offset-0 so it sits just outside the
+ * existing 1px border. The design doc specifies "2px var(--accent) outset,
+ * sharp double-border, NOT a CSS glow" — outline achieves this without shadow. */
 .omni.is-focused {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(224, 164, 88, 0.18);
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
 }
 
 /* `[ask]` is reserved for a future AI plugin — styling documented, not shipped. */
@@ -211,3 +216,36 @@
 .omni .right .bookmark-toggle:hover                 { color: var(--fg); }
 .omni .right .bookmark-toggle.is-bookmarked:hover   { color: var(--accent); }
 .omni .right .bookmark-toggle.is-bookmarked svg path { fill: currentColor; }
+
+/* ---- P2: Security indicator ---- */
+/* The .secure element is a clickable button (P2). Default: green ● (https).
+ * .is-insecure: amber [!] in --warn color. cursor:pointer is set by JS. */
+.omni .secure.is-secure   { color: var(--success); }
+.omni .secure.is-insecure { color: var(--danger); font-weight: 600; }
+.omni .secure:hover       { opacity: 0.8; }
+
+/* ---- P2: Nav-button disabled state ---- */
+/* .is-nav-disabled mirrors aria-disabled="true". Reduces color to fg-3 and
+ * suppresses the keycap press-down transform so disabled buttons feel inert. */
+.nav-btn.is-nav-disabled {
+  color: var(--fg-3);
+  pointer-events: none;
+  opacity: 0.45;
+}
+
+/* ---- P2: Workspace chip multi-workspace dot ---- */
+/* A small status dot (--radius-dot) appears to the right of the ws-chevron
+ * when the chip has .has-multi-ws. CSS-only; no JS DOM needed beyond the class. */
+.ws-chip .ws-multi-dot {
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-dot);
+  background: var(--accent);
+  margin-left: 4px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.ws-chip.has-multi-ws .ws-multi-dot {
+  display: inline-block;
+}

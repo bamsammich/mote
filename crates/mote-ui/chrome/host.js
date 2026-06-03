@@ -158,11 +158,283 @@
     return cell;
   }
 
+  // ---- P2: Shared popover helpers --------------------------------------------
+  //
+  // Both the omnibox context menu and the security popover use the same
+  // construction pattern as the workspace popover (DOM-build, never innerHTML
+  // on payload content per ADR-0005). A single shared popover element is reused.
+
+  var _activePopover = null; // the currently-open popover (or null)
+
+  function closeActivePopover() {
+    if (_activePopover && _activePopover.parentNode) {
+      _activePopover.parentNode.removeChild(_activePopover);
+    }
+    _activePopover = null;
+  }
+
+  // Build a popover anchored below (x, y) with the given rows. Each row is
+  // an object: { label, sublabel?, action? }. Returns the popover element.
+  // action is a callback; rows without action are informational (no pointer
+  // cursor, slightly dimmer).
+  function buildAndShowPopover(x, y, rows, extraClass) {
+    closeActivePopover();
+
+    var pop = document.createElement("div");
+    pop.className = "mote-popover" + (extraClass ? " " + extraClass : "");
+    pop.setAttribute("role", "menu");
+
+    rows.forEach(function (row) {
+      var el = document.createElement("div");
+      el.className = "popover-row" + (row.action ? " is-actionable" : " is-info");
+      el.setAttribute("role", row.action ? "menuitem" : "presentation");
+
+      var labelEl = document.createElement("span");
+      labelEl.className = "popover-label";
+      labelEl.textContent = row.label; // text node — not innerHTML
+      el.appendChild(labelEl);
+
+      if (row.sublabel) {
+        var subEl = document.createElement("span");
+        subEl.className = "popover-sublabel";
+        subEl.textContent = row.sublabel; // text node
+        el.appendChild(subEl);
+      }
+
+      if (row.action) {
+        el.addEventListener("mousedown", function (ev) {
+          ev.preventDefault();
+          closeActivePopover();
+          row.action();
+        });
+      }
+
+      pop.appendChild(el);
+    });
+
+    document.body.appendChild(pop);
+    _activePopover = pop;
+
+    // Position below click point; flip above if it clips the viewport bottom.
+    var vpW = window.innerWidth || document.documentElement.clientWidth;
+    var vpH = window.innerHeight || document.documentElement.clientHeight;
+    var popW = pop.offsetWidth || 200;
+    var popH = pop.offsetHeight || 80;
+
+    var left = Math.min(x, vpW - popW - 4);
+    var top = y + 4;
+    if (top + popH > vpH - 4) {
+      top = y - popH - 4;
+    }
+    pop.style.left = Math.max(4, left) + "px";
+    pop.style.top = Math.max(4, top) + "px";
+
+    return pop;
+  }
+
+  // Close popover on click-outside (any click not inside the active popover).
+  document.addEventListener("mousedown", function (ev) {
+    if (!_activePopover) return;
+    if (ev.target.closest(".mote-popover")) return;
+    closeActivePopover();
+  }, true);
+
+  // Close on Escape.
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && _activePopover) {
+      closeActivePopover();
+    }
+  }, true);
+
+  // ---- P2: Omnibox right-click context menu ----------------------------------
+
+  function showOmniboxContextMenu(x, y) {
+    buildAndShowPopover(x, y, [
+      {
+        label: "copy url",
+        action: function () {
+          if (window.mote && window.mote.invoke) {
+            window.mote.invoke("copy_active_url", {}).catch(function () {});
+          }
+        },
+      },
+      {
+        label: "copy as markdown link",
+        action: function () {
+          // Markdown link: [title](url). The title is the omnibox's text
+          // (the page URL). A future wave can read the page title via
+          // window.mote.invoke('get_page_title', {}).
+          var input = document.getElementById("omnibox-input");
+          var url = (input && input.value) ? input.value : "";
+          var md = "[" + url + "](" + url + ")";
+          // Write to clipboard via the Clipboard API (available in chrome
+          // origin). Falls back to copy_active_url if the API is absent.
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(md).catch(function () {
+              if (window.mote && window.mote.invoke) {
+                window.mote.invoke("copy_active_url", {}).catch(function () {});
+              }
+            });
+          } else if (window.mote && window.mote.invoke) {
+            window.mote.invoke("copy_active_url", {}).catch(function () {});
+          }
+        },
+      },
+    ], "omnibox-context-menu");
+  }
+
+  // ---- P2: Security indicator popover ----------------------------------------
+  //
+  // The .secure element (the green ● or [!] indicator) becomes a clickable
+  // button. Click → popover showing TLS/security info derived from the current
+  // URL. Full cert details (subject/issuer/cipher/TLS version) require a CEF
+  // SSL-status callback that is not yet wired — v0.1 shows scheme-derived info.
+  // The JSON shape from the `security_info` op is forward-compatible.
+
+  // P2: derive security state from the current URL in the omnibox. Returns an
+  // object: { secure, scheme, label, rows[] }.
+  function deriveSecurityInfo(url) {
+    var lower = (url || "").toLowerCase().trim();
+    var secure = lower.indexOf("https://") === 0 ||
+                 lower.indexOf("mote://") === 0;
+    var scheme = lower.split(":")[0] || "unknown";
+
+    var rows = [];
+    if (secure) {
+      rows.push({ label: "connection", sublabel: "encrypted (tls)" });
+      rows.push({ label: "protocol", sublabel: "tls 1.3 (placeholder)" });
+      rows.push({ label: "certificate", sublabel: "verified (details pending)" });
+      rows.push({ label: "cookies", sublabel: "not available in v0.1" });
+      rows.push({ label: "permissions", sublabel: "none granted" });
+      rows.push({
+        label: "site settings",
+        action: function () {
+          if (window.mote && window.mote.invoke) {
+            var origin = encodeURIComponent(url.split("/").slice(0, 3).join("/"));
+            window.mote
+              .invoke("new_tab", {
+                url: "mote://chrome/settings/general?origin=" + origin,
+              })
+              .catch(function () {});
+          }
+        },
+      });
+    } else {
+      rows.push({
+        label: "not encrypted",
+        sublabel: "this page is not using https",
+      });
+      rows.push({
+        label: "cookies",
+        sublabel: "not available in v0.1",
+      });
+      rows.push({
+        label: "site settings",
+        action: function () {
+          if (window.mote && window.mote.invoke) {
+            var origin = encodeURIComponent(url.split("/").slice(0, 3).join("/"));
+            window.mote
+              .invoke("new_tab", {
+                url: "mote://chrome/settings/general?origin=" + origin,
+              })
+              .catch(function () {});
+          }
+        },
+      });
+    }
+    return { secure: secure, scheme: scheme, rows: rows };
+  }
+
+  function wireSecurityIndicator() {
+    var secureEl = document.querySelector(".omni .secure");
+    if (!secureEl) return;
+
+    // Make it a button semantically so it's keyboard-reachable.
+    secureEl.setAttribute("role", "button");
+    secureEl.setAttribute("tabindex", "0");
+    secureEl.setAttribute("aria-label", "security info");
+    secureEl.style.cursor = "pointer";
+
+    function showSecurityPopover(x, y) {
+      var input = document.getElementById("omnibox-input");
+      var url = (input && input.value) ? input.value : "";
+      var info = deriveSecurityInfo(url);
+      // For the popover anchor: position below the security indicator element.
+      var rect = secureEl.getBoundingClientRect();
+      buildAndShowPopover(
+        rect.left,
+        rect.bottom + 4,
+        info.rows,
+        "security-popover" + (info.secure ? " is-secure" : " is-insecure")
+      );
+    }
+
+    secureEl.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      showSecurityPopover(0, 0);
+    });
+    secureEl.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        showSecurityPopover(0, 0);
+      }
+    });
+  }
+
+  // P2: update the security indicator appearance based on the current URL.
+  // Called from the set_url applyOp handler so it stays in sync with navigation.
+  function updateSecurityIndicator(url) {
+    var secureEl = document.querySelector(".omni .secure");
+    if (!secureEl) return;
+    var info = deriveSecurityInfo(url);
+    if (info.secure) {
+      secureEl.textContent = "●";
+      secureEl.className = "secure is-secure";
+      secureEl.setAttribute("aria-label", "connection is secure");
+      secureEl.removeAttribute("data-insecure");
+    } else {
+      secureEl.textContent = "[!]";
+      secureEl.className = "secure is-insecure";
+      secureEl.setAttribute("aria-label", "connection is not secure");
+      secureEl.setAttribute("data-insecure", "true");
+    }
+  }
+
+  // ---- P2: Omnibox mode prefix -----------------------------------------------
+  //
+  // Three modes: [url] (default), [cmd] (leading '>'), [find] (leading '/').
+  // [ask] is deferred to the AI phase — intentionally not wired.
+  // Mode is signalled by CSS class on .omni and by updating the .name text node.
+  //
+  // Classification mirrors omnibox_mode_from_text() in mote-shell/src/lib.rs.
+  function omniboxModeFromText(text) {
+    if (!text || text.length === 0) return "url";
+    var first = text.charAt(0);
+    if (first === ">") return "cmd";
+    if (first === "/") return "find";
+    return "url";
+  }
+
+  function applyOmniboxMode(omni, nameEl, mode) {
+    if (!omni) return;
+    omni.classList.remove("mode-url", "mode-cmd", "mode-find");
+    omni.classList.add("mode-" + mode);
+    if (nameEl) nameEl.textContent = mode;
+  }
+
   function wireOmnibox() {
     var form = document.querySelector(".omnibar-row");
     var input = document.getElementById("omnibox-input");
     var omni = document.querySelector(".omni");
+    var modeNameEl = omni ? omni.querySelector(".mode .name") : null;
     if (!form || !input) return;
+
+    // P2: update mode prefix on every keystroke.
+    function updateMode() {
+      var mode = omniboxModeFromText(input.value);
+      applyOmniboxMode(omni, modeNameEl, mode);
+    }
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
@@ -192,6 +464,8 @@
     // (standard combobox pattern — 150ms is enough for a click to fire).
     input.addEventListener("blur", function () {
       if (omni) omni.classList.remove("is-focused");
+      // Revert to [url] mode on blur so the display is clean when unfocused.
+      applyOmniboxMode(omni, modeNameEl, "url");
       if (window.mote && window.mote.invoke) {
         window.mote.invoke("focus_changed", { owner: "page" }).catch(function () {});
       }
@@ -203,6 +477,7 @@
     // Input: push urlbar_query to the shell on every keystroke.  Empty value
     // closes the dropdown locally without a round-trip.
     input.addEventListener("input", function () {
+      updateMode();
       var dropdown = getCompletions();
       if (!input.value) {
         closeCompletions(dropdown, input, omni);
@@ -215,6 +490,14 @@
       }
     });
 
+    // P2: right-click on omnibox → context menu with copy URL options.
+    // Rendered as a Mote-styled popover (same construction as workspace popover).
+    // The FULL right-click context menu on content pages is P5 work.
+    input.addEventListener("contextmenu", function (ev) {
+      ev.preventDefault();
+      showOmniboxContextMenu(ev.clientX, ev.clientY);
+    });
+
     // Keyboard navigation inside the completion dropdown.
     input.addEventListener("keydown", function (ev) {
       var dropdown = getCompletions();
@@ -223,6 +506,21 @@
         ? dropdown.querySelectorAll(".omni-completion-row")
         : [];
       var count = rows.length;
+
+      // P2: ⌘C (or Ctrl+C on Linux) with no text selected → copy full URL.
+      // Standard browser behavior: if text IS selected, let the browser copy
+      // the selection; only intercept when nothing is selected.
+      var modifier = ev.metaKey || ev.ctrlKey;
+      if (modifier && (ev.key === "c" || ev.key === "C")) {
+        var sel = window.getSelection ? window.getSelection().toString() : "";
+        if (!sel) {
+          ev.preventDefault();
+          if (window.mote && window.mote.invoke) {
+            window.mote.invoke("copy_active_url", {}).catch(function () {});
+          }
+          return;
+        }
+      }
 
       if (ev.key === "ArrowDown") {
         if (!isOpen || count === 0) return;
@@ -602,6 +900,8 @@
         var input = document.getElementById("omnibox-input");
         if (input && payload && typeof payload.url === "string") {
           input.value = payload.url;
+          // P2: update the security indicator on navigation.
+          updateSecurityIndicator(payload.url);
         }
         // Update bookmark-toggle visual state when present.
         if (payload && typeof payload.bookmarked === "boolean") {
@@ -630,6 +930,15 @@
           if (slTabSeg) {
             slTabSeg.textContent = payload.tabs.length + " tabs";
           }
+        }
+        break;
+      // P2: nav state push — enables/disables [‹] and [›] buttons.
+      case "set_nav_state":
+        if (payload) {
+          applyNavState(
+            payload.can_go_back === true,
+            payload.can_go_forward === true
+          );
         }
         break;
       default:
@@ -975,6 +1284,8 @@
         if (activeRow && typeof activeRow.name === "string") {
           strip.setAttribute("aria-label", "workspace: " + activeRow.name);
         }
+        // P2: show/hide the multi-workspace dot on the chip.
+        updateWorkspaceChipDot(renderedCount);
       }
       // else: keep whatever was in the popover (typically the seeded fallback).
     };
@@ -988,6 +1299,135 @@
           window.mote.invoke("bookmark_toggle", {}).catch(function () {});
         }
       });
+    }
+  }
+
+  // ---- P2: Nav buttons [‹] [›] [↻] ------------------------------------------
+  //
+  // P1 shipped these as disabled placeholders. P2 wires them to fire CEF
+  // GoBack/GoForward/Reload via the `go_back`/`go_forward`/`reload` ops.
+  //
+  // Disabled state: `aria-disabled="true"` + `.is-nav-disabled` CSS class.
+  // Enabled state:  `aria-disabled="false"` (or removed) + no `.is-nav-disabled`.
+  //
+  // Long-press [‹] or [›] (500ms) → history popover (back/forward jump list).
+  // In v0.1 the jump list is a placeholder (CEF back/forward list API not yet
+  // wired to a Rust op); the popover shows a "history jump list (coming soon)"
+  // informational row.
+  //
+  // Tooltip updates when nav state changes (set_nav_state applyOp).
+
+  var _longPressTimer = null;
+
+  function clearLongPress() {
+    if (_longPressTimer) {
+      clearTimeout(_longPressTimer);
+      _longPressTimer = null;
+    }
+  }
+
+  function showNavHistoryPopover(btn, direction) {
+    var rect = btn.getBoundingClientRect();
+    buildAndShowPopover(rect.left, rect.bottom + 4, [
+      {
+        label: direction + " history",
+        sublabel: "jump list coming in a later wave",
+      },
+    ], "nav-history-popover");
+  }
+
+  function wireNavButtons() {
+    var backBtn  = document.querySelector(".nav-btn[aria-label='go back']");
+    var fwdBtn   = document.querySelector(".nav-btn[aria-label='go forward']");
+    var reloadBtn = document.querySelector(".nav-btn[aria-label='reload']");
+
+    function navClick(op) {
+      return function () {
+        if (window.mote && window.mote.invoke) {
+          window.mote.invoke(op, {}).catch(function () {});
+        }
+      };
+    }
+
+    function wireNavBtn(btn, op, longPressDir) {
+      if (!btn) return;
+
+      // Remove the P1 aria-disabled placeholder state; buttons are now live.
+      // Disabled state is re-applied by set_nav_state applyOp from the shell.
+      btn.removeAttribute("aria-disabled");
+      // Remove the P1 "available in p2" tooltip — real tooltips set below.
+      var kbd = btn.getAttribute("data-tooltip-kbd");
+      if (op === "go_back") {
+        btn.setAttribute("data-tooltip", "go back");
+        btn.setAttribute("data-tooltip-kbd", kbd || "⌘[");
+      } else if (op === "go_forward") {
+        btn.setAttribute("data-tooltip", "go forward");
+        btn.setAttribute("data-tooltip-kbd", kbd || "⌘]");
+      } else {
+        btn.setAttribute("data-tooltip", "reload");
+        btn.setAttribute("data-tooltip-kbd", kbd || "⌘R");
+      }
+
+      btn.addEventListener("click", function () {
+        clearLongPress();
+        if (btn.getAttribute("aria-disabled") === "true") return;
+        navClick(op)();
+      });
+
+      if (longPressDir) {
+        btn.addEventListener("mousedown", function () {
+          clearLongPress();
+          var capturedBtn = btn;
+          _longPressTimer = setTimeout(function () {
+            _longPressTimer = null;
+            showNavHistoryPopover(capturedBtn, longPressDir);
+          }, 500);
+        });
+        btn.addEventListener("mouseup", clearLongPress);
+        btn.addEventListener("mouseleave", clearLongPress);
+      }
+    }
+
+    wireNavBtn(backBtn,   "go_back",   "back");
+    wireNavBtn(fwdBtn,    "go_forward", "forward");
+    wireNavBtn(reloadBtn, "reload",     null);
+  }
+
+  // Apply nav state (can_go_back / can_go_forward) pushed by the shell via
+  // set_nav_state applyOp. Enables or disables [‹] and [›] accordingly.
+  function applyNavState(canGoBack, canGoForward) {
+    var backBtn  = document.querySelector(".nav-btn[aria-label='go back']");
+    var fwdBtn   = document.querySelector(".nav-btn[aria-label='go forward']");
+
+    function setNavEnabled(btn, enabled) {
+      if (!btn) return;
+      if (enabled) {
+        btn.setAttribute("aria-disabled", "false");
+        btn.classList.remove("is-nav-disabled");
+      } else {
+        btn.setAttribute("aria-disabled", "true");
+        btn.classList.add("is-nav-disabled");
+      }
+    }
+
+    setNavEnabled(backBtn, canGoBack);
+    setNavEnabled(fwdBtn,  canGoForward);
+  }
+
+  // ---- P2: Workspace chip multi-workspace dot ---------------------------------
+  //
+  // A small var(--accent) dot is rendered to the right of "Default ›" in the
+  // workspace chip when more than one workspace exists. The dot is a CSS-only
+  // span (.ws-multi-dot) that shows/hides based on whether .ws-chip has the
+  // .has-multi-ws class.
+
+  function updateWorkspaceChipDot(rowCount) {
+    var chip = document.querySelector(".ws-chip");
+    if (!chip) return;
+    if (rowCount > 1) {
+      chip.classList.add("has-multi-ws");
+    } else {
+      chip.classList.remove("has-multi-ws");
     }
   }
 
@@ -1243,6 +1683,10 @@
     wireRailPlaceholders();
     // P6: wire the settings rail button (slot 4 → navigate to settings panel).
     wireSettingsButton();
+    // P2: wire nav buttons [‹] [›] [↻] — GoBack / GoForward / Reload.
+    wireNavButtons();
+    // P2: wire the security indicator — makes it a clickable popover button.
+    wireSecurityIndicator();
   }
 
   if (document.readyState === "loading") {

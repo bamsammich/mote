@@ -193,6 +193,69 @@ body {
 
 /* Reuse the existing .workspace-popover row styles from sidebar.css */
 
+/* ---- P2: Mote generic popover ------------------------------------------------
+ * Used by the omnibox context menu, security popover, and nav-history popover.
+ * Position: fixed (anchored by JS to screen-space coordinates). Shadow is
+ * permitted on floating surfaces (design rule 5). Sharp corners (radius-3 max).
+ * DOM build discipline: rows are constructed via createElement/textContent by
+ * buildAndShowPopover() in host.js — never innerHTML on payload content.
+ */
+.mote-popover {
+  position: fixed;
+  z-index: 800;
+  min-width: 180px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3);
+  box-shadow: var(--shadow-2);
+  font: var(--text-mono);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+.mote-popover .popover-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 12px;
+  cursor: default;
+}
+
+.mote-popover .popover-row + .popover-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mote-popover .popover-row.is-actionable {
+  cursor: pointer;
+}
+
+.mote-popover .popover-row.is-actionable:hover {
+  background: var(--surface-2);
+}
+
+.mote-popover .popover-label {
+  color: var(--fg);
+  font: var(--text-mono);
+}
+
+.mote-popover .popover-row.is-info .popover-label {
+  color: var(--fg-1);
+}
+
+.mote-popover .popover-sublabel {
+  color: var(--fg-2);
+  font: var(--text-mono-sm);
+  margin-top: 1px;
+}
+
+/* Security popover variants */
+.mote-popover.security-popover.is-secure .popover-row:first-child .popover-label {
+  color: var(--success);
+}
+.mote-popover.security-popover.is-insecure .popover-row:first-child .popover-label {
+  color: var(--danger);
+}
+
 /* ---- Icon sizing (used by lucide sprite <use> elements) ---- */
 .icon {
   width: 16px;

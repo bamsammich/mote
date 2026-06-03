@@ -246,6 +246,23 @@ enum ShellCommand {
     /// (`integrity_plugin_detail` op). In v0.1 this logs the data; a future
     /// wave adds a dedicated detail view.
     IntegrityPluginDetail(String),
+    // P2: address-bar navigation ops ─────────────────────────────────────────
+    /// Navigate the active tab back one step (`go_back` op). No-op when there
+    /// is no back history (CEF's `can_go_back` guard is re-checked on the pump
+    /// thread; the guard in `Page::go_back` prevents the CEF call).
+    NavGoBack,
+    /// Navigate the active tab forward one step (`go_forward` op).
+    NavGoForward,
+    /// Reload the active tab (`reload` op). Always available.
+    NavReload,
+    /// Return TLS/security information for the active tab (`security_info` op).
+    /// Synchronous: the response is produced inline from the current URL and
+    /// nav state without a round-trip, so no `ShellCommand` needed for this
+    /// one — it is handled directly in the op closure.
+    ///
+    /// This variant is reserved as a doc anchor; actual dispatch is synchronous.
+    #[allow(dead_code)]
+    SecurityInfoQuery,
 }
 
 /// The action a keybind chord maps to (ADR-0012 chord table).
@@ -988,6 +1005,10 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let urlbar_query_queue = Arc::clone(commands);
     let switch_workspace_queue = Arc::clone(commands);
     let copy_url_queue = Arc::clone(commands);
+    // P2: address-bar navigation op queues.
+    let go_back_queue = Arc::clone(commands);
+    let go_forward_queue = Arc::clone(commands);
+    let nav_reload_queue = Arc::clone(commands);
     // P6: settings panel op queues.
     let set_theme_queue = Arc::clone(commands);
     let set_search_engine_queue = Arc::clone(commands);
@@ -1232,6 +1253,42 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                 params,
                 ShellCommand::IntegrityPluginDetail,
             )
+        })
+        // ── P2: address-bar navigation ops ──────────────────────────────────
+        //
+        // All three ops are callable only from `mote://chrome` (ADR-0005 origin
+        // gate). They enqueue a ShellCommand on the pump-thread command queue;
+        // the pump thread checks the active page and calls the CEF API.
+        //
+        // `go_back` — navigate the active tab back one step.
+        .register("go_back", move |_params: &str| {
+            push(&go_back_queue, ShellCommand::NavGoBack);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `go_forward` — navigate the active tab forward one step.
+        .register("go_forward", move |_params: &str| {
+            push(&go_forward_queue, ShellCommand::NavGoForward);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `reload` — reload the active tab.
+        .register("reload", move |_params: &str| {
+            push(&nav_reload_queue, ShellCommand::NavReload);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `security_info` — return TLS/security metadata for the active tab.
+        // Synchronous: the JS caller already knows the current URL (it was
+        // last set via `set_url` applyOp and is held in the omnibox input).
+        // The op returns a sentinel that tells host.js to construct the popover
+        // from the URL it already holds, per the JS-hydration pattern.
+        //
+        // Full TLS cert details (cert subject/issuer/valid-through, cipher,
+        // version) require a CEF `OnCertificateError` / SSL-status callback
+        // that is not yet wired — deferred. The popover shows what is derivable
+        // from the URL scheme alone in v0.1 (secure/insecure indicator). The
+        // JSON shape is forward-compatible: callers check `type` before reading
+        // optional fields.
+        .register("security_info", |_params: &str| {
+            OpResponse::ok("{\"ok\":true,\"type\":\"js_hydrated\"}")
         })
         // `keybinds_list` — return the v0.1 chord table as JSON. This op is
         // read-only: it serialises `KEYBIND_TABLE` (derived from `classify_chord`)
@@ -1537,6 +1594,26 @@ impl ShellApp {
                 ShellCommand::IntegrityPluginDetail(name) => {
                     eprintln!("mote-shell: integrity_plugin_detail: plugin = {name:?}");
                 }
+                // P2: address-bar navigation ops ─────────────────────────────
+                ShellCommand::NavGoBack => {
+                    if let Some(page) = self.active_page() {
+                        page.go_back();
+                    }
+                }
+                ShellCommand::NavGoForward => {
+                    if let Some(page) = self.active_page() {
+                        page.go_forward();
+                    }
+                }
+                ShellCommand::NavReload => {
+                    if let Some(page) = self.active_page() {
+                        page.reload();
+                    }
+                }
+                // SecurityInfoQuery is a doc-anchor variant (never enqueued;
+                // the `security_info` op is handled synchronously in its
+                // closure). The match arm is required for exhaustiveness.
+                ShellCommand::SecurityInfoQuery => {}
             }
         }
     }
@@ -2411,6 +2488,15 @@ impl ShellApp {
                 "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_url',{{url:{url},bookmarked:{bookmarked}}});"
             ));
         }
+        // P2: push nav state (can_go_back, can_go_forward) so the [‹][›]
+        // buttons can reflect disabled/enabled state without a round-trip.
+        let (can_go_back, can_go_forward) = self
+            .active_page()
+            .map_or((false, false), |p| (p.can_go_back(), p.can_go_forward()));
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_nav_state',\
+             {{can_go_back:{can_go_back},can_go_forward:{can_go_forward}}});"
+        ));
     }
 
     /// Push the integrity-panel view-model into the chrome document. The chrome
@@ -3968,6 +4054,29 @@ fn windows_key_code(key: &Key) -> i32 {
             }
         }),
         _ => 0,
+    }
+}
+
+/// Classify the omnibox text into one of the three mode strings the chrome JS
+/// reads from: `"url"` (default), `"cmd"` (leading `>`), `"find"` (leading `/`).
+///
+/// This mirrors the JS implementation in `host.js` `wireOmniboxMode()` so the
+/// contract can be tested in Rust. The leading-character triggers are:
+///   `>`  → `[cmd]` mode (command palette)
+///   `/`  → `[find]` mode (find-in-page; functional wiring deferred to P5)
+///   else → `[url]` mode (default)
+///
+/// `[ask]` mode is deferred to the AI phase and intentionally not handled here.
+///
+/// This function is defined only for tests — the production mode logic lives in
+/// `host.js`'s `wireOmniboxMode()`. Keeping the Rust mirror lets us unit-test the
+/// classification contract without spinning up the JS runtime.
+#[cfg(test)]
+pub(crate) fn omnibox_mode_from_text(text: &str) -> &'static str {
+    match text.chars().next() {
+        Some('>') => "cmd",
+        Some('/') => "find",
+        _ => "url",
     }
 }
 
@@ -6111,5 +6220,59 @@ mod tests {
             registered.contains("newtab.html"),
             "newtab.html must be registered in build_chrome_resources() (P3, ADR-0015)"
         );
+    }
+
+    // ── P2: omnibox mode classification ─────────────────────────────────────
+    //
+    // The mode-prefix trigger is a pure classification on the leading character
+    // of the omnibox text. These tests encode the contract; the JS implementation
+    // in host.js calls the same logic at input time.
+
+    /// Leading `>` → `[cmd]` mode.
+    #[test]
+    fn p2_omnibox_mode_gt_is_cmd() {
+        assert_eq!(omnibox_mode_from_text(">"), "cmd");
+        assert_eq!(omnibox_mode_from_text("> something"), "cmd");
+    }
+
+    /// Leading `/` → `[find]` mode.
+    #[test]
+    fn p2_omnibox_mode_slash_is_find() {
+        assert_eq!(omnibox_mode_from_text("/"), "find");
+        assert_eq!(omnibox_mode_from_text("/pattern"), "find");
+    }
+
+    /// Empty string, URL, or anything else → `[url]` mode.
+    #[test]
+    fn p2_omnibox_mode_default_is_url() {
+        assert_eq!(omnibox_mode_from_text(""), "url");
+        assert_eq!(omnibox_mode_from_text("https://example.com"), "url");
+        assert_eq!(omnibox_mode_from_text("google.com"), "url");
+        assert_eq!(omnibox_mode_from_text("some search"), "url");
+    }
+
+    // ── P2: nav-op registration ──────────────────────────────────────────────
+    //
+    // Verify that `go_back`, `go_forward`, `reload`, and `security_info` are
+    // registered in the op registry. This is the closest testable seam: the
+    // registry is built in a pure function (`build_op_registry`), and
+    // `OpRegistry::op_names` returns the set of op names. Nav button → enqueue
+    // → dispatch is covered by the existing keybind tests (which also verify
+    // `GoBack`/`GoForward`/`ReloadTab` keybinds through `classify_chord` +
+    // `intercept_keybind`).
+
+    /// `go_back`, `go_forward`, `reload`, and `security_info` ops are all
+    /// registered.
+    #[test]
+    fn p2_nav_and_security_ops_registered() {
+        let commands: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&commands);
+        let names = registry.op_names();
+        for op in ["go_back", "go_forward", "reload", "security_info"] {
+            assert!(
+                names.contains(&op),
+                "op '{op}' must be registered in build_op_registry (P2)"
+            );
+        }
     }
 }
