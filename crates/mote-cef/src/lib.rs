@@ -62,7 +62,10 @@ mod profile;
 mod scheme;
 
 pub use bridge::{HostBridge, OpHandler, OpRegistry, OpResponse};
-pub use browser::{ChromePage, ChromePageRequest, Page, PageOptions, PageRole, PopupTabRequest};
+pub use browser::{
+    ChromePage, ChromePageRequest, ContextMenuKind, ContextMenuRequest, Page, PageOptions,
+    PageRole, PopupTabRequest,
+};
 pub use engine::{Engine, EngineConfig};
 pub use error::{CefError, Result};
 pub use input::{ButtonAction, KeyAction, KeyInput, Modifiers, MouseButton, MousePosition};

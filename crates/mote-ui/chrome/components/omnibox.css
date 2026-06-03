@@ -217,6 +217,28 @@
 .omni .right .bookmark-toggle.is-bookmarked:hover   { color: var(--accent); }
 .omni .right .bookmark-toggle.is-bookmarked svg path { fill: currentColor; }
 
+/* ---- P5: Find-in-page match count ---- */
+/* The .find-count span sits right of the input inside .omni .body. It shows
+ * only in [find] mode (.omni.mode-find), formatted as "N / M" or "no results".
+ * Dim fg-2, mono font (inherited), no pointer events, right-aligned. */
+.omni .find-count {
+  display: none;
+  color: var(--fg-2);
+  white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+  pointer-events: none;
+}
+.omni.mode-find .find-count {
+  display: inline;
+}
+
+/* In find mode the border tints to --info (already handled by
+ * .omni.is-focused.mode-find above). The mode-tag bracket color also tints. */
+.omni.mode-find .mode .br {
+  color: var(--info);
+}
+
 /* ---- P2: Security indicator ---- */
 /* The .secure element is a clickable button (P2). Default: green ● (https).
  * .is-insecure: amber [!] in --warn color. cursor:pointer is set by JS. */

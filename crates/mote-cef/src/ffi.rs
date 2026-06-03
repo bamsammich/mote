@@ -38,15 +38,17 @@ use std::sync::{Arc, Mutex};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, BrowserSettings, CefString, Client, DictionaryValue, DisplayHandler, Frame,
-    ImplClient, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler,
-    ImplRenderHandler, ImplRequest, ImplRequestHandler, ImplResourceRequestHandler,
-    LifeSpanHandler, LoadHandler, PaintElementType, PopupFeatures, Rect, RenderHandler, Request,
-    RequestHandler, ResourceRequestHandler, ReturnValue, ScreenInfo, WindowInfo,
-    WindowOpenDisposition, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler,
-    WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler, wrap_client,
-    wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler, wrap_resource_request_handler,
+    Browser, BrowserSettings, CefString, CefStringUtf16, Client, ContextMenuHandler,
+    ContextMenuMediaType, ContextMenuParams, DictionaryValue, DisplayHandler, Frame, ImplClient,
+    ImplContextMenuHandler, ImplContextMenuParams, ImplDisplayHandler, ImplFrame,
+    ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
+    ImplResourceRequestHandler, LifeSpanHandler, LoadHandler, PaintElementType, PopupFeatures,
+    Rect, RenderHandler, Request, RequestHandler, ResourceRequestHandler, ReturnValue, ScreenInfo,
+    WindowInfo, WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDisplayHandler,
+    WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler,
+    WrapResourceRequestHandler, wrap_client, wrap_context_menu_handler, wrap_display_handler,
+    wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
+    wrap_resource_request_handler,
 };
 
 use crate::browser::PageRole;
@@ -470,10 +472,42 @@ impl UrlSlot {
     }
 }
 
+/// Thread-safe slot holding the most-recent hover URL (from CEF's
+/// `on_status_message` callback). Written by the display handler when CEF
+/// reports a link URL on mouse-hover; cleared when the value is empty.
+///
+/// Same `Arc<Mutex<_>>` pattern as [`TitleSlot`]/[`UrlSlot`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HoverUrlSlot {
+    inner: Arc<Mutex<Option<String>>>,
+}
+
+impl HoverUrlSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The most recent status message (hover URL), or `None` when empty.
+    pub(crate) fn get(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set(&self, value: Option<String>) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = value;
+    }
+}
+
 #[derive(Clone)]
 struct DisplayState {
     title: TitleSlot,
     url: UrlSlot,
+    hover_url: HoverUrlSlot,
 }
 
 wrap_display_handler! {
@@ -512,6 +546,22 @@ wrap_display_handler! {
                     .map(ToString::to_string)
                     .filter(|s| !s.is_empty());
                 self.state.url.set(u);
+            });
+        }
+
+        /// CEF fires this when the user hovers a link (carries the link URL) or
+        /// leaves the link (carries an empty string). P5: wired to the status-line
+        /// `mote.hoverurl` built-in element via the shell's `sync_hover_url` tick.
+        fn on_status_message(
+            &self,
+            _browser: Option<&mut Browser>,
+            value: Option<&CefString>,
+        ) {
+            guard((), || {
+                let s = value
+                    .map(ToString::to_string)
+                    .filter(|s| !s.is_empty());
+                self.state.hover_url.set(s);
             });
         }
     }
@@ -639,6 +689,173 @@ wrap_life_span_handler! {
                 // popup pipeline; Mote opens the URL as an in-window tab).
                 1
             })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ContextMenuHandler — intercepts right-click menus (P5).
+// ---------------------------------------------------------------------------
+
+/// The kind of element that was right-clicked, derived from CEF's
+/// [`ContextMenuTypeFlags`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuKind {
+    /// Right-click on a hyperlink. `target_url` carries the `href`.
+    Link,
+    /// Right-click on an image. `target_url` is the `src` URL.
+    Image,
+    /// Right-click with text selected. `selected_text` carries the selection.
+    SelectedText,
+    /// Plain page background — no link, no image, no selection.
+    Page,
+}
+
+/// A context menu request intercepted from CEF's `on_before_context_menu`.
+///
+/// The shell drains these each tick and renders a Mote-styled popover.
+/// The pattern mirrors [`PopupTabRequest`]/[`PopupTabQueue`] (ADR-0011).
+#[derive(Debug, Clone)]
+pub struct ContextMenuRequest {
+    /// What the user right-clicked on.
+    pub kind: ContextMenuKind,
+    /// For `Link` and `Image` kinds: the target URL.
+    pub target_url: Option<String>,
+    /// For `SelectedText`: the text content (up to 500 chars to avoid huge payloads).
+    pub selected_text: Option<String>,
+    /// Window-local X coordinate of the right-click point.
+    pub x: i32,
+    /// Window-local Y coordinate of the right-click point.
+    pub y: i32,
+    /// Whether the active tab can navigate back (for page context "back" item).
+    pub can_go_back: bool,
+    /// Whether the active tab can navigate forward.
+    pub can_go_forward: bool,
+}
+
+/// Thread-safe queue of [`ContextMenuRequest`]s. Written by
+/// [`ContextMenuHandlerImpl::on_before_context_menu`] and drained each tick by
+/// the shell (same pattern as [`PopupTabQueue`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ContextMenuQueue {
+    inner: Arc<Mutex<VecDeque<ContextMenuRequest>>>,
+}
+
+impl ContextMenuQueue {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drain all pending requests.
+    pub(crate) fn drain(&self) -> Vec<ContextMenuRequest> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
+
+    fn push(&self, req: ContextMenuRequest) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(req);
+    }
+}
+
+#[derive(Clone)]
+struct ContextMenuState {
+    queue: ContextMenuQueue,
+}
+
+wrap_context_menu_handler! {
+    struct ContextMenuHandlerImpl {
+        state: ContextMenuState,
+    }
+
+    impl ContextMenuHandler {
+        /// Intercept CEF's native context menu. Returning without clearing `model`
+        /// would let CEF show its gray native menu; we push the request onto our
+        /// queue instead, so the shell can render a Mote-styled popover.
+        ///
+        /// CEF calls this on the browser-process UI thread.
+        fn on_before_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            params: Option<&mut ContextMenuParams>,
+            _model: Option<&mut cef::MenuModel>,
+        ) {
+            guard((), || {
+                let Some(params) = params else { return };
+
+                let x = params.xcoord();
+                let y = params.ycoord();
+                let type_flags = params.type_flags();
+                let media_type  = params.media_type();
+
+                // Derive the raw integer bits from the ContextMenuTypeFlags wrapper.
+                // CEF flag bits: PAGE=1, FRAME=2, LINK=4, MEDIA=8, SELECTION=16, EDITABLE=32.
+                // The raw inner type is `cef_context_menu_type_flags_t(c_uint)`;
+                // extract the integer via the sys-crate type.
+                let flags_raw: u32 = {
+                    use cef::sys::cef_context_menu_type_flags_t;
+                    let raw: cef_context_menu_type_flags_t = type_flags.into();
+                    raw.0
+                };
+
+                let is_link      = (flags_raw & 4)  != 0;
+                let is_selection = (flags_raw & 16) != 0;
+                let is_image = media_type == ContextMenuMediaType::IMAGE;
+
+                // Priority: link > image > selected text > page.
+                let kind = if is_link {
+                    ContextMenuKind::Link
+                } else if is_image {
+                    ContextMenuKind::Image
+                } else if is_selection {
+                    ContextMenuKind::SelectedText
+                } else {
+                    ContextMenuKind::Page
+                };
+
+                // `link_url()` and `source_url()` return `CefStringUserfreeUtf16`;
+                // convert via `CefStringUtf16` (which implements `Display`) to `String`.
+                let target_url = {
+                    let link = CefStringUtf16::from(&params.link_url());
+                    let s = link.to_string();
+                    if s.is_empty() {
+                        let src = CefStringUtf16::from(&params.source_url());
+                        let s2 = src.to_string();
+                        if s2.is_empty() { None } else { Some(s2) }
+                    } else {
+                        Some(s)
+                    }
+                };
+
+                let selected_text = if is_selection {
+                    let sel = CefStringUtf16::from(&params.selection_text());
+                    let s = sel.to_string();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        // Truncate to 500 chars to avoid oversized payloads.
+                        Some(s.chars().take(500).collect())
+                    }
+                } else {
+                    None
+                };
+
+                self.state.queue.push(ContextMenuRequest {
+                    kind,
+                    target_url,
+                    selected_text,
+                    x,
+                    y,
+                    can_go_back: false,   // filled by shell after drain
+                    can_go_forward: false,
+                });
+            });
         }
     }
 }
@@ -776,6 +993,7 @@ struct ClientState {
     request: RequestHandler,
     display: DisplayHandler,
     life_span: LifeSpanHandler,
+    context_menu: ContextMenuHandler,
 }
 
 wrap_client! {
@@ -803,17 +1021,24 @@ wrap_client! {
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             guard(None, || Some(self.state.life_span.clone()))
         }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            guard(None, || Some(self.state.context_menu.clone()))
+        }
     }
 }
 
 /// Builds a fully-wired CEF [`Client`] for an off-screen browser of trust `role`.
 ///
 /// Returns the client plus the [`FrameSlot`], [`NavState`], [`TitleSlot`],
-/// [`UrlSlot`], [`ViewSize`], and [`PopupTabQueue`] the owning `Page` reads from.
+/// [`UrlSlot`], [`ViewSize`], [`PopupTabQueue`], [`HoverUrlSlot`], and
+/// [`ContextMenuQueue`] the owning `Page` reads from.
+///
 /// The `PopupTabQueue` is written by [`LifeSpanHandlerImpl::on_before_popup`]
-/// (which intercepts CEF popup windows per ADR-0011) and drained each tick by
-/// the shell. The `UrlSlot` is written by `on_address_change` (main frame only)
-/// and polled each tick by the shell's `sync_active_url`.
+/// (ADR-0011) and drained each tick by the shell. The `UrlSlot` is written by
+/// `on_address_change` (main frame only). The `HoverUrlSlot` is written by
+/// `on_status_message` (P5). The `ContextMenuQueue` is written by
+/// `on_before_context_menu` (P5).
 ///
 /// Keeping construction here keeps every `cef::` handler type inside the FFI
 /// module. The `role` is wired into the request handler's `on_before_browse`
@@ -830,12 +1055,16 @@ pub(crate) fn build_client(
     UrlSlot,
     ViewSize,
     PopupTabQueue,
+    HoverUrlSlot,
+    ContextMenuQueue,
 ) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
     let title = TitleSlot::new();
     let url = UrlSlot::new();
     let popups = PopupTabQueue::new();
+    let hover_url = HoverUrlSlot::new();
+    let context_menus = ContextMenuQueue::new();
 
     let render = RenderHandlerImpl::new(RenderState {
         slot: slot.clone(),
@@ -846,9 +1075,13 @@ pub(crate) fn build_client(
     let display = DisplayHandlerImpl::new(DisplayState {
         title: title.clone(),
         url: url.clone(),
+        hover_url: hover_url.clone(),
     });
     let life_span = LifeSpanHandlerImpl::new(LifeSpanState {
         popups: popups.clone(),
+    });
+    let context_menu = ContextMenuHandlerImpl::new(ContextMenuState {
+        queue: context_menus.clone(),
     });
 
     let client = ClientImpl::new(ClientState {
@@ -857,9 +1090,20 @@ pub(crate) fn build_client(
         request,
         display,
         life_span,
+        context_menu,
     });
 
-    (client, slot, nav, title, url, size, popups)
+    (
+        client,
+        slot,
+        nav,
+        title,
+        url,
+        size,
+        popups,
+        hover_url,
+        context_menus,
+    )
 }
 
 // ---------------------------------------------------------------------------

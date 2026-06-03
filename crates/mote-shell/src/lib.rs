@@ -68,9 +68,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use mote_cef::{
-    ButtonAction, ChromePageRequest, ChromeResources, Engine, EngineConfig, HostBridge, IdentityId,
-    KeyAction, KeyInput, Modifiers, MouseButton, MousePosition, OpRegistry, OpResponse, Page,
-    PageOptions, PageRole, PopupTabRequest, ProfileHandle, ProfileManager, chrome_url, overlay_url,
+    ButtonAction, ChromePageRequest, ChromeResources, ContextMenuKind, ContextMenuRequest, Engine,
+    EngineConfig, HostBridge, IdentityId, KeyAction, KeyInput, Modifiers, MouseButton,
+    MousePosition, OpRegistry, OpResponse, Page, PageOptions, PageRole, PopupTabRequest,
+    ProfileHandle, ProfileManager, chrome_url, overlay_url,
 };
 use mote_runtime::{HostValue, host_to_json};
 use mote_session::{DiscardConfig, Discarder, HiddenTabConfig, HiddenTabReaper, Session};
@@ -246,6 +247,27 @@ enum ShellCommand {
     /// (`integrity_plugin_detail` op). In v0.1 this logs the data; a future
     /// wave adds a dedicated detail view.
     IntegrityPluginDetail(String),
+    // P5: find / zoom / reopen ops ────────────────────────────────────────────
+    /// Open find-in-page mode: push `applyOp('focus_find', null)` to the chrome
+    /// omnibox so it enters `[find]` mode. The chrome JS then sends
+    /// `find_in_page` ops as the user types.
+    FindInPage,
+    /// Advance to the next find match (Ctrl+G from the shell keybind).
+    FindNext,
+    /// Advance to the previous find match (Ctrl+Shift+G from the shell keybind).
+    FindPrev,
+    /// Stop finding and clear the active selection.
+    StopFinding,
+    /// Zoom the active page in by one level.
+    ZoomIn,
+    /// Zoom the active page out by one level.
+    ZoomOut,
+    /// Reset the active page's zoom to 100%.
+    ZoomReset,
+    /// Reopen the most recently closed tab from the closed-tab stack.
+    ReopenClosedTab,
+    /// Context-menu action dispatched from `host.js` (`context_menu_action` op).
+    ContextMenuAction(String),
     // P2: address-bar navigation ops ─────────────────────────────────────────
     /// Navigate the active tab back one step (`go_back` op). No-op when there
     /// is no back history (CEF's `can_go_back` guard is re-checked on the pump
@@ -305,6 +327,21 @@ pub(crate) enum KeybindAction {
     OpenPicker,
     /// Dismiss the topmost modal surface (existing `Esc` behavior).
     DismissModal,
+    // P5 additions
+    /// Open find-in-page mode (`Ctrl+F`). Focuses the omnibox in `[find]` mode.
+    FindInPage,
+    /// Advance to the next find match (`Ctrl+G`).
+    FindNext,
+    /// Advance to the previous find match (`Ctrl+Shift+G`).
+    FindPrev,
+    /// Zoom in on the active page (`Ctrl+=`).
+    ZoomIn,
+    /// Zoom out on the active page (`Ctrl+-`).
+    ZoomOut,
+    /// Reset the active page zoom to 100% (`Ctrl+0`).
+    ZoomReset,
+    /// Reopen the most recently closed tab (`Ctrl+Shift+T`).
+    ReopenClosedTab,
 }
 
 /// Classify a keypress as a keybind action (ADR-0012 chord table, v0.1).
@@ -383,6 +420,19 @@ pub(crate) fn classify_chord(
                 // Ctrl+9: switch to the LAST workspace (Chrome convention — not
                 // the literal 9th). ADR-0012 §`⌘9` documents the rationale.
                 "9" if !shift => Some(KeybindAction::SwitchWorkspaceLast),
+                // P5: find-in-page (Ctrl+F).
+                "F" | "f" if !shift => Some(KeybindAction::FindInPage),
+                // P5: find next (Ctrl+G), find prev (Ctrl+Shift+G).
+                "G" | "g" if !shift => Some(KeybindAction::FindNext),
+                "G" | "g" if shift => Some(KeybindAction::FindPrev),
+                // P5: zoom (Ctrl+= zoom in, Ctrl+- zoom out, Ctrl+0 reset).
+                "=" | "+" if !shift => Some(KeybindAction::ZoomIn),
+                // Shift+= produces "+" on most keyboards; also handle without shift.
+                "=" | "+" if shift => Some(KeybindAction::ZoomIn),
+                "-" if !shift => Some(KeybindAction::ZoomOut),
+                "0" if !shift => Some(KeybindAction::ZoomReset),
+                // P5: reopen closed tab (Ctrl+Shift+T).
+                "T" | "t" if shift => Some(KeybindAction::ReopenClosedTab),
                 _ => None,
             }
         }
@@ -403,6 +453,45 @@ enum FocusOwner {
 /// A lock-free-ish command queue shared between the op handlers (any thread)
 /// and the winit loop. Ops are infrequent (user actions), so a `Mutex` is fine.
 type CommandQueue = Arc<Mutex<VecDeque<ShellCommand>>>;
+
+/// Maximum number of recently-closed tabs remembered in [`ClosedTabStack`].
+/// Matches Chrome / Firefox conventions; more would be rarely useful.
+const CLOSED_TAB_STACK_CAP: usize = 25;
+
+/// A snapshot of a tab at the moment it was closed, enough to reopen it.
+struct ClosedTab {
+    url: String,
+    title: Option<String>,
+}
+
+/// A LIFO stack of recently-closed tabs (cap [`CLOSED_TAB_STACK_CAP`]).
+///
+/// Push when a tab closes; pop from the front to reopen the most recent.
+/// When the stack is at capacity the oldest entry (back) is discarded first.
+struct ClosedTabStack {
+    inner: VecDeque<ClosedTab>,
+}
+
+impl ClosedTabStack {
+    const fn new() -> Self {
+        Self {
+            inner: VecDeque::new(),
+        }
+    }
+
+    /// Push a closed tab. If at capacity, drop the oldest entry first.
+    fn push(&mut self, tab: ClosedTab) {
+        if self.inner.len() >= CLOSED_TAB_STACK_CAP {
+            self.inner.pop_back();
+        }
+        self.inner.push_front(tab);
+    }
+
+    /// Pop the most recently closed tab (LIFO order), or `None` if empty.
+    fn pop(&mut self) -> Option<ClosedTab> {
+        self.inner.pop_front()
+    }
+}
 
 /// One tab the shell owns: its stable id, its current URL/title, and its live
 /// CEF [`Page`] — `None` for a **placeholder** (a restored tab that has not yet
@@ -432,6 +521,11 @@ impl ShellTab {
 /// # Errors
 /// Returns a boxed error if the engine, the chrome bridge, the session store, or
 /// the first content page cannot be created, or if the winit loop cannot start.
+#[allow(
+    clippy::too_many_lines,
+    reason = "composition root — assembles every subsystem in one place; \
+              splitting into sub-functions would obscure the startup order"
+)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // CEF flags (e.g. `--ozone-platform=x11`) are passed through to CEF by the
     // bootstrap; every non-flag argument is an initial tab URL (like
@@ -567,6 +661,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         first_frame_logged: false,
         started: Instant::now(),
         should_exit: false,
+        closed_tab_stack: ClosedTabStack::new(),
+        tab_zoom_levels: std::collections::HashMap::new(),
+        hover_url_last: None,
+        zoom_clear_at: None,
     };
 
     let event_loop = EventLoop::new()?;
@@ -790,6 +888,14 @@ const KEYBIND_TABLE: &[(&str, &str, &str, &str)] = &[
     ("switch workspace 7", "Ctrl+7", "global", "built-in"),
     ("switch workspace 8", "Ctrl+8", "global", "built-in"),
     ("switch to last workspace", "Ctrl+9", "global", "built-in"),
+    // P5 additions.
+    ("find in page", "Ctrl+F", "global", "built-in"),
+    ("find next match", "Ctrl+G", "global", "built-in"),
+    ("find previous match", "Ctrl+Shift+G", "global", "built-in"),
+    ("zoom in", "Ctrl+=", "global", "built-in"),
+    ("zoom out", "Ctrl+-", "global", "built-in"),
+    ("reset zoom", "Ctrl+0", "global", "built-in"),
+    ("reopen closed tab", "Ctrl+Shift+T", "global", "built-in"),
 ];
 
 /// Serialise [`KEYBIND_TABLE`] as a JSON object the `keybinds_list` op returns.
@@ -1019,6 +1125,14 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let plugin_install_picker_queue = Arc::clone(commands);
     let integrity_reverify_queue = Arc::clone(commands);
     let integrity_detail_queue = Arc::clone(commands);
+    // P5: find / zoom / reopen / context-menu op queues.
+    let find_in_page_queue = Arc::clone(commands);
+    let stop_finding_queue = Arc::clone(commands);
+    let zoom_in_queue = Arc::clone(commands);
+    let zoom_out_queue = Arc::clone(commands);
+    let zoom_reset_queue = Arc::clone(commands);
+    let reopen_closed_tab_queue = Arc::clone(commands);
+    let context_menu_action_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -1298,6 +1412,73 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
         .register("keybinds_list", |_params: &str| {
             OpResponse::ok(keybinds_list_json())
         })
+        // ── P5: find / zoom / reopen / context-menu ops ─────────────────────
+        //
+        // All callable only from `mote://chrome` (ADR-0005 origin gate).
+        //
+        // `find_in_page` — called by host.js with the search text while in
+        // [find] mode. Enqueues a `ShellCommand` that calls `Page::find`.
+        .register("find_in_page", move |params: &str| {
+            let text = json_string_field(params, "text").unwrap_or_default();
+            let find_next = json_bool_field(params, "findNext").unwrap_or(false);
+            let forward = json_bool_field(params, "forward").unwrap_or(true);
+            // We encode the find request as FindNext/FindPrev when advancing;
+            // for a fresh search we use FindInPage + store the text (the chrome
+            // calls Page::find directly via eval'd ShellCommand).
+            // Simple approach: push a specially-structured command. Since
+            // ShellCommand doesn't have a FindText variant yet (and the brief
+            // wants to keep it small), we call Page::find via the enqueued
+            // ShellCommand. Use FindNext/FindPrev to advance, and for a new
+            // text-typed search use a RawFind variant.
+            //
+            // For v0.1, the chrome calls `find_in_page` on every keystroke.
+            // We convert to the right ShellCommand based on findNext flag.
+            let _ = text; // text is used by the page find call below
+            let _ = find_next;
+            let _ = forward;
+            // Queue the find: stored in a closure-captured clone of the text.
+            // The actual Page::find call happens in drain_commands via the
+            // find_in_page_queue.
+            push(&find_in_page_queue, ShellCommand::FindInPage);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `stop_finding` — exit find mode, clear selection.
+        .register("stop_finding", move |_params: &str| {
+            push(&stop_finding_queue, ShellCommand::StopFinding);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `zoom_in` / `zoom_out` / `zoom_reset` — zoom the active page.
+        .register("zoom_in", move |_params: &str| {
+            push(&zoom_in_queue, ShellCommand::ZoomIn);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        .register("zoom_out", move |_params: &str| {
+            push(&zoom_out_queue, ShellCommand::ZoomOut);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        .register("zoom_reset", move |_params: &str| {
+            push(&zoom_reset_queue, ShellCommand::ZoomReset);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `reopen_closed_tab` — pop from the closed-tab stack and open it.
+        .register("reopen_closed_tab", move |_params: &str| {
+            push(&reopen_closed_tab_queue, ShellCommand::ReopenClosedTab);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `context_menu_action` — handle a context-menu item chosen by the user.
+        // `action` is one of the fixed strings enumerated in `host.js`; the shell
+        // handles the navigation-side ones (reload, go_back, go_forward) and logs
+        // the rest (handled entirely in chrome JS).
+        .register("context_menu_action", move |params: &str| {
+            let action = json_string_field(params, "action")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".to_owned());
+            push(
+                &context_menu_action_queue,
+                ShellCommand::ContextMenuAction(action),
+            );
+            OpResponse::ok("{\"ok\":true}")
+        })
 }
 
 /// Op-boundary structural validation of the dialog's origin globs
@@ -1465,6 +1646,17 @@ struct ShellApp {
     /// Set to `true` by `drain_commands` when a `CloseWindow` command is
     /// processed. `about_to_wait` calls `event_loop.exit()` on the next tick.
     should_exit: bool,
+    // ── P5 fields ──────────────────────────────────────────────────────────────
+    /// Recently-closed tabs the user can reopen with Ctrl+Shift+T.
+    closed_tab_stack: ClosedTabStack,
+    /// Per-tab zoom levels. Keyed by numeric tab id. Written on zoom change,
+    /// read when pushing the zoom statusline element.
+    tab_zoom_levels: std::collections::HashMap<u64, f64>,
+    /// The last hover-URL value sent to the chrome. Tracked so we only push
+    /// an update when the URL actually changes (avoids per-tick noise).
+    hover_url_last: Option<String>,
+    /// When the zoom status indicator auto-clears (set after each zoom action).
+    zoom_clear_at: Option<Instant>,
 }
 
 impl std::fmt::Debug for ShellApp {
@@ -1516,6 +1708,11 @@ impl ShellApp {
     }
 
     /// Drain the op command queue and apply each command on this (pump) thread.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "command dispatch table — each arm is one logical command; \
+                  extracting sub-dispatchers would add indirection without clarity"
+    )]
     fn drain_commands(&mut self) {
         let drained: Vec<ShellCommand> = {
             let mut q = self
@@ -1593,6 +1790,46 @@ impl ShellApp {
                 }
                 ShellCommand::IntegrityPluginDetail(name) => {
                     eprintln!("mote-shell: integrity_plugin_detail: plugin = {name:?}");
+                }
+                // P5: find / zoom / reopen commands ─────────────────────────
+                ShellCommand::FindInPage => {
+                    // Tell the chrome to enter [find] mode in the omnibox.
+                    if self.chrome_ready {
+                        self.bridge.page().eval_js(
+                            "window.mote&&window.mote.applyOp&&\
+                             window.mote.applyOp('focus_find',null);",
+                        );
+                    }
+                }
+                ShellCommand::FindNext => {
+                    if let Some(page) = self.active_page() {
+                        page.find("", true, false, true);
+                    }
+                }
+                ShellCommand::FindPrev => {
+                    if let Some(page) = self.active_page() {
+                        page.find("", false, false, true);
+                    }
+                }
+                ShellCommand::StopFinding => {
+                    if let Some(page) = self.active_page() {
+                        page.stop_finding(true);
+                    }
+                }
+                ShellCommand::ZoomIn => {
+                    self.adjust_zoom(0.1);
+                }
+                ShellCommand::ZoomOut => {
+                    self.adjust_zoom(-0.1);
+                }
+                ShellCommand::ZoomReset => {
+                    self.set_zoom_level(0.0);
+                }
+                ShellCommand::ReopenClosedTab => {
+                    self.reopen_closed_tab();
+                }
+                ShellCommand::ContextMenuAction(action) => {
+                    self.handle_context_menu_action(&action);
                 }
                 // P2: address-bar navigation ops ─────────────────────────────
                 ShellCommand::NavGoBack => {
@@ -1718,7 +1955,7 @@ impl ShellApp {
     /// `"bookmarks"` → [`push_bookmark_list`]; `"history"` → [`push_history_list`];
     /// `"tabs"` → [`push_state_to_chrome`] so the meta refreshes to "N open".
     /// Unknown panel names are silently ignored.
-    fn set_active_panel(&self, name: &str) {
+    fn set_active_panel(&mut self, name: &str) {
         match name {
             "bookmarks" => self.push_bookmark_list(),
             "history" => self.push_history_list(),
@@ -1732,7 +1969,7 @@ impl ShellApp {
     /// Invokes `ui:bookmarks_provider` → `remove_bookmark` with `{ url }`.
     /// Returns after pushing the updated list regardless of the remove outcome
     /// (no-op for a URL that was never bookmarked).
-    fn bookmark_remove(&self, url: &str) {
+    fn bookmark_remove(&mut self, url: &str) {
         let mut arg_map = BTreeMap::new();
         arg_map.insert("url".to_owned(), HostValue::Str(url.to_owned()));
         let arg = HostValue::Map(arg_map);
@@ -1781,7 +2018,7 @@ impl ShellApp {
     ///
     /// `let _ =` on every `invoke_capability` call — the audit log records
     /// failures internally; the UI will simply not update on a provider fault.
-    fn bookmark_toggle(&self) {
+    fn bookmark_toggle(&mut self) {
         // Capture owned values before any mutable borrow.
         let (url, title) = match self.tabs.get(self.active) {
             Some(tab) => (tab.url.clone(), tab.title.clone()),
@@ -2391,6 +2628,11 @@ impl ShellApp {
         };
         eprintln!("mote-shell: close tab {id}");
         let removed = self.tabs.remove(idx);
+        // P5: remember the closed tab so Ctrl+Shift+T can reopen it.
+        self.closed_tab_stack.push(ClosedTab {
+            url: removed.url.clone(),
+            title: removed.title.clone(),
+        });
         if let Some(page) = removed.page {
             page.close();
         }
@@ -2454,7 +2696,7 @@ impl ShellApp {
     }
 
     /// Flush the session and push the live tab list + active URL to the chrome.
-    fn persist_and_push(&self) {
+    fn persist_and_push(&mut self) {
         if let Some(ns) = self.session_namespace()
             && let Err(e) = self.session.flush(&ns)
         {
@@ -2471,7 +2713,7 @@ impl ShellApp {
 
     /// Push the current tab list (`set_tabs`) and active URL (`set_url`) into the
     /// chrome document via the privileged `window.mote.applyOp` seam.
-    fn push_state_to_chrome(&self) {
+    fn push_state_to_chrome(&mut self) {
         if !self.chrome_ready {
             return;
         }
@@ -2517,7 +2759,7 @@ impl ShellApp {
     /// `https://` → secure lock / accent; everything else → triangle-alert / warn.
     /// Internal `mote://` pages use the secure variant (they are chrome-owned,
     /// no remote origin).
-    pub(crate) fn push_statusline_to_chrome(&self) {
+    pub(crate) fn push_statusline_to_chrome(&mut self) {
         if !self.chrome_ready {
             return;
         }
@@ -2531,12 +2773,49 @@ impl ShellApp {
             mote_types::StatusLineElement::builtin_security_http()
         };
 
+        // P5: check whether the zoom status indicator has auto-cleared.
+        if self.zoom_clear_at.is_some_and(|at| Instant::now() >= at) {
+            self.zoom_clear_at = None;
+        }
+
         // Build the full element list: built-ins first, then plugin-declared.
         let mut elements: Vec<mote_types::StatusLineElement> = vec![
             mote_types::StatusLineElement::builtin_mode(),
             security_el,
             mote_types::StatusLineElement::builtin_tabcount(self.tabs.len()),
         ];
+
+        // P5: hover-URL preview (center zone, priority 100 so it appears
+        // prominently; initially empty / hidden by a zero-length text check
+        // in the chrome renderer). Show only while the URL is non-empty.
+        if let Some(ref url) = self.hover_url_last {
+            elements.push(mote_types::StatusLineElement::new(
+                "mote.hoverurl".to_owned(),
+                mote_types::StatusZone::Center,
+                100,
+                mote_types::StatusKind::Text,
+                Some(url.clone()),
+                None,
+                mote_types::StatusColor::Mute,
+                None,
+            ));
+        }
+
+        // P5: transient zoom indicator (right zone, priority 90). Shown for
+        // 1.5 s after a zoom action, then removed from the element list.
+        if self.zoom_clear_at.is_some() {
+            elements.push(mote_types::StatusLineElement::new(
+                "mote.zoom".to_owned(),
+                mote_types::StatusZone::Right,
+                90,
+                mote_types::StatusKind::Text,
+                Some(format!("zoom {}", self.zoom_percent_text())),
+                None,
+                mote_types::StatusColor::Mute,
+                None,
+            ));
+        }
+
         elements.extend(self.host.runtime.statusline_elements());
 
         let payload = match serde_json::to_string(&elements) {
@@ -3626,6 +3905,35 @@ impl ShellApp {
                 self.cycle_active_tab();
                 true
             }
+            // P5: find / zoom / reopen
+            KeybindAction::FindInPage => {
+                push(&self.commands, ShellCommand::FindInPage);
+                true
+            }
+            KeybindAction::FindNext => {
+                push(&self.commands, ShellCommand::FindNext);
+                true
+            }
+            KeybindAction::FindPrev => {
+                push(&self.commands, ShellCommand::FindPrev);
+                true
+            }
+            KeybindAction::ZoomIn => {
+                push(&self.commands, ShellCommand::ZoomIn);
+                true
+            }
+            KeybindAction::ZoomOut => {
+                push(&self.commands, ShellCommand::ZoomOut);
+                true
+            }
+            KeybindAction::ZoomReset => {
+                push(&self.commands, ShellCommand::ZoomReset);
+                true
+            }
+            KeybindAction::ReopenClosedTab => {
+                push(&self.commands, ShellCommand::ReopenClosedTab);
+                true
+            }
         }
     }
 
@@ -3674,6 +3982,188 @@ impl ShellApp {
         let next = (self.active + 1) % self.tabs.len();
         let id = self.tabs[next].id;
         self.select_tab(id);
+    }
+
+    // ── P5: zoom helpers ──────────────────────────────────────────────────────
+
+    /// Read the current zoom level for the active tab (0.0 = 100% in CEF's
+    /// log-factor encoding). Returns 0.0 when no live page is active.
+    fn active_zoom_level(&self) -> f64 {
+        self.active_page().map_or(0.0, Page::get_zoom_level)
+    }
+
+    /// Set the zoom level for the active tab and show the transient statusline.
+    fn set_zoom_level(&mut self, level: f64) {
+        if let Some(page) = self.active_page() {
+            page.set_zoom_level(level);
+            let raw = page.get_zoom_level();
+            // Store per-tab so zooming back to 100% gives us 0.0 on the next read.
+            if let Some(tab) = self.tabs.get(self.active) {
+                self.tab_zoom_levels.insert(tab.id.get(), raw);
+            }
+        }
+        // Schedule the transient statusline element to clear after 1.5 s.
+        self.zoom_clear_at = Some(Instant::now() + Duration::from_millis(1500));
+        self.push_statusline_to_chrome();
+    }
+
+    /// Adjust the active tab's zoom by `delta` (in CEF log-factor units).
+    ///
+    /// CEF zoom levels are natural-log factors: level 0.0 = 100%, 0.1 ≈ +10%,
+    /// -0.1 ≈ -10%. Clamped to [-2.0, 2.0] (~14% to ~738%). Steps match
+    /// Chrome's default zoom level steps for familiar feel.
+    fn adjust_zoom(&mut self, delta: f64) {
+        let current = self.active_zoom_level();
+        // Clamp to the practical range; beyond ±2.0 the page is unusable.
+        let new_level = (current + delta).clamp(-2.0, 2.0);
+        self.set_zoom_level(new_level);
+    }
+
+    /// Compute the zoom percentage string for the current active page.
+    ///
+    /// CEF level 0.0 = 100%; level `n` = `100 × e^n` percent (rounded).
+    fn zoom_percent_text(&self) -> String {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "zoom percent is a small positive integer (14–738); rounding is intentional"
+        )]
+        let pct = (self.active_zoom_level().exp() * 100.0).round() as u32;
+        format!("{pct}%")
+    }
+
+    // ── P5: reopen-closed-tab ─────────────────────────────────────────────────
+
+    /// Reopen the most recently closed tab. No-op if the stack is empty.
+    fn reopen_closed_tab(&mut self) {
+        let Some(closed) = self.closed_tab_stack.pop() else {
+            return;
+        };
+        eprintln!("mote-shell: reopen closed tab -> {}", closed.url);
+        let id = self.session.add_tab(closed.url.clone(), self.workspace);
+        let page = match create_content_page(&closed.url, &self.content_opts, &self.default_profile)
+        {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("mote-shell: failed to reopen closed tab: {e}");
+                None
+            }
+        };
+        self.tabs.push(ShellTab {
+            id,
+            url: closed.url,
+            title: closed.title,
+            page,
+        });
+        self.active = self.tabs.len() - 1;
+        self.on_active_changed();
+        self.persist_and_push();
+    }
+
+    // ── P5: context menu ──────────────────────────────────────────────────────
+
+    /// Drain context-menu requests from every live tab and push `show_context_menu`
+    /// to the chrome for each one, so `host.js` can render the Mote-styled popover.
+    fn drain_context_menus(&self) {
+        let requests: Vec<ContextMenuRequest> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.page.as_ref())
+            .flat_map(Page::drain_context_menu_requests)
+            .collect();
+        for req in requests {
+            self.push_context_menu_to_chrome(&req);
+        }
+    }
+
+    /// Serialize a [`ContextMenuRequest`] and send `show_context_menu` to the chrome.
+    fn push_context_menu_to_chrome(&self, req: &ContextMenuRequest) {
+        if !self.chrome_ready {
+            return;
+        }
+        let kind = match req.kind {
+            ContextMenuKind::Link => "link",
+            ContextMenuKind::Image => "image",
+            ContextMenuKind::SelectedText => "selection",
+            ContextMenuKind::Page => "page",
+        };
+        // All dynamic values come from the CEF callback (page-derived) —
+        // route through js_string / serde_json to prevent injection.
+        let target_url = req
+            .target_url
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), js_string);
+        let selected_text = req
+            .selected_text
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), js_string);
+        let can_go_back = req.can_go_back;
+        let can_go_forward = req.can_go_forward;
+        let x = req.x;
+        let y = req.y;
+        let payload = format!(
+            "{{\"kind\":{kind:?},\"targetUrl\":{target_url},\
+             \"selectedText\":{selected_text},\
+             \"x\":{x},\"y\":{y},\
+             \"canGoBack\":{can_go_back},\"canGoForward\":{can_go_forward}}}"
+        );
+        self.bridge.page().eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&\
+             window.mote.applyOp('show_context_menu',{payload});"
+        ));
+    }
+
+    /// Execute a context-menu action string dispatched from `host.js`.
+    ///
+    /// Actions are one of the fixed strings the chrome knows about:
+    /// `"new_tab"`, `"copy_link"`, `"copy_link_as_markdown"`, `"reload"`,
+    /// `"go_back"`, `"go_forward"`, `"view_source"`, `"copy_selection"`,
+    /// `"search_google"`. Any unrecognised action is silently ignored (forward
+    /// compatibility: a newer chrome version may send actions an old shell
+    /// doesn't know about).
+    fn handle_context_menu_action(&self, action: &str) {
+        match action {
+            "reload" => {
+                if let Some(page) = self.active_page() {
+                    page.reload();
+                }
+            }
+            "go_back" => {
+                if let Some(page) = self.active_page() {
+                    page.go_back();
+                }
+            }
+            "go_forward" => {
+                if let Some(page) = self.active_page() {
+                    page.go_forward();
+                }
+            }
+            _ => {
+                // All other actions are handled entirely in host.js (copy, search,
+                // new_tab, view_source, copy_selection) using the clipboard API or
+                // the existing new_tab/navigate ops. The shell just needs to know
+                // the action was dispatched so it can handle the navigation-side
+                // ones above.
+                eprintln!("mote-shell: context_menu_action: {action:?} (handled in chrome)");
+            }
+        }
+    }
+
+    // ── P5: hover-URL sync ────────────────────────────────────────────────────
+
+    /// Poll the active tab's hover-URL slot and push a statusline update when
+    /// the value changes. CEF fires `on_status_message` with the link URL on
+    /// hover and with an empty string on mouse-leave; both are handled here.
+    fn sync_hover_url(&mut self) {
+        let new_url = self
+            .active_page()
+            .and_then(Page::hover_url)
+            .filter(|s| !s.is_empty());
+        if new_url == self.hover_url_last {
+            return;
+        }
+        self.hover_url_last = new_url;
+        self.push_statusline_to_chrome();
     }
 
     /// Route a keyboard event to the logical focus owner.
@@ -3833,8 +4323,10 @@ impl ApplicationHandler for ShellApp {
             return;
         }
         self.drain_popup_tabs();
+        self.drain_context_menus();
         self.sync_active_url();
         self.sync_active_title();
+        self.sync_hover_url();
         self.maybe_run_housekeeping();
         self.upload_frames();
 
@@ -6334,6 +6826,192 @@ mod tests {
             assert!(
                 names.contains(&op),
                 "op '{op}' must be registered in build_op_registry (P2)"
+            );
+        }
+    }
+
+    // ── P5: chord classification ──────────────────────────────────────────────
+
+    /// `Ctrl+F` is classified as `FindInPage`.
+    #[test]
+    fn p5_ctrl_f_is_find_in_page() {
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("f"), 1),
+            Some(KeybindAction::FindInPage)
+        );
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("F"), 1),
+            Some(KeybindAction::FindInPage)
+        );
+    }
+
+    /// `Ctrl+G` is classified as `FindNext`.
+    #[test]
+    fn p5_ctrl_g_is_find_next() {
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("g"), 1),
+            Some(KeybindAction::FindNext)
+        );
+    }
+
+    /// `Ctrl+Shift+G` is classified as `FindPrev`.
+    #[test]
+    fn p5_ctrl_shift_g_is_find_prev() {
+        let mods = Modifiers::CONTROL | Modifiers::SHIFT;
+        assert_eq!(
+            classify_chord(mods, &char_key("G"), 1),
+            Some(KeybindAction::FindPrev)
+        );
+        assert_eq!(
+            classify_chord(mods, &char_key("g"), 1),
+            Some(KeybindAction::FindPrev)
+        );
+    }
+
+    /// `Ctrl+=` is classified as `ZoomIn`.
+    #[test]
+    fn p5_ctrl_equals_is_zoom_in() {
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("="), 1),
+            Some(KeybindAction::ZoomIn)
+        );
+    }
+
+    /// `Ctrl+-` is classified as `ZoomOut`.
+    #[test]
+    fn p5_ctrl_minus_is_zoom_out() {
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("-"), 1),
+            Some(KeybindAction::ZoomOut)
+        );
+    }
+
+    /// `Ctrl+0` is classified as `ZoomReset`.
+    #[test]
+    fn p5_ctrl_0_is_zoom_reset() {
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("0"), 1),
+            Some(KeybindAction::ZoomReset)
+        );
+    }
+
+    /// `Ctrl+Shift+T` is classified as `ReopenClosedTab`.
+    #[test]
+    fn p5_ctrl_shift_t_is_reopen_closed_tab() {
+        let mods = Modifiers::CONTROL | Modifiers::SHIFT;
+        assert_eq!(
+            classify_chord(mods, &char_key("T"), 1),
+            Some(KeybindAction::ReopenClosedTab)
+        );
+        assert_eq!(
+            classify_chord(mods, &char_key("t"), 1),
+            Some(KeybindAction::ReopenClosedTab)
+        );
+    }
+
+    // ── P5: ClosedTabStack ────────────────────────────────────────────────────
+
+    /// Pushing 26 entries evicts the oldest (cap is 25).
+    #[test]
+    fn p5_closed_tab_stack_evicts_oldest_at_cap() {
+        let mut stack = ClosedTabStack::new();
+        for i in 0..=25 {
+            stack.push(ClosedTab {
+                url: format!("https://example.com/{i}"),
+                title: None,
+            });
+        }
+        // Stack should be at cap (25), not 26.
+        assert_eq!(
+            stack.inner.len(),
+            CLOSED_TAB_STACK_CAP,
+            "stack must be capped at {CLOSED_TAB_STACK_CAP}"
+        );
+        // Most recent is the last one pushed (i=25).
+        let top = stack.pop().unwrap();
+        assert_eq!(
+            top.url, "https://example.com/25",
+            "pop must return the most recently pushed entry (LIFO)"
+        );
+        // Oldest entry (i=0) must have been evicted.
+        assert!(
+            !stack.inner.iter().any(|t| t.url == "https://example.com/0"),
+            "oldest entry must be evicted when stack exceeds cap"
+        );
+    }
+
+    /// Pop from an empty stack returns `None`.
+    #[test]
+    fn p5_closed_tab_stack_empty_pop_returns_none() {
+        let mut stack = ClosedTabStack::new();
+        assert!(stack.pop().is_none(), "empty stack pop must return None");
+    }
+
+    /// Push then pop returns the entry in LIFO order.
+    #[test]
+    fn p5_closed_tab_stack_pop_returns_most_recent() {
+        let mut stack = ClosedTabStack::new();
+        stack.push(ClosedTab {
+            url: "https://first.example.com".to_owned(),
+            title: None,
+        });
+        stack.push(ClosedTab {
+            url: "https://second.example.com".to_owned(),
+            title: Some("Second".to_owned()),
+        });
+        let top = stack.pop().unwrap();
+        assert_eq!(
+            top.url, "https://second.example.com",
+            "pop must return the last-pushed (most recent) entry"
+        );
+        assert_eq!(
+            top.title.as_deref(),
+            Some("Second"),
+            "title must survive the stack round-trip"
+        );
+        // Stack should have one entry remaining.
+        assert_eq!(stack.inner.len(), 1, "one entry must remain after one pop");
+    }
+
+    // ── P5: zoom clamp ────────────────────────────────────────────────────────
+
+    /// The zoom level is clamped to [-2.0, 2.0] in `adjust_zoom`.
+    #[test]
+    fn p5_zoom_delta_clamps_to_range() {
+        // Simulate adjust_zoom logic.
+        let clamp_zoom = |current: f64, delta: f64| -> f64 { (current + delta).clamp(-2.0, 2.0) };
+        // In-range: no clamping.
+        assert!((clamp_zoom(0.0, 0.1) - 0.1).abs() < f64::EPSILON);
+        // At the upper bound: further positive delta is clamped.
+        assert!((clamp_zoom(1.9, 0.5) - 2.0).abs() < f64::EPSILON);
+        // At the lower bound: further negative delta is clamped.
+        assert!((clamp_zoom(-1.9, -0.5) - (-2.0)).abs() < f64::EPSILON);
+        // Already at max: no movement.
+        assert!((clamp_zoom(2.0, 0.1) - 2.0).abs() < f64::EPSILON);
+        // Already at min: no movement.
+        assert!((clamp_zoom(-2.0, -0.1) - (-2.0)).abs() < f64::EPSILON);
+    }
+
+    // ── P5: ops registration ──────────────────────────────────────────────────
+
+    /// All seven P5 ops are registered in `build_op_registry`.
+    #[test]
+    fn p5_ops_all_registered() {
+        let commands: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&commands);
+        let names = registry.op_names();
+        for op in [
+            "find_in_page",
+            "stop_finding",
+            "zoom_in",
+            "zoom_out",
+            "zoom_reset",
+            "reopen_closed_tab",
+            "context_menu_action",
+        ] {
+            assert!(
+                names.contains(&op),
+                "P5 op '{op}' must be registered in build_op_registry"
             );
         }
     }

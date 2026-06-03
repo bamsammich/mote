@@ -1652,18 +1652,38 @@
     var prevApplyOp =
       typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
 
+    // The set of mote.* built-ins that are NOT static in the HTML but are pushed
+    // dynamically by the shell (P5: hoverurl, zoom). These need create-or-update
+    // handling rather than the static HTML update path.
+    var DYNAMIC_BUILTINS = { "mote.hoverurl": true, "mote.zoom": true };
+
     window.mote.applyOp = function (op, payload) {
       if (op !== "set_statusline_elements") {
         if (prevApplyOp) prevApplyOp(op, payload);
         return;
       }
-      if (!payload || !Array.isArray(payload.elements)) return;
+      // Accept either a bare array `[...]` (current Rust wire format) or a
+      // wrapped object `{ elements: [...] }` for forward compatibility.
+      var elements = Array.isArray(payload)
+        ? payload
+        : (payload && Array.isArray(payload.elements) ? payload.elements : null);
+      if (!elements) return;
 
-      // Group elements by zone (only plugin-registered elements — built-ins
-      // are identified by the "mote." prefix and are left in place).
+      // Re-bind payload to a shape the rest of the handler can use uniformly.
+      payload = { elements: elements };
+
+      // Split elements: plugin-registered vs dynamic built-ins.
+      // Static built-ins (mote.mode, mote.security, mote.tabcount) are seeded
+      // in the HTML and are not touched here.
       var byZone = { left: [], center: [], right: [] };
+      var dynamicBuiltins = [];
       payload.elements.forEach(function (el) {
-        if (!el || !el.id || el.id.startsWith("mote.")) return; // skip built-ins
+        if (!el || !el.id) return;
+        if (el.id.startsWith("mote.")) {
+          if (DYNAMIC_BUILTINS[el.id]) dynamicBuiltins.push(el);
+          // else: static built-in — skip (managed by static HTML)
+          return;
+        }
         var zone = el.zone || "left";
         if (!byZone[zone]) byZone[zone] = [];
         byZone[zone].push(el);
@@ -1690,15 +1710,15 @@
 
         if ((el.kind === "icon" || el.kind === "icon-text") && el.icon) {
           // ADR-0013: icon source is "lucide:<name>"
-          var parts = el.icon.split(":");
-          if (parts.length === 2 && parts[0] === "lucide") {
+          var iconParts = el.icon.split(":");
+          if (iconParts.length === 2 && iconParts[0] === "lucide") {
             var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
             svg.setAttribute("class", "sl-icon");
             svg.setAttribute("aria-hidden", "true");
             svg.setAttribute("width", "12");
             svg.setAttribute("height", "12");
             var use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-            use.setAttribute("href", "assets/lucide-sprite.svg#icon-" + parts[1]);
+            use.setAttribute("href", "assets/lucide-sprite.svg#icon-" + iconParts[1]);
             svg.appendChild(use);
             div.appendChild(svg);
           }
@@ -1712,6 +1732,48 @@
 
         return div;
       }
+
+      // Update dynamic built-in elements (mote.hoverurl, mote.zoom):
+      // create the zone node if absent, update text if present, remove when empty.
+      dynamicBuiltins.forEach(function (el) {
+        var zone = el.zone || "center";
+        var zoneEl = document.querySelector('[data-sl-zone="' + zone + '"]');
+        if (!zoneEl) return;
+        var existing = zoneEl.querySelector('[data-sl-el="' + el.id + '"]');
+        var text = (el.kind === "text" || el.kind === "icon-text") ? (el.text || "") : "";
+        if (!text) {
+          // No text: remove if present (transient cleared).
+          if (existing) zoneEl.removeChild(existing);
+          return;
+        }
+        if (existing) {
+          // Update text in the first span child (keeps attributes stable).
+          var sp = existing.querySelector("span");
+          if (sp) sp.textContent = text;
+          else existing.textContent = text;
+        } else {
+          // Create and insert at correct priority position.
+          var node = renderEl(el);
+          // Find insertion point: insert before the first existing element whose
+          // priority is lower than this element's priority.
+          var insertBefore = null;
+          var siblings = zoneEl.querySelectorAll("[data-sl-el]");
+          for (var si = 0; si < siblings.length; si++) {
+            var sibId = siblings[si].getAttribute("data-sl-el") || "";
+            // For right zone, higher priority = closer to mote.tabcount which
+            // we want to leave at the end. Insert before lower-priority nodes.
+            if (!sibId.startsWith("mote.")) {
+              insertBefore = siblings[si];
+              break;
+            }
+          }
+          if (insertBefore) {
+            zoneEl.insertBefore(node, insertBefore);
+          } else {
+            zoneEl.appendChild(node);
+          }
+        }
+      });
 
       // For each zone: remove old plugin elements, append new ones.
       Object.keys(byZone).forEach(function (zoneName) {
@@ -1729,6 +1791,282 @@
           zoneEl.appendChild(renderEl(el));
         });
       });
+    };
+  }
+
+  // ---- P5: Find-in-page mode ------------------------------------------------
+  //
+  // The `focus_find` applyOp (pushed by Ctrl+F in the shell) switches the
+  // omnibox into [find] mode. In find mode:
+  //   - Typing fires `find_in_page` with the current text.
+  //   - A "N / M" match count appears right of the input.
+  //   - Enter fires `find_next`; ⌘G / Ctrl+G (caught by the shell keybind) also.
+  //   - Escape fires `stop_finding` and returns to [url] mode.
+  //   - Blur resets to [url] mode without stopping the last find.
+  //
+  // The find count display is a `.find-count` span injected into .omni .body.
+  // It shows only when the mode is [find] (CSS: .omni.mode-find .find-count).
+  function wireFindModeOp() {
+    var prevApplyOp =
+      typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
+
+    var _inFindMode = false;
+
+    function getFindCount() {
+      return document.getElementById("omni-find-count");
+    }
+
+    function ensureFindCount() {
+      var existing = getFindCount();
+      if (existing) return existing;
+      var body = document.querySelector(".omni .body");
+      if (!body) return null;
+      var span = document.createElement("span");
+      span.id = "omni-find-count";
+      span.className = "find-count";
+      span.setAttribute("aria-live", "polite");
+      span.setAttribute("aria-label", "match count");
+      body.appendChild(span);
+      return span;
+    }
+
+    function setFindCount(text) {
+      var el = ensureFindCount();
+      if (el) el.textContent = text || "";
+    }
+
+    function enterFindMode(input, omni, modeNameEl) {
+      _inFindMode = true;
+      // Clear the input so the user types a fresh query (find mode is not a URL).
+      if (input) {
+        input.value = "";
+        // Trigger mode prefix update.
+        applyOmniboxMode(omni, modeNameEl, "find");
+        input.focus();
+      }
+      setFindCount("");
+    }
+
+    function exitFindMode(input, omni, modeNameEl, stop) {
+      _inFindMode = false;
+      if (stop && window.mote && window.mote.invoke) {
+        window.mote.invoke("stop_finding", {}).catch(function () {});
+      }
+      setFindCount("");
+      if (input) input.value = "";
+      applyOmniboxMode(omni, modeNameEl, "url");
+      if (input) input.blur();
+    }
+
+    window.mote.applyOp = function (op, payload) {
+      if (op !== "focus_find") {
+        if (prevApplyOp) prevApplyOp(op, payload);
+        return;
+      }
+
+      var input = document.getElementById("omnibox-input");
+      var omni = document.querySelector(".omni");
+      var modeNameEl = omni ? omni.querySelector(".mode .name") : null;
+
+      // Wire find-mode event handlers on the input (once per activation).
+      // Using named helpers avoids duplicate listener accumulation.
+      if (!input._findModeWired) {
+        input._findModeWired = true;
+
+        // Typing in find mode: fire find_in_page on each keystroke.
+        input.addEventListener("input", function () {
+          if (!_inFindMode) return;
+          var text = input.value;
+          setFindCount(""); // clear stale count while searching
+          if (window.mote && window.mote.invoke) {
+            window.mote
+              .invoke("find_in_page", { text: text })
+              .catch(function () {});
+          }
+        });
+
+        // Keydown: Enter → find_next; Escape → stop + exit.
+        input.addEventListener("keydown", function (ev) {
+          if (!_inFindMode) return;
+          if (ev.key === "Enter") {
+            ev.preventDefault();
+            if (window.mote && window.mote.invoke) {
+              window.mote.invoke("find_next", {}).catch(function () {});
+            }
+            return;
+          }
+          if (ev.key === "Escape") {
+            ev.preventDefault();
+            ev.stopPropagation();
+            exitFindMode(input, omni, modeNameEl, true);
+          }
+        });
+
+        // Blur from find-mode input: revert display to [url] without stopping
+        // the active find (the user may re-enter find mode; Escape clears it).
+        input.addEventListener("blur", function () {
+          if (!_inFindMode) return;
+          // Use a short delay so Escape's exitFindMode runs first.
+          setTimeout(function () {
+            if (!_inFindMode) return;
+            _inFindMode = false;
+            setFindCount("");
+            applyOmniboxMode(omni, modeNameEl, "url");
+          }, 0);
+        });
+      }
+
+      enterFindMode(input, omni, modeNameEl);
+    };
+  }
+
+  // ---- P5: Right-click context menu -----------------------------------------
+  //
+  // The `show_context_menu` applyOp is pushed from the shell when CEF fires
+  // OnBeforeContextMenu (intercepted in mote-cef's ContextMenuHandlerImpl).
+  // Payload: { kind, target_url, selected_text, x, y, can_go_back, can_go_forward }
+  //
+  // kinds: "link" | "image" | "selection" | "page"
+  //
+  // Items are built via DOM construction (ADR-0005: no innerHTML on payload).
+  // Actions that modify the page invoke mote.invoke("context_menu_action", …).
+  // Copy actions use the Clipboard API directly in the chrome origin.
+  function wireContextMenuOp() {
+    var prevApplyOp =
+      typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
+
+    function ctxAction(action) {
+      return function () {
+        if (window.mote && window.mote.invoke) {
+          window.mote
+            .invoke("context_menu_action", { action: action })
+            .catch(function () {});
+        }
+      };
+    }
+
+    function copyToClipboard(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(function () {});
+      }
+    }
+
+    function buildContextMenuRows(payload) {
+      var kind = (payload && typeof payload.kind === "string") ? payload.kind : "page";
+      // Accept both camelCase (Rust wire format) and snake_case (forward compat).
+      var targetUrl = (payload && typeof payload.targetUrl === "string") ? payload.targetUrl
+        : (payload && typeof payload.target_url === "string") ? payload.target_url : "";
+      var selectedText = (payload && typeof payload.selectedText === "string") ? payload.selectedText
+        : (payload && typeof payload.selected_text === "string") ? payload.selected_text : "";
+      var canGoBack = !!(payload && (payload.canGoBack || payload.can_go_back));
+      var canGoForward = !!(payload && (payload.canGoForward || payload.can_go_forward));
+      var rows = [];
+
+      if (kind === "link") {
+        if (targetUrl) {
+          rows.push({
+            label: "open link in new tab",
+            action: function () {
+              if (window.mote && window.mote.invoke) {
+                window.mote.invoke("new_tab", { url: targetUrl }).catch(function () {});
+              }
+            },
+          });
+          rows.push({
+            label: "copy link url",
+            action: function () { copyToClipboard(targetUrl); },
+          });
+          rows.push({
+            label: "copy link as markdown",
+            action: function () {
+              // "[title](url)" — without a title from the DOM use URL as both.
+              copyToClipboard("[" + targetUrl + "](" + targetUrl + ")");
+            },
+          });
+        }
+        rows.push({
+          label: "reload",
+          action: ctxAction("reload"),
+        });
+      } else if (kind === "image") {
+        if (targetUrl) {
+          rows.push({
+            label: "open image in new tab",
+            action: function () {
+              if (window.mote && window.mote.invoke) {
+                window.mote.invoke("new_tab", { url: targetUrl }).catch(function () {});
+              }
+            },
+          });
+          rows.push({
+            label: "copy image url",
+            action: function () { copyToClipboard(targetUrl); },
+          });
+        }
+        rows.push({
+          label: "reload",
+          action: ctxAction("reload"),
+        });
+      } else if (kind === "selection") {
+        if (selectedText) {
+          rows.push({
+            label: "copy",
+            action: function () { copyToClipboard(selectedText); },
+          });
+          rows.push({
+            label: "search google for selection",
+            action: function () {
+              var q = encodeURIComponent(selectedText);
+              if (window.mote && window.mote.invoke) {
+                window.mote
+                  .invoke("new_tab", { url: "https://www.google.com/search?q=" + q })
+                  .catch(function () {});
+              }
+            },
+          });
+        }
+        rows.push({
+          label: "reload",
+          action: ctxAction("reload"),
+        });
+      } else {
+        // "page" context (no specific element target).
+        if (canGoBack) {
+          rows.push({ label: "go back", action: ctxAction("go_back") });
+        }
+        if (canGoForward) {
+          rows.push({ label: "go forward", action: ctxAction("go_forward") });
+        }
+        rows.push({ label: "reload", action: ctxAction("reload") });
+        rows.push({
+          label: "view source",
+          action: function () {
+            // Get current URL from omnibox; open view-source: in a new tab.
+            var input = document.getElementById("omnibox-input");
+            var url = (input && input.value) ? input.value : "";
+            if (url && window.mote && window.mote.invoke) {
+              window.mote
+                .invoke("new_tab", { url: "view-source:" + url })
+                .catch(function () {});
+            }
+          },
+        });
+      }
+
+      return rows;
+    }
+
+    window.mote.applyOp = function (op, payload) {
+      if (op !== "show_context_menu") {
+        if (prevApplyOp) prevApplyOp(op, payload);
+        return;
+      }
+
+      var x = (payload && typeof payload.x === "number") ? payload.x : 0;
+      var y = (payload && typeof payload.y === "number") ? payload.y : 0;
+      var rows = buildContextMenuRows(payload);
+      if (rows.length === 0) return;
+      buildAndShowPopover(x, y, rows, "context-menu");
     };
   }
 
@@ -1774,6 +2112,10 @@
     // R4: chain the focus_omnibox applyOp handler (Ctrl+L). Must run after
     // wireOmnibox installs the initial applyOp so prevApplyOp is defined.
     wireFocusOmniboxOp();
+    // P5: chain the find-mode applyOp handler (focus_find from Ctrl+F).
+    wireFindModeOp();
+    // P5: chain the context-menu applyOp handler (show_context_menu).
+    wireContextMenuOp();
     // P1: install the tooltip primitive (delegated listener at the root).
     wireTooltip();
     // P1: wire the rail plugin-placeholder click handlers.

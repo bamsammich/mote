@@ -24,8 +24,11 @@ use cef::{
 
 use crate::bridge;
 use crate::error::{CefError, Result};
-pub use crate::ffi::PopupTabRequest;
-use crate::ffi::{self, FrameSlot, NavState, PopupTabQueue, TitleSlot, UrlSlot, ViewSize};
+use crate::ffi::{
+    self, ContextMenuQueue, FrameSlot, HoverUrlSlot, NavState, PopupTabQueue, TitleSlot, UrlSlot,
+    ViewSize,
+};
+pub use crate::ffi::{ContextMenuKind, ContextMenuRequest, PopupTabRequest};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
@@ -126,6 +129,13 @@ pub struct Page {
     /// The shell drains these each tick via [`Page::drain_popup_requests`] and
     /// routes them to in-window tabs in the current workspace.
     popups: PopupTabQueue,
+    /// Hover URL from `DisplayHandler::on_status_message` (P5). The shell polls
+    /// this each tick via `sync_hover_url` to update the `mote.hoverurl` status-line
+    /// built-in element.
+    hover_url: HoverUrlSlot,
+    /// Context-menu requests from `ContextMenuHandler::on_before_context_menu` (P5).
+    /// The shell drains these each tick and renders a Mote-styled popover.
+    context_menus: ContextMenuQueue,
     /// Set to `true` once [`Page::close`] has been called so that the [`Drop`]
     /// impl does not issue a second `close_browser` to an already-closing host.
     closed: AtomicBool,
@@ -211,7 +221,7 @@ impl Page {
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
-        let (client, frame, nav, title, url_slot, size, popups) =
+        let (client, frame, nav, title, url_slot, size, popups, hover_url, context_menus) =
             ffi::build_client(size, interceptor, options.role);
         // Chrome pages are transparent so the composited page shows through;
         // content pages are opaque.
@@ -227,6 +237,8 @@ impl Page {
             size,
             role: options.role,
             popups,
+            hover_url,
+            context_menus,
             closed: AtomicBool::new(false),
         })
     }
@@ -282,6 +294,23 @@ impl Page {
     /// **background** (reduces focus-stealing from ad windows / OAuth redirects).
     pub fn drain_popup_requests(&self) -> Vec<PopupTabRequest> {
         self.popups.drain()
+    }
+
+    /// Drain all pending context-menu requests queued by CEF's
+    /// `on_before_context_menu` callback (P5). The shell calls this each tick
+    /// and renders a Mote-styled popover for each request.
+    pub fn drain_context_menu_requests(&self) -> Vec<ContextMenuRequest> {
+        self.context_menus.drain()
+    }
+
+    /// The most recent hover URL from CEF's `on_status_message` callback (P5).
+    ///
+    /// `Some(url)` when the user is hovering a link; `None` on mouse-leave.
+    /// The shell polls this each tick via `sync_hover_url` and updates the
+    /// `mote.hoverurl` status-line built-in element accordingly.
+    #[must_use]
+    pub fn hover_url(&self) -> Option<String> {
+        self.hover_url.get()
     }
 
     /// Navigate this page to `url`.
@@ -454,6 +483,61 @@ impl Page {
         }
     }
 
+    /// Start a find-in-page session on this page.
+    ///
+    /// `text` is the search string. `forward = true` searches forward (default
+    /// direction); `match_case = true` is case-sensitive. `find_next = false`
+    /// starts a new session; `find_next = true` advances to the next match.
+    ///
+    /// CEF highlights all matches automatically. Match count is reported via
+    /// `CefFindHandler::OnFindResult` (not yet wired in v0.1); the status-line
+    /// `mote.findcount` element receives it when the callback is added.
+    pub fn find(&self, text: &str, forward: bool, match_case: bool, find_next: bool) {
+        if let Some(host) = self.browser.host() {
+            host.find(
+                Some(&CefString::from(text)),
+                i32::from(forward),
+                i32::from(match_case),
+                i32::from(find_next),
+            );
+        }
+    }
+
+    /// Stop the current find-in-page session.
+    ///
+    /// `clear_selection = true` clears the highlighted matches (the normal
+    /// Escape behavior); `false` leaves the last match highlighted.
+    pub fn stop_finding(&self, clear_selection: bool) {
+        if let Some(host) = self.browser.host() {
+            host.stop_finding(i32::from(clear_selection));
+        }
+    }
+
+    /// Set the zoom level for this page.
+    ///
+    /// CEF's zoom scale: 0.0 = 100%, positive values zoom in, negative out.
+    /// The mapping used by Mote (P5): step -3 through +5 at 0.5 increments,
+    /// where each step = `level * ln(1.2)` in CEF's internal representation.
+    /// In practice: level 1 ≈ 120%, 2 ≈ 144%, -1 ≈ 83%, -2 ≈ 69%.
+    ///
+    /// `SetZoomLevel` is asynchronous (dispatched to the UI thread); read-back
+    /// via `get_zoom_level` may lag by one pump.
+    pub fn set_zoom_level(&self, level: f64) {
+        if let Some(host) = self.browser.host() {
+            host.set_zoom_level(level);
+        }
+    }
+
+    /// Read the current zoom level for this page (see [`Page::set_zoom_level`]).
+    ///
+    /// Returns `0.0` if the browser has no host (closing/closed).
+    /// Note: `SetZoomLevel` is asynchronous; the value returned here may lag
+    /// by one message-loop pump after a `set_zoom_level` call.
+    #[must_use]
+    pub fn get_zoom_level(&self) -> f64 {
+        self.browser.host().map_or(0.0, |host| host.zoom_level())
+    }
+
     /// Request that CEF close this browser. Idempotent — safe to call more than
     /// once; subsequent calls are no-ops. After calling, pump the engine a few
     /// times so CEF can tear down the host before [`crate::Engine::shutdown`].
@@ -586,7 +670,7 @@ impl ChromePageRequest {
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav, title, url_slot, size, popups) =
+        let (inner, frame, nav, title, url_slot, size, popups, hover_url, context_menus) =
             ffi::build_client(size, Arc::new(AllowAll), PageRole::Chrome);
         let client = bridge::chrome_client(inner, router);
         // The chrome browser is always transparent (the page composites through
@@ -607,6 +691,8 @@ impl ChromePageRequest {
             size,
             role: PageRole::Chrome,
             popups,
+            hover_url,
+            context_menus,
             closed: AtomicBool::new(false),
         }))
     }
