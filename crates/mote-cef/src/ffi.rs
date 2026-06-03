@@ -536,6 +536,14 @@ pub struct PopupTabRequest {
     /// preceding click; open in the **background** to reduce focus-stealing
     /// (ad windows, OAuth redirects, etc.).
     pub user_gesture: bool,
+    /// Whether the disposition indicates a background tab.
+    ///
+    /// CEF reports `WindowOpenDisposition::NEW_BACKGROUND_TAB` when the user
+    /// ⌘-clicks (or middle-clicks) a link — the user's explicit intent is a
+    /// background tab even though `user_gesture` is `true`. This flag captures
+    /// that intent so `open_popup_tab` can honor it instead of the gesture-driven
+    /// foreground default (P3, ADR-0015).
+    pub background: bool,
 }
 
 /// A thread-safe queue of [`PopupTabRequest`]s written by the CEF lifespan
@@ -599,7 +607,7 @@ wrap_life_span_handler! {
             _popup_id: ::std::os::raw::c_int,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
-            _target_disposition: WindowOpenDisposition,
+            target_disposition: WindowOpenDisposition,
             user_gesture: ::std::os::raw::c_int,
             _popup_features: Option<&PopupFeatures>,
             _window_info: Option<&mut WindowInfo>,
@@ -614,9 +622,17 @@ wrap_life_span_handler! {
                     .unwrap_or_default();
                 // Skip blank / empty targets — no useful URL to open.
                 if !url.is_empty() {
+                    // P3 (ADR-0015): ⌘-click on a content link causes CEF to
+                    // fire `on_before_popup` with disposition
+                    // `NEW_BACKGROUND_TAB`. Capture this intent explicitly so
+                    // the shell opens the tab in the background rather than
+                    // foregrounding it (even though `user_gesture` is true).
+                    let background =
+                        target_disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
                     self.state.popups.push(PopupTabRequest {
                         url,
                         user_gesture: user_gesture != 0,
+                        background,
                     });
                 }
                 // Return 1 = suppress the OS popup window (CEF abandons its
@@ -1038,10 +1054,12 @@ mod tests {
         q.push(PopupTabRequest {
             url: "https://example.com/a".to_string(),
             user_gesture: true,
+            background: false,
         });
         q.push(PopupTabRequest {
             url: "https://example.com/b".to_string(),
             user_gesture: false,
+            background: false,
         });
         let drained = q.drain();
         assert_eq!(drained.len(), 2, "both requests must be returned");
@@ -1066,6 +1084,7 @@ mod tests {
         q.push(PopupTabRequest {
             url: "https://news.ycombinator.com".to_string(),
             user_gesture: true,
+            background: false,
         });
         let req = q.drain().into_iter().next().expect("one request");
         assert!(
@@ -1082,6 +1101,7 @@ mod tests {
         q.push(PopupTabRequest {
             url: "https://example.com".to_string(),
             user_gesture: false,
+            background: false,
         });
         let req = q.drain().into_iter().next().expect("one request");
         assert!(
@@ -1100,6 +1120,7 @@ mod tests {
         q2.push(PopupTabRequest {
             url: "https://shared.example.com".to_string(),
             user_gesture: true,
+            background: false,
         });
         let drained = q.drain(); // drain from the original
         assert_eq!(
@@ -1108,6 +1129,46 @@ mod tests {
             "push through clone must be visible to original"
         );
         assert_eq!(drained[0].url, "https://shared.example.com");
+    }
+
+    /// P3: ⌘-click produces a `PopupTabRequest` with `background=true` and
+    /// `user_gesture=true`. The shell's `drain_popup_tabs` must open the tab in
+    /// the background (not foreground) when `background` is true, regardless of
+    /// `user_gesture`. This test verifies the field round-trips correctly.
+    #[test]
+    fn popup_queue_background_flag_round_trips() {
+        let q = PopupTabQueue::new();
+        // Simulate ⌘-click: gesture=true, disposition=NEW_BACKGROUND_TAB.
+        q.push(PopupTabRequest {
+            url: "https://news.ycombinator.com/item?id=42".to_string(),
+            user_gesture: true,
+            background: true,
+        });
+        let req = q.drain().into_iter().next().expect("one request");
+        assert!(req.user_gesture, "⌘-click is a user gesture");
+        assert!(
+            req.background,
+            "⌘-click must set background=true (NEW_BACKGROUND_TAB disposition)"
+        );
+    }
+
+    /// P3: a regular click (target=_blank) produces `background=false`. The
+    /// shell opens the tab in the foreground.
+    #[test]
+    fn popup_queue_regular_click_is_foreground() {
+        let q = PopupTabQueue::new();
+        // Regular target=_blank click: gesture=true, no special disposition.
+        q.push(PopupTabRequest {
+            url: "https://example.com".to_string(),
+            user_gesture: true,
+            background: false,
+        });
+        let req = q.drain().into_iter().next().expect("one request");
+        assert!(req.user_gesture, "regular click is a user gesture");
+        assert!(
+            !req.background,
+            "regular target=_blank click must not set background"
+        );
     }
 
     // -----------------------------------------------------------------------

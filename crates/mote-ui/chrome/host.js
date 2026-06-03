@@ -370,6 +370,13 @@
     };
   }
 
+  // True if a tab URL is the newtab page (ADR-0015). Used to apply the [·]
+  // favicon glyph and for any other newtab-specific rendering.
+  function isNewtabUrl(url) {
+    return typeof url === "string" &&
+      url.toLowerCase().indexOf("mote://chrome/newtab") === 0;
+  }
+
   // Rebuild the tab strip from the runtime tab list (Rust → chrome push). Each
   // tab is built with structured DOM construction + text nodes — NEVER innerHTML
   // of page-derived strings (bridge.rs §"Discipline the caller must uphold":
@@ -380,6 +387,11 @@
   //   - .favicon-placeholder dot-grid (not a checkbox-looking surface-3 square)
   //   - .tab-close renders via lucide sprite <use>, is hover-only via CSS
   //   - Active tab: surface-2 bg lift + 2px left-stripe (handled by CSS)
+  //
+  // P3 changes:
+  //   - Newtab tabs get .favicon.is-newtab with the [·] glyph (tabs.css)
+  //   - Middle-click (mousedown button=1) → close_tab op
+  //   - Tooltip carries both title (primary) and URL (secondary) on two lines
   function renderTabs(tabs) {
     var strip = document.getElementById("tabstrip");
     if (!strip || !Array.isArray(tabs)) return;
@@ -390,20 +402,32 @@
       row.className = tab.active ? "tab is-active" : "tab";
       row.setAttribute("role", "tab");
       row.setAttribute("aria-selected", tab.active ? "true" : "false");
-      if (tab.title) {
-        row.setAttribute("data-tooltip", (tab.title || tab.url || "new tab"));
+
+      // P3: tooltip carries title (primary) + URL (secondary) on two lines.
+      // The tooltip primitive (wireTooltip) reads data-tooltip for the caption
+      // and data-tooltip-secondary for a second line below it.
+      var displayTitle = tab.title || tab.url || "new tab";
+      row.setAttribute("data-tooltip", displayTitle);
+      if (tab.url && tab.url !== displayTitle) {
+        row.setAttribute("data-tooltip-secondary", tab.url);
       }
 
-      // P1: dot-grid favicon placeholder — not a solid square (not a checkbox).
+      // P1/P3: favicon placeholder. Newtab tabs get the [·] glyph (is-newtab
+      // CSS class); all others get the dot-grid placeholder.
       var favicon = document.createElement("span");
-      favicon.className = "favicon favicon-placeholder";
+      if (isNewtabUrl(tab.url)) {
+        favicon.className = "favicon favicon-placeholder is-newtab";
+        favicon.textContent = "[·]"; // text node — not innerHTML
+      } else {
+        favicon.className = "favicon favicon-placeholder";
+      }
       favicon.setAttribute("aria-hidden", "true");
       row.appendChild(favicon);
 
       var title = document.createElement("span");
       title.className = "title";
       // Text node: the title/URL is page-derived and must not be parsed as HTML.
-      title.textContent = tab.title || tab.url || "new tab";
+      title.textContent = displayTitle;
       row.appendChild(title);
 
       // P1: close button uses the lucide sprite (not a unicode ✕ glyph).
@@ -439,6 +463,19 @@
           window.mote.invoke("select_tab", { id: tab.id }).catch(function () {});
         }
       });
+
+      // P3: middle-click closes the tab.  Use mousedown rather than click
+      // because `click` does not fire for button=1 (middle) in all browsers.
+      // stopPropagation prevents the select_tab click handler from also firing.
+      row.addEventListener("mousedown", function (ev) {
+        if (ev.button !== 1) return; // only middle button
+        ev.preventDefault();         // prevent autoscroll on some platforms
+        ev.stopPropagation();
+        if (window.mote && window.mote.invoke) {
+          window.mote.invoke("close_tab", { id: tab.id }).catch(function () {});
+        }
+      });
+
       strip.appendChild(row);
     });
   }
@@ -1003,11 +1040,22 @@
       var el = getOrCreateTip();
       el.textContent = ""; // clear previous content (textContent, not innerHTML)
 
-      // Caption span.
+      // Caption span (primary line).
       var caption = document.createElement("span");
       caption.className = "tooltip-caption";
       caption.textContent = text;
       el.appendChild(caption);
+
+      // P3: optional secondary line (tab URL). Rendered in a dimmer span below
+      // the primary caption, before the optional <kbd> chord. This enables the
+      // two-line tab tooltip: title on top, URL underneath.
+      var secondary = target.getAttribute("data-tooltip-secondary");
+      if (secondary) {
+        var secSpan = document.createElement("span");
+        secSpan.className = "tooltip-secondary";
+        secSpan.textContent = secondary; // text node — not innerHTML
+        el.appendChild(secSpan);
+      }
 
       // Optional kbd chord.
       var kbd = target.getAttribute("data-tooltip-kbd");

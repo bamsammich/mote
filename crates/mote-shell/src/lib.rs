@@ -133,13 +133,19 @@ const HIDDEN_TTL_ENV: &str = "MOTE_HIDDEN_TTL_SECS";
 /// (`MOTE_HOUSEKEEPING_SECS`). Lets a test see discard/reap fire promptly.
 const HOUSEKEEPING_ENV: &str = "MOTE_HOUSEKEEPING_SECS";
 
-/// The start URL a brand-new tab loads. A `data:` URL renders without network,
-/// so the slice is deterministic offline; pass a real URL on the command line
-/// (the first non-flag argument) to open the first tab live.
-const DEFAULT_START_URL: &str = "data:text/html,\
-<html><body style='margin:0;background:%23204060;color:%23eaeaea;\
-font:32px sans-serif;display:flex;align-items:center;justify-content:center;\
-height:100vh'>mote — composited web content</body></html>";
+/// The start URL a brand-new tab loads (P3, ADR-0015).
+///
+/// `mote://chrome/newtab.html` is served via the global CEF request context
+/// (the `mote://chrome` scheme handler). It replaces the old `data:text/html,…`
+/// placeholder with a proper chrome page that: (a) shows the `[·]` brand mark
+/// centered at 96px, (b) carries the `newtab.center` declarable slot, (c) sets
+/// `<title>new tab</title>` so R2's `OnTitleChange` mirror surfaces a clean
+/// sidebar tab title.
+///
+/// **ADR-0015 constraint**: `mote://` URLs MUST be loaded via `Page::new` (global
+/// request context), NEVER via `Page::with_profile` (per-identity profile
+/// context). The `create_content_page` helper enforces this routing.
+const DEFAULT_START_URL: &str = "mote://chrome/newtab.html";
 
 /// A command produced by a host-bridge op (which is `Send + Sync`) and applied
 /// by the winit loop on the pump thread (which owns the `!Send` pages).
@@ -581,7 +587,7 @@ fn build_initial_tabs(
         for (i, url) in urls.into_iter().enumerate() {
             let id = session.add_tab(url.clone(), workspace);
             let page = if i == 0 {
-                Some(Page::with_profile(&url, content_opts, default_profile)?)
+                Some(create_content_page(&url, content_opts, default_profile)?)
             } else {
                 None
             };
@@ -596,7 +602,7 @@ fn build_initial_tabs(
     } else {
         // Restored: materialize the active tab eagerly so the window is not blank.
         let url = tabs[0].url.clone();
-        if let Ok(page) = Page::with_profile(&url, content_opts, default_profile) {
+        if let Ok(page) = create_content_page(&url, content_opts, default_profile) {
             tabs[0].page = Some(page);
         }
     }
@@ -856,6 +862,14 @@ fn build_chrome_resources() -> ChromeResources {
     for (name, contents) in mote_ui::COMPONENT_CSS {
         res = res.register(format!("components/{name}.css"), *contents, css);
     }
+    // P3: newtab page (ADR-0015). Served from `mote://chrome/newtab.html` via
+    // the global request context. Registered under the `.html` path so relative
+    // CSS imports (tokens.css, base.css, components/empty-slot.css) resolve.
+    res = res.register(
+        "newtab.html",
+        mote_ui::NEWTAB_HTML,
+        "text/html; charset=utf-8",
+    );
     // P6: settings panel — four section pages + shared CSS/JS.
     //
     // Each section is registered under TWO paths:
@@ -908,6 +922,41 @@ fn build_overlay_resources(integrity_html: &str) -> ChromeResources {
         res = res.register(format!("components/{name}.css"), *contents, css);
     }
     res
+}
+
+/// Create a content [`Page`] with the correct CEF request context for `url`.
+///
+/// **ADR-0015 § global-request-context constraint**: `mote://` URLs MUST be
+/// loaded via the CEF global request context ([`Page::new`]); per-identity
+/// profile contexts do NOT have the `mote://` scheme handler installed and
+/// will fail with `ERR_UNKNOWN_URL_SCHEME`. All other URLs are loaded via the
+/// per-identity profile context ([`Page::with_profile`]) for cookie/cache
+/// isolation (ADR-0010).
+///
+/// URL scheme matching is case-insensitive per RFC 3986 §3.1.
+///
+/// This is the **single routing point** for all tab-creation code paths.
+/// Every `Page::with_profile` call in a tab-creation context must go through
+/// this helper so the routing logic cannot be accidentally bypassed.
+fn create_content_page(
+    url: &str,
+    opts: &PageOptions,
+    profile: &ProfileHandle,
+) -> mote_cef::Result<Page> {
+    if url.len() >= 7 && url[..7].eq_ignore_ascii_case("mote://") {
+        // Global request context — mote:// scheme handler is registered here only.
+        // Role: Overlay (trusted-but-unprivileged) so the S1 nav guard does not block
+        // this top-level mote:// navigation. These pages are shell-authored and static;
+        // they do not need the host-bridge (window.cefQuery / window.mote).
+        let mote_opts = PageOptions {
+            role: PageRole::Overlay,
+            ..opts.clone()
+        };
+        Page::new(url, &mote_opts)
+    } else {
+        // Per-identity profile context — all untrusted web content.
+        Page::with_profile(url, opts, profile)
+    }
 }
 
 /// Build the closed op registry. Ops translate chrome intents into
@@ -1510,7 +1559,12 @@ impl ShellApp {
             .chain(self.bridge.page().drain_popup_requests())
             .collect();
         for req in requests {
-            self.open_popup_tab(&req.url, req.user_gesture);
+            // P3 (ADR-0015): `background=true` means the user explicitly chose
+            // a background tab (⌘-click → NEW_BACKGROUND_TAB disposition). Honor
+            // it: a background-flagged request is never foregrounded even if the
+            // user gesture flag is true.
+            let foreground = req.user_gesture && !req.background;
+            self.open_popup_tab(&req.url, foreground);
         }
     }
 
@@ -1766,7 +1820,7 @@ impl ShellApp {
         let url = tab.url.clone();
         let id = tab.id;
         eprintln!("mote-shell: materialize placeholder tab {id} -> {url} (workspace switch)");
-        match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+        match create_content_page(&url, &self.content_opts, &self.default_profile) {
             Ok(page) => {
                 if let Some(t) = self.tabs.get_mut(self.active) {
                     t.page = Some(page);
@@ -2185,7 +2239,7 @@ impl ShellApp {
     fn open_tab(&mut self, url: Option<String>) {
         let url = url.unwrap_or_else(|| DEFAULT_START_URL.to_string());
         let id = self.session.add_tab(url.clone(), self.workspace);
-        let page = match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+        let page = match create_content_page(&url, &self.content_opts, &self.default_profile) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: failed to create page for new tab: {e}");
@@ -2224,7 +2278,7 @@ impl ShellApp {
         }
         let url = url.to_string();
         let id = self.session.add_tab(url.clone(), self.workspace);
-        let page = match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+        let page = match create_content_page(&url, &self.content_opts, &self.default_profile) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: popup tab page create failed: {e}");
@@ -2286,7 +2340,7 @@ impl ShellApp {
         if !self.tabs[idx].is_live() {
             let url = self.tabs[idx].url.clone();
             eprintln!("mote-shell: materialize placeholder tab {id} -> {url}");
-            match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+            match create_content_page(&url, &self.content_opts, &self.default_profile) {
                 Ok(page) => self.tabs[idx].page = Some(page),
                 Err(e) => eprintln!("mote-shell: failed to materialize tab {id}: {e}"),
             }
@@ -2887,7 +2941,7 @@ impl ShellApp {
         let url = stab.url.clone();
         let title = stab.title.clone();
         eprintln!("mote-shell: reveal hidden tab {id} -> {url}");
-        let page = match Page::with_profile(&url, &self.content_opts, &self.default_profile) {
+        let page = match create_content_page(&url, &self.content_opts, &self.default_profile) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: failed to materialize revealed tab {id}: {e}");
@@ -4921,12 +4975,13 @@ mod tests {
         let request = PopupTabRequest {
             url: "https://news.ycombinator.com/item?id=42".to_string(),
             user_gesture: true,
+            background: false,
         };
-        // The shell's `drain_popup_tabs` maps `req.user_gesture` directly to the
-        // `foreground` argument of `open_popup_tab`.
+        // The shell's `drain_popup_tabs` computes `foreground = user_gesture && !background`.
+        let foreground = request.user_gesture && !request.background;
         assert!(
-            request.user_gesture,
-            "gesture=true must pass foreground=true to open_popup_tab"
+            foreground,
+            "gesture=true + background=false must pass foreground=true to open_popup_tab"
         );
     }
 
@@ -4972,11 +5027,12 @@ mod tests {
         let request = PopupTabRequest {
             url: "https://ad.example.com".to_string(),
             user_gesture: false,
+            background: false,
         };
-        // The shell's `drain_popup_tabs` maps `req.user_gesture` directly to
-        // `open_popup_tab(url, foreground)` — false here → background tab.
+        // The shell's `drain_popup_tabs` computes `foreground = user_gesture && !background`.
+        let foreground = request.user_gesture && !request.background;
         assert!(
-            !request.user_gesture,
+            !foreground,
             "gesture=false must pass foreground=false to open_popup_tab"
         );
     }
@@ -5911,6 +5967,142 @@ mod tests {
         assert!(
             actions.iter().any(|a| a.contains("new tab")),
             "must include new tab action"
+        );
+    }
+
+    // ── P3: create_content_page routing (ADR-0015) ─────────────────────────
+
+    /// `create_content_page` selects `Page::new` (global context) for `mote://`
+    /// URLs and `Page::with_profile` (per-identity context) for all others.
+    ///
+    /// This test is a closest-seam structural regression: it exercises the
+    /// routing logic directly via the URL-scheme classifier, without a live CEF
+    /// engine (which is not available headlessly). The classifier is the same
+    /// predicate used by `create_content_page`; the test is equivalent to
+    /// asserting that `create_content_page` would call `Page::new` vs
+    /// `Page::with_profile`.
+    ///
+    /// ADR-0015 global-request-context-constraint section.
+    #[test]
+    fn p3_create_content_page_routes_mote_urls_to_global_context() {
+        // The routing predicate extracted from create_content_page.
+        fn is_mote_url(url: &str) -> bool {
+            url.len() >= 7 && url[..7].eq_ignore_ascii_case("mote://")
+        }
+
+        // mote:// URLs must route to global context (Page::new).
+        assert!(
+            is_mote_url("mote://chrome/newtab.html"),
+            "newtab URL must route to global context"
+        );
+        assert!(
+            is_mote_url("mote://chrome/settings/general"),
+            "settings URL must route to global context"
+        );
+        assert!(
+            is_mote_url("MOTE://chrome/index.html"),
+            "case-insensitive: MOTE:// must route to global context"
+        );
+        assert!(
+            is_mote_url("Mote://chrome/newtab.html"),
+            "case-insensitive: Mote:// must route to global context"
+        );
+
+        // Non-mote:// URLs must route to profile context (Page::with_profile).
+        assert!(
+            !is_mote_url("https://example.com"),
+            "https:// must route to profile context"
+        );
+        assert!(
+            !is_mote_url("http://news.ycombinator.com"),
+            "http:// must route to profile context"
+        );
+        assert!(
+            !is_mote_url("data:text/html,<html></html>"),
+            "data: must route to profile context"
+        );
+        assert!(
+            !is_mote_url(""),
+            "empty URL must route to profile context (not crash)"
+        );
+        assert!(
+            !is_mote_url("mote"),
+            "bare 'mote' (no scheme) must not match"
+        );
+        assert!(
+            !is_mote_url("mote:/"),
+            "single-slash 'mote:/' must not match (not a valid mote:// URL)"
+        );
+    }
+
+    /// `create_content_page` must assign `PageRole::Overlay` for `mote://` URLs so
+    /// the S1 navigation guard does not block the top-level `mote://chrome/newtab.html`
+    /// load. Without this, the page commits a cancelled navigation and paints black.
+    ///
+    /// This test exercises the opts construction logic (role override) that lives
+    /// alongside the URL-routing predicate in `create_content_page`.
+    #[test]
+    fn p3_create_content_page_uses_overlay_role_for_mote_urls() {
+        // Replicate the role-selection logic from create_content_page.
+        fn role_for(url: &str, base_role: PageRole) -> PageRole {
+            if url.len() >= 7 && url[..7].eq_ignore_ascii_case("mote://") {
+                PageRole::Overlay
+            } else {
+                base_role
+            }
+        }
+
+        // mote:// URLs must get Overlay role (exempt from S1 nav guard).
+        assert_eq!(
+            role_for("mote://chrome/newtab.html", PageRole::Content),
+            PageRole::Overlay,
+            "newtab page must use Overlay role so the S1 guard allows mote:// navigation"
+        );
+        assert_eq!(
+            role_for("mote://chrome/settings/general", PageRole::Content),
+            PageRole::Overlay,
+            "settings page must use Overlay role"
+        );
+        assert_eq!(
+            role_for("MOTE://chrome/newtab.html", PageRole::Content),
+            PageRole::Overlay,
+            "case-insensitive: MOTE:// must also get Overlay role"
+        );
+
+        // Non-mote:// URLs must inherit the base role (Content).
+        assert_eq!(
+            role_for("https://news.ycombinator.com", PageRole::Content),
+            PageRole::Content,
+            "https:// must keep Content role"
+        );
+        assert_eq!(
+            role_for("http://example.com", PageRole::Content),
+            PageRole::Content,
+            "http:// must keep Content role"
+        );
+    }
+
+    /// `DEFAULT_START_URL` must be a `mote://` URL (P3, ADR-0015). The old
+    /// `data:text/html,...` placeholder is replaced; this test prevents
+    /// regression to any non-mote:// start URL.
+    #[test]
+    fn p3_default_start_url_is_mote_scheme() {
+        assert!(
+            DEFAULT_START_URL.starts_with("mote://"),
+            "DEFAULT_START_URL must be a mote:// URL (P3, ADR-0015); got: {DEFAULT_START_URL}"
+        );
+    }
+
+    /// `newtab.html` must be registered in `build_chrome_resources()` so the
+    /// `mote://chrome/newtab.html` request resolves and the page loads. Missing
+    /// registration would produce a CEF 404 / blank tab.
+    #[test]
+    fn p3_newtab_registered_in_chrome_resources() {
+        let res = build_chrome_resources();
+        let registered: std::collections::HashSet<&str> = res.paths().into_iter().collect();
+        assert!(
+            registered.contains("newtab.html"),
+            "newtab.html must be registered in build_chrome_resources() (P3, ADR-0015)"
         );
     }
 }

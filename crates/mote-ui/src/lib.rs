@@ -141,6 +141,13 @@ pub const SETTINGS_INTEGRITY_HTML: &str = include_str!("../chrome/settings/integ
 /// Settings → Keybinds section HTML (read-only chord reference, grouped by scope).
 pub const SETTINGS_KEYBINDS_HTML: &str = include_str!("../chrome/settings/keybinds.html");
 
+/// The `mote://newtab` page (ADR-0015).
+///
+/// Served from `mote://chrome/newtab.html` via the global CEF request context.
+/// Declares a single `newtab.center` slot for future theme and plugin bindings;
+/// the default theme leaves it empty.
+pub const NEWTAB_HTML: &str = include_str!("../chrome/newtab.html");
+
 /// The `[mote]` wordmark SVG.
 pub const WORDMARK_SVG: &str = include_str!("../chrome/assets/wordmark.svg");
 
@@ -945,6 +952,99 @@ mod tests {
         assert_eq!(
             parsed.plugins[0].secrets[0].name,
             panel.plugins[0].secrets[0].name
+        );
+    }
+
+    // ---- P3: newtab.html structure tests (ADR-0015) ----
+
+    /// The `NEWTAB_HTML` constant is non-empty (`include_str` wired correctly).
+    #[test]
+    fn newtab_html_constant_is_non_empty() {
+        assert!(
+            !NEWTAB_HTML.is_empty(),
+            "NEWTAB_HTML must include newtab.html"
+        );
+    }
+
+    /// Page title must be exactly `new tab` so R2's `OnTitleChange` mirror
+    /// surfaces it as the sidebar tab title and window title (ADR-0015 §title).
+    #[test]
+    fn newtab_html_title_is_new_tab() {
+        assert!(
+            NEWTAB_HTML.contains("<title>new tab</title>"),
+            "newtab.html <title> must be exactly 'new tab'"
+        );
+    }
+
+    /// The `newtab.center` slot must be declared so themes and plugins can bind
+    /// it via `theme:bind_slot("newtab.center", element)` (ADR-0015 §the slot).
+    #[test]
+    fn newtab_html_declares_newtab_center_slot() {
+        assert!(
+            NEWTAB_HTML.contains("data-slot=\"newtab.center\""),
+            "newtab.html must declare the newtab.center slot"
+        );
+    }
+
+    /// The newtab page must carry a CSP meta that blocks inline scripts and
+    /// unsafe-eval — same discipline as chrome.html (ADR-0005 + ADR-0015).
+    #[test]
+    fn newtab_html_csp_blocks_inline_and_eval() {
+        assert!(
+            NEWTAB_HTML.contains("Content-Security-Policy"),
+            "newtab.html must carry a CSP meta"
+        );
+        let meta_marker = "http-equiv=\"Content-Security-Policy\"";
+        let meta_start = NEWTAB_HTML
+            .find(meta_marker)
+            .expect("newtab.html must declare the CSP meta");
+        let after_meta = &NEWTAB_HTML[meta_start..];
+        let content_start = after_meta
+            .find("content=\"")
+            .map(|i| meta_start + i + "content=\"".len())
+            .expect("CSP meta must have a content attribute");
+        let content_end = NEWTAB_HTML[content_start..]
+            .find('"')
+            .map(|i| content_start + i)
+            .expect("CSP content attribute must be quoted");
+        let csp = &NEWTAB_HTML[content_start..content_end];
+
+        assert!(
+            csp.contains("script-src 'self'"),
+            "newtab.html CSP must restrict script-src to 'self'; got: {csp}"
+        );
+        assert!(
+            !csp.contains("'unsafe-eval'"),
+            "newtab.html CSP must not allow 'unsafe-eval'; got: {csp}"
+        );
+        let script_src_clause = csp
+            .split(';')
+            .map(str::trim)
+            .find(|c| c.starts_with("script-src"))
+            .expect("newtab.html CSP must declare a script-src clause");
+        assert!(
+            !script_src_clause.contains("'unsafe-inline'"),
+            "newtab.html script-src must not allow 'unsafe-inline'; got: {script_src_clause}"
+        );
+    }
+
+    /// The newtab page must boot in the dusk theme (same as chrome.html). The
+    /// `data-theme="dusk"` attribute on `<html>` enables the dusk token set.
+    #[test]
+    fn newtab_html_boots_in_dusk_theme() {
+        assert!(
+            NEWTAB_HTML.contains("data-theme=\"dusk\""),
+            "newtab.html must boot in dusk theme via data-theme attribute"
+        );
+    }
+
+    /// The newtab page must reference `assets/mark.svg` — the [·] brand mark
+    /// at 96px is the primary visual element (ADR-0015 §page structure).
+    #[test]
+    fn newtab_html_references_mark_svg() {
+        assert!(
+            NEWTAB_HTML.contains("assets/mark.svg"),
+            "newtab.html must reference assets/mark.svg for the brand mark"
         );
     }
 

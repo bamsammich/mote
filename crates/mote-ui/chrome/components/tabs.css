@@ -49,6 +49,23 @@
   background-position: 0 0;
 }
 
+/* P3: newtab tabs render the [·] mark glyph in the favicon slot instead of
+ * the generic dot-grid. The mark is rendered as mono text so it scales with
+ * the surrounding font metrics and stays crisp at 14px. */
+.tab .favicon.is-newtab {
+  background-image: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: var(--text-mono-sm);
+  color: var(--accent);
+  /* Scale the bracket + dot into the 14px slot; letter-spacing pulls the
+   * closing bracket closer to the dot on this small size. */
+  font-size: 9px;
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
 /* P1: Close button is hover-only, uses the lucide icon via .tab-close.
  * Keycap construction per the design contract. */
 .tab .close,

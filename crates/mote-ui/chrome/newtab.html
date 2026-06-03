@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en" data-theme="dusk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Content-Security-Policy (ADR-0005 + ADR-0015): the newtab page loads only
+      its own bundled assets from the mote://chrome origin. No remote scripts,
+      no inline scripts, no unsafe-eval. style-src keeps 'unsafe-inline' for
+      parity with chrome.html (storage-bar / style attr patterns); img-src
+      includes data: for inline favicon placeholders; object-src 'none' blocks
+      plugin elements; base-uri 'self' prevents base hijacking.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; connect-src 'self';"
+    />
+    <title>new tab</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="base.css" />
+    <link rel="stylesheet" href="components/empty-slot.css" />
+    <style>
+      /* newtab page layout — not a component; lives inline per P3 scoping. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+        /* Dot-grid motif at 12% opacity (ADR-0015 §page structure). The
+           --dots token is 6% opacity radial-gradient; we layer it twice at
+           increased opacity by compositing a second layer at 2× the base
+           opacity. Simpler: use the raw gradient with 12% alpha directly. */
+        background-image: radial-gradient(
+          rgba(236, 229, 216, 0.12) 1px,
+          transparent 1px
+        );
+        background-size: 4px 4px;
+        background-position: 0 0;
+        overflow: hidden;
+      }
+
+      /* Vellum: use darker dots on the paper background. */
+      [data-theme="vellum"] body {
+        background-image: radial-gradient(
+          rgba(20, 17, 15, 0.12) 1px,
+          transparent 1px
+        );
+        background-size: 4px 4px;
+      }
+
+      .newtab-root {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        gap: var(--space-4);
+        /* The dot-grid is on <html>; this layer is transparent. */
+        background: transparent;
+      }
+
+      .newtab-mark {
+        width: 96px;
+        height: 96px;
+        flex: none;
+        /* The SVG uses the accent color directly; no filter needed. */
+      }
+
+      .newtab-hint {
+        font: var(--text-mono-sm);
+        color: var(--fg-2);
+        letter-spacing: var(--tracking-mono);
+        /* No margin — parent gap drives spacing. */
+      }
+
+      /* newtab.center slot — empty in v0.1 default theme; declared for future
+         binding by themes and plugins (ADR-0015 §the slot). */
+      .newtab-slot {
+        min-height: 40px;
+        width: 100%;
+        max-width: 480px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="newtab-root">
+      <!-- Brand mark: [·] at 96px (ADR-0015 §page structure). -->
+      <img
+        src="assets/mark.svg"
+        class="newtab-mark"
+        alt="[·]"
+        aria-hidden="true"
+      />
+      <!-- Hint line — the only copy this page ships in v0.1. -->
+      <span class="newtab-hint">press ⌘L to navigate</span>
+      <!--
+        newtab.center slot — declared-but-unbound in v0.1. Themes and plugins
+        bind it via theme:bind_slot("newtab.center", element). The slot-empty
+        CSS class applies the canonical empty-slot dot-grid treatment when no
+        element is bound.
+      -->
+      <div data-slot="newtab.center" class="slot-empty newtab-slot"></div>
+    </div>
+  </body>
+</html>
