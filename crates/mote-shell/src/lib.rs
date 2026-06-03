@@ -2497,6 +2497,11 @@ impl ShellApp {
             "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_nav_state',\
              {{can_go_back:{can_go_back},can_go_forward:{can_go_forward}}});"
         ));
+        // P4 follow-up: built-in status-line elements (mote.tabcount,
+        // mote.security) reflect tab/navigation state. Pushing them alongside
+        // tabs+url+nav keeps the status line in lockstep — without this, the
+        // built-ins were only pushed once at startup and never updated.
+        self.push_statusline_to_chrome();
     }
 
     /// Push the current status-line element set into the chrome document via the
