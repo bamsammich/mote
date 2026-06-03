@@ -3747,6 +3747,7 @@ name = "mote-types"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "serde",
  "thiserror 2.0.18",
 ]
 

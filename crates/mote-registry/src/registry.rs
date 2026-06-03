@@ -435,6 +435,7 @@ mod tests {
             "mcp:server",
             "secret:provider",
             "password-manager-form-services",
+            "statusline.publish-clickable",
         ];
         for name in expected {
             assert!(

@@ -57,7 +57,10 @@ pub use config::{
 };
 pub use error::{HookInvokeError, LuaError};
 pub use invoke::{HookTable, call_function_with_deadline, call_hook_with_deadline};
-pub use load::{IdentityScope, LoadedPlugin, Manifest, RailBinding, load_plugin, load_plugin_in};
+pub use load::{
+    IdentityScope, LoadedPlugin, Manifest, RailBinding, StatuslineBinding, load_plugin,
+    load_plugin_in,
+};
 pub use sandbox::new_sandbox;
 
 // Re-export the mlua handles the invoker primitive traffics in, so consumers

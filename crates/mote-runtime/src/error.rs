@@ -110,6 +110,17 @@ pub enum LoadError {
         /// A human-readable description of the validation failure.
         reason: String,
     },
+
+    /// **Step 3 — statusline element validation.** A `M.statusline` entry
+    /// failed semantic validation (unknown lucide icon, missing required field
+    /// for the declared kind, duplicate id, etc.) — ADR-0016.
+    #[error("statusline element validation failed (step 3, entry {index}): {reason}")]
+    StatusLine {
+        /// The 1-based index of the offending statusline entry.
+        index: usize,
+        /// A human-readable description of the validation failure.
+        reason: String,
+    },
 }
 
 /// A failure when reloading or unloading a plugin that was not loaded.

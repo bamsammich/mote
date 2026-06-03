@@ -149,4 +149,45 @@ pub enum LuaError {
         /// The absent required key.
         field: &'static str,
     },
+
+    // ---- M.statusline extraction errors (ADR-0016) --------------------------
+    /// The `M.statusline` top-level field is present but not a Lua table.
+    #[error("module field `statusline` is present but not a table (got {got})")]
+    StatuslineNotATable {
+        /// The Lua type actually present.
+        got: &'static str,
+    },
+
+    /// A `M.statusline[i]` entry is not a table.
+    #[error("module `statusline` entry at index {index} is not a table (got {got})")]
+    StatuslineEntryNotATable {
+        /// The 1-based index of the offending entry.
+        index: usize,
+        /// The Lua type actually present.
+        got: &'static str,
+    },
+
+    /// A required field inside a `M.statusline[i]` entry has the wrong Lua type.
+    #[error(
+        "statusline entry {index} field `{field}` has wrong type: expected {expected}, got {got}"
+    )]
+    StatuslineEntryFieldType {
+        /// The 1-based index of the offending entry.
+        index: usize,
+        /// The field name.
+        field: &'static str,
+        /// The expected Lua type.
+        expected: &'static str,
+        /// The actual Lua type.
+        got: &'static str,
+    },
+
+    /// A required field inside a `M.statusline[i]` entry is absent.
+    #[error("statusline entry {index} is missing required field `{field}`")]
+    StatuslineEntryMissingField {
+        /// The 1-based index of the offending entry.
+        index: usize,
+        /// The absent required key.
+        field: &'static str,
+    },
 }

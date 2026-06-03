@@ -60,7 +60,7 @@ use mote_lua::{Lua, Value};
 use mote_permissions::{Decision, Gatekeeper, GrantSetGatekeeper};
 use mote_secrets::SecretResolver;
 use mote_storage::Namespace;
-use mote_types::PluginName;
+use mote_types::{PluginName, StatusColor};
 use secrecy::ExposeSecret as _;
 
 use crate::core::{Core, InvokeOutcome};
@@ -365,9 +365,11 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
     // --- capabilities.invoke(capability, fn, arg) --------------------------
     let capabilities = lua.create_table().map_err(stringify)?;
     {
-        let core = core; // last use — move
+        let core = core.clone();
         let g = gate.clone();
-        let audit = audit; // last use — move
+        // `audit` is moved into the closure; this is the last use of the outer
+        // `audit` binding (the gate carries its own clone). The `move` closure
+        // takes ownership below.
         let invoke = lua
             .create_function(
                 move |lua, (capability, function, arg): (String, String, Value)| {
@@ -432,6 +434,105 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
             )
             .map_err(stringify)?;
         capabilities.set("invoke", invoke).map_err(stringify)?;
+    }
+
+    // --- statusline.set(id, payload) (ADR-0016) --------------------------------
+    //
+    // Updates the mutable fields of a statusline element that was declared in
+    // the plugin's `M.statusline` table. `id` is the *unqualified* id (as
+    // declared in the table, without the plugin-name prefix): the host
+    // automatically prepends `<plugin>.` so a plugin can only update its own
+    // elements (typo-protection: an unknown id returns `false`).
+    //
+    // `payload` is a Lua table with OPTIONAL fields:
+    //   `text`    — string; replaces the current text.
+    //   `icon`    — string (`"lucide:<name>"`); replaces the current icon.
+    //   `color`   — string (`"fg"` | `"accent"` | `"warn"` | `"mute"`).
+    //   `tooltip` — string | nil; replaces or clears the tooltip.
+    //
+    // Reserved v2 fields (`action`, `disabled`) in `payload` are logged as a
+    // warning and ignored — the element still updates (forward-compatibility).
+    //
+    // No permission gate in v0.1: a plugin can always update elements it
+    // declared. When `statusline.publish-clickable` is fulfilled (v2), that
+    // capability will gate clickable state changes instead.
+    let statusline = lua.create_table().map_err(stringify)?;
+    {
+        let core = core; // last use — move
+        let plugin_name_str = gate.plugin.as_str().to_owned();
+        let set = lua
+            .create_function(move |_, (id, payload): (String, Value)| {
+                // Build the fully-qualified id: `<plugin>.<id>`.
+                let fq_id = format!("{plugin_name_str}.{id}");
+
+                // Extract payload fields (all optional).
+                //
+                // We marshal through `HostValue` to stay within the public
+                // `mote_lua` API surface (mlua's `LuaString` is not directly
+                // coercible to `&str` without going through mlua internals).
+                //
+                // Signal semantics for each `Option<Option<_>>`:
+                //   `Some(Some(v))` — field present, update to `v`.
+                //   `None`          — field absent or unknown, no change.
+                // For `tooltip` an explicit nil maps to `Some(None)` (clear).
+                let (text, icon, color, tooltip) = if let Value::Table(ref t) = payload {
+                    // Helper: read a table field, marshal to HostValue, extract
+                    // as owned string. Returns `None` if absent or non-string.
+                    let sl_str = |key: &str| -> Option<String> {
+                        t.raw_get::<Value>(key)
+                            .ok()
+                            .and_then(|v| HostValue::from_lua(&v).ok())
+                            .and_then(|hv| hv.as_str().map(str::to_owned))
+                    };
+
+                    let text = sl_str("text").map(Some);
+                    let icon = sl_str("icon").map(Some);
+                    let color = sl_str("color").and_then(|s| StatusColor::from_wire(&s));
+                    // tooltip: explicit nil (`Value::Nil`) → clear; string → set;
+                    // absent / other → no change.
+                    let tooltip = match t.raw_get::<Value>("tooltip") {
+                        Ok(Value::Nil) => Some(None),
+                        Err(_) => None,
+                        Ok(v) => HostValue::from_lua(&v)
+                            .ok()
+                            .and_then(|hv| hv.as_str().map(|s| Some(s.to_owned()))),
+                    };
+
+                    // Reserved v2 fields: warn + ignore (forward-compat).
+                    if !matches!(t.raw_get::<Value>("action"), Ok(Value::Nil) | Err(_)) {
+                        log::warn!(
+                            "mote.statusline.set(`{id}`): payload field `action` is reserved \
+                             for v2 (ADR-0016); ignored in v0.1"
+                        );
+                    }
+                    if !matches!(t.raw_get::<Value>("disabled"), Ok(Value::Nil) | Err(_)) {
+                        log::warn!(
+                            "mote.statusline.set(`{id}`): payload field `disabled` is reserved \
+                             for v2 (ADR-0016); ignored in v0.1"
+                        );
+                    }
+
+                    (text, icon, color, tooltip)
+                } else {
+                    (None, None, None, None)
+                };
+
+                // Flatten: `Some(Some(s))` → pass the inner `Some(s)` as the
+                // "update this field" signal; `None` (key absent) → skip.
+                let found =
+                    core.statusline_set(&fq_id, text.flatten(), icon.flatten(), color, tooltip);
+
+                if !found {
+                    log::warn!(
+                        "mote.statusline.set(`{id}`): element not declared by this plugin \
+                         (fully-qualified id `{fq_id}` not found); call ignored"
+                    );
+                }
+
+                Ok(found)
+            })
+            .map_err(stringify)?;
+        statusline.set("set", set).map_err(stringify)?;
     }
 
     // --- tabs.list() (representative gated read) ----------------------------
@@ -510,16 +611,20 @@ pub(crate) fn install(lua: &Lua, ctx: HostContext) -> Result<(), String> {
         &tabs,
         &secrets,
         &json,
+        &statusline,
     )?;
 
     Ok(())
 }
 
-/// Wires the seven sub-tables into a `mote` table and also into bare globals.
+/// Wires the sub-tables into a `mote` table and also into bare globals.
 ///
 /// `json` is wired into `mote.json` only — no bare global is added because
 /// `json` is not part of DESIGN's unqualified-global examples and adding one
 /// would risk shadowing any plugin-defined local named `json`.
+/// `statusline` is similarly wired into `mote.statusline` only — no bare
+/// global, because `statusline` is a new API not present in existing plugin
+/// examples.
 #[allow(clippy::too_many_arguments)]
 fn mote_set(
     lua: &Lua,
@@ -530,6 +635,7 @@ fn mote_set(
     tabs: &mote_lua::Table,
     secrets: &mote_lua::Table,
     json: &mote_lua::Table,
+    statusline: &mote_lua::Table,
 ) -> Result<(), String> {
     let mote = lua.create_table().map_err(stringify)?;
     mote.set("permissions", permissions).map_err(stringify)?;
@@ -539,6 +645,7 @@ fn mote_set(
     mote.set("tabs", tabs).map_err(stringify)?;
     mote.set("secrets", secrets).map_err(stringify)?;
     mote.set("json", json).map_err(stringify)?;
+    mote.set("statusline", statusline).map_err(stringify)?;
 
     let globals = lua.globals();
     globals.set("mote", mote).map_err(stringify)?;

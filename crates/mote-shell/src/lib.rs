@@ -2499,6 +2499,55 @@ impl ShellApp {
         ));
     }
 
+    /// Push the current status-line element set into the chrome document via the
+    /// `set_statusline_elements` applyOp (ADR-0016).
+    ///
+    /// Merges the three built-in chrome elements (`mote.mode`, `mote.security`,
+    /// `mote.tabcount`) with any plugin-declared elements registered in the
+    /// runtime. Built-ins are prepended so their well-known ids are always
+    /// present; plugin elements follow. The chrome's `wireStatuslineOp` handler
+    /// groups by zone and sorts by priority.
+    ///
+    /// The security element reflects the active tab's URL scheme:
+    /// `https://` → secure lock / accent; everything else → triangle-alert / warn.
+    /// Internal `mote://` pages use the secure variant (they are chrome-owned,
+    /// no remote origin).
+    pub(crate) fn push_statusline_to_chrome(&self) {
+        if !self.chrome_ready {
+            return;
+        }
+
+        // Determine the active URL for the security element.
+        let active_url = self.tabs.get(self.active).map_or("", |t| t.url.as_str());
+        let is_secure = active_url.starts_with("https://") || active_url.starts_with("mote://");
+        let security_el = if is_secure {
+            mote_types::StatusLineElement::builtin_security_https()
+        } else {
+            mote_types::StatusLineElement::builtin_security_http()
+        };
+
+        // Build the full element list: built-ins first, then plugin-declared.
+        let mut elements: Vec<mote_types::StatusLineElement> = vec![
+            mote_types::StatusLineElement::builtin_mode(),
+            security_el,
+            mote_types::StatusLineElement::builtin_tabcount(self.tabs.len()),
+        ];
+        elements.extend(self.host.runtime.statusline_elements());
+
+        let payload = match serde_json::to_string(&elements) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: push_statusline_to_chrome serialise failed: {e}");
+                return;
+            }
+        };
+
+        self.bridge.page().eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&\
+             window.mote.applyOp('set_statusline_elements',{payload});"
+        ));
+    }
+
     /// Push the integrity-panel view-model into the chrome document. The chrome
     /// page's `panels.js` builds the panel DOM via `createElement` / `textContent`
     /// (ADR-0005) — no HTML strings cross the bridge. Returns `true` when the
@@ -3789,6 +3838,11 @@ impl ApplicationHandler for ShellApp {
         if !self.chrome_ready && self.bridge.page().paint_count() >= 1 {
             self.chrome_ready = true;
             self.push_state_to_chrome();
+            // Push the built-in status-line elements immediately so the bar renders
+            // with mode/security/tabcount before the plugin load pass fires.
+            // Plugin-declared elements are added (and the statusline re-pushed)
+            // right after run_initial_load_pass below.
+            self.push_statusline_to_chrome();
             // NOTE: push_workspace_list intentionally NOT called here — plugins
             // haven't loaded yet at chrome-ready (the load pass runs on the next
             // tick, below); invoke_capability would return None and the strip
@@ -3805,6 +3859,9 @@ impl ApplicationHandler for ShellApp {
             self.host.run_initial_load_pass();
             // Populate the workspace strip now that workspace:provider is loaded.
             self.push_workspace_list();
+            // Push the initial status-line state now that plugins have loaded
+            // (plugin-declared elements are now registered in the runtime).
+            self.push_statusline_to_chrome();
             // Show the FIRST awaiting-approval dialog now that chrome is live.
             // The single dialog root holds one dialog, so multi-pending is shown
             // one at a time — `approve_plugin` advances to the next as each

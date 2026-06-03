@@ -31,6 +31,7 @@ mod ids;
 mod origin;
 mod plugin_name;
 mod schema_version;
+mod statusline;
 
 pub use checksum::{Checksum, ChecksumParseError};
 pub use glob::{Glob, GlobParseError, GlobSet, Match};
@@ -38,3 +39,4 @@ pub use ids::{IdentityId, TabId, WorkspaceId};
 pub use origin::Origin;
 pub use plugin_name::{PluginName, PluginNameError};
 pub use schema_version::{SchemaVersion, SchemaVersionParseError};
+pub use statusline::{StatusColor, StatusKind, StatusLineElement, StatusZone};

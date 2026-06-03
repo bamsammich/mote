@@ -1,86 +1,143 @@
 /*
- * status-line.css — 22px persistent mono strip in bottom-bar. Per
- * spec/components/status-line.md. Composed of status-indicator segments.
- * Token-only. No icons (mono text surface), no animated swaps, taller than 22px.
+ * status-line.css — 24px persistent mono strip in bottom-bar (ADR-0016).
+ *
+ * Three-zone layout: left / center / right. Each zone holds `data-sl-el`
+ * segments populated by the `set_statusline_elements` applyOp from the shell.
+ * The `·` separator is rendered in CSS between consecutive visible elements.
+ *
+ * Token-only. No raw color values.
  */
 
 .sl {
   display: flex;
   align-items: stretch;
-  height: var(--chrome-statusline); /* 22px */
+  height: var(--chrome-statusline); /* 24px */
   background: var(--surface-1);
   border-top: 1px solid var(--border);
   font: var(--text-mono-sm);
   color: var(--fg-1);
+  overflow: hidden;
 }
 
-.sl .seg {
+/* ---- Zones ---------------------------------------------------------------- */
+
+.sl-zone {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+}
+
+.sl-zone--left {
+  flex: 0 0 auto;
+}
+
+.sl-zone--center {
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+
+.sl-zone--right {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* ---- Elements ------------------------------------------------------------- */
+
+.sl-el {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   padding: 0 10px;
-  border-right: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+  cursor: default;
 }
 
-.sl .seg:last-child {
-  border-right: 0;
+/* `·` separator between consecutive sibling elements within a zone.
+   Rendered in the fg-mute color as a lightweight visual separator. */
+.sl-el + .sl-el::before {
+  content: "·";
+  color: var(--fg-3);
+  padding-right: 10px;
+  flex-shrink: 0;
 }
 
-.sl .spacer {
-  flex: 1;
-  border-right: 0;
-  padding: 0;
+/* ---- Element kinds -------------------------------------------------------- */
+
+/* icon within an icon or icon-text element */
+.sl-icon {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
 }
 
-/* ---- Vim mode chip ---- */
-.sl .mode {
+/* ---- Vim mode chip -------------------------------------------------------- */
+
+.sl-el.mode {
   background: var(--accent);
   color: var(--accent-on);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  cursor: pointer;
 }
 
-.sl .mode.insert {
+.sl-el.mode::before {
+  /* mode is always the first left element; no separator before it */
+  display: none;
+}
+
+.sl-el.mode.insert {
   background: var(--moss);
   color: var(--ink-900);
 }
 
-.sl .mode.cmd {
+.sl-el.mode.cmd {
   background: var(--dusk-blue);
   color: var(--paper-100);
 }
 
-/* ---- Status dots ---- */
-.sl .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-dot);
-  background: var(--fg-3);
-  flex: none;
+/* ---- Color variants ------------------------------------------------------- */
+
+.sl-el[data-sl-color="accent"] {
+  color: var(--accent);
 }
 
-.sl .dot.ok {
-  background: var(--success);
+.sl-el[data-sl-color="warn"] {
+  color: var(--warn);
 }
 
-.sl .dot.work {
-  background: var(--accent);
-  animation: pulse 1.2s ease-in-out infinite;
+.sl-el[data-sl-color="mute"] {
+  color: var(--fg-3);
 }
 
-/* Reserved plum "working" treatment for a plugin-provided indicator. */
-.sl .dot.special {
-  background: var(--special);
-  animation: pulse 1.2s ease-in-out infinite;
+/* ---- Tooltip (200ms hover, ADR-0016 P1 tooltip primitive) --------------- */
+
+.sl-el[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface-3);
+  color: var(--fg-1);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  font: var(--text-mono-sm);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 100;
+  animation: sl-tooltip-show var(--dur-base) var(--ease-out) forwards;
+  animation-delay: 200ms;
+  opacity: 0;
 }
 
-.sl .dot.off {
-  background: var(--fg-3);
-}
-
-/* The theme segment is clickable (cycles theme). */
-.sl .theme-btn {
-  cursor: pointer;
+@keyframes sl-tooltip-show {
+  to {
+    opacity: 1;
+  }
 }

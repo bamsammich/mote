@@ -69,6 +69,39 @@ pub(crate) struct CoreState {
     pub(crate) plugins: BTreeMap<PluginName, PluginRecord>,
     /// Capability fulfillment map (routes `capabilities.invoke`).
     pub(crate) capabilities: CapabilityMap,
+    /// Live statusline element state (ADR-0016).
+    ///
+    /// Maps fully-qualified element id (`<plugin>.<id>`) to its current
+    /// mutable fields. Populated at load time with the declared defaults and
+    /// updated by `mote.statusline.set(id, payload)` calls. The shell reads
+    /// this (via [`Core::statusline_elements`] / [`Runtime::statusline_elements`])
+    /// when building the `set_statusline_elements` applyOp push to the chrome.
+    pub(crate) statusline_state: BTreeMap<String, StatuslineState>,
+}
+
+/// The mutable fields of a live statusline element that a plugin can update
+/// via `mote.statusline.set(id, payload)`.
+///
+/// Only the renderable fields are here — zone, priority, and kind are declared
+/// at load time and are immutable after registration.
+#[derive(Debug, Clone)]
+pub(crate) struct StatuslineState {
+    /// Current text content (may differ from the declaration default).
+    pub(crate) text: Option<String>,
+    /// Current icon source string.
+    pub(crate) icon: Option<String>,
+    /// Current color token.
+    pub(crate) color: mote_types::StatusColor,
+    /// Current tooltip string.
+    pub(crate) tooltip: Option<String>,
+    /// The zone (immutable after registration; stored for push reconstruction).
+    pub(crate) zone: mote_types::StatusZone,
+    /// The priority (immutable after registration).
+    pub(crate) priority: i32,
+    /// The kind (immutable after registration).
+    pub(crate) kind: mote_types::StatusKind,
+    /// The plugin name that registered this element.
+    pub(crate) plugin: PluginName,
 }
 
 /// A cheaply-cloneable handle to the shared core.
@@ -181,6 +214,73 @@ impl Core {
     /// Borrows the inner state mutably (for the runtime's bookkeeping).
     pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut CoreState) -> R) -> R {
         f(&mut self.inner.borrow_mut())
+    }
+
+    // ---- Statusline element state (ADR-0016) --------------------------------
+
+    /// Attempt to update a statusline element's mutable fields from a plugin's
+    /// `mote.statusline.set(id, payload)` call.
+    ///
+    /// - `fq_id` must be the fully-qualified `<plugin>.<id>` that was
+    ///   registered at load time (typo protection: rejects unknown ids).
+    /// - Returns `Ok(true)` when the element was found and updated.
+    /// - Returns `Ok(false)` when the element is not declared by this plugin
+    ///   (the caller logs the error and returns `false` / `nil` to Lua).
+    ///
+    /// The `tooltip` parameter uses `Option<Option<String>>` to distinguish
+    /// "absent" from "explicitly cleared"; see in-function note.
+    #[allow(clippy::option_option)]
+    pub(crate) fn statusline_set(
+        &self,
+        fq_id: &str,
+        text: Option<String>,
+        icon: Option<String>,
+        color: Option<mote_types::StatusColor>,
+        tooltip: Option<Option<String>>,
+    ) -> bool {
+        let mut state = self.inner.borrow_mut();
+        let Some(entry) = state.statusline_state.get_mut(fq_id) else {
+            return false;
+        };
+        if let Some(t) = text {
+            entry.text = Some(t);
+        }
+        if let Some(i) = icon {
+            entry.icon = Some(i);
+        }
+        if let Some(c) = color {
+            entry.color = c;
+        }
+        if let Some(tt) = tooltip {
+            entry.tooltip = tt;
+        }
+        true
+    }
+
+    /// Collects the current statusline element state into a sorted
+    /// `Vec<mote_types::StatusLineElement>`.
+    ///
+    /// Used by the shell to build the `set_statusline_elements` applyOp push.
+    /// Returned in `BTreeMap` key order (alphabetical by `fq_id`), so the ordering
+    /// is deterministic.
+    pub(crate) fn statusline_elements(&self) -> Vec<mote_types::StatusLineElement> {
+        let state = self.inner.borrow();
+        state
+            .statusline_state
+            .iter()
+            .map(|(fq_id, s)| {
+                mote_types::StatusLineElement::new(
+                    fq_id.clone(),
+                    s.zone,
+                    s.priority,
+                    s.kind,
+                    s.text.clone(),
+                    s.icon.clone(),
+                    s.color,
+                    s.tooltip.clone(),
+                )
+            })
+            .collect()
     }
 
     /// Emits `event` to every loaded plugin that declared a handler for it in

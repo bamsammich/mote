@@ -36,7 +36,8 @@ use mote_dispatch::{
     Registration,
 };
 use mote_lua::{
-    IdentityScope as ManifestIdentityScope, LoadedPlugin, Manifest, RailBinding, load_plugin,
+    IdentityScope as ManifestIdentityScope, LoadedPlugin, Manifest, RailBinding, StatuslineBinding,
+    load_plugin,
 };
 use mote_permissions::{EffectiveGrants, GrantSet, GrantSetGatekeeper, Permission};
 use mote_registry::{EventDispatch, Registry};
@@ -225,6 +226,16 @@ impl Runtime {
         RuntimeSecretRouter::new(self.core.clone(), self.audit.clone()).into_rc()
     }
 
+    /// Collects the current statusline element state from all loaded plugins.
+    ///
+    /// Returns all plugin-registered elements (not the built-in chrome elements,
+    /// which the shell constructs separately). Used by the shell to build the
+    /// `set_statusline_elements` applyOp push.
+    #[must_use]
+    pub fn statusline_elements(&self) -> Vec<mote_types::StatusLineElement> {
+        self.core.statusline_elements()
+    }
+
     /// Whether a plugin with `name` is auto-disabled by the dispatch engine
     /// (three errors/timeouts in 24h; DESIGN §Runtime guarantees).
     #[must_use]
@@ -393,6 +404,10 @@ impl Runtime {
         // Step 3 also covers rail binding validation (ADR-0014): icon format
         // (ADR-0013) and capability subset checks happen here, before approval.
         Self::validate_rail_bindings(loaded.rail_bindings(), &manifest)?;
+        // Step 3 also covers statusline element validation (ADR-0016): icon
+        // format (ADR-0013), required fields for the declared kind, and id
+        // uniqueness within the plugin's statusline table.
+        validate_statusline_elements(loaded.statusline_bindings(), &manifest.name)?;
 
         // --- Step 4: permission approval --------------------------------------
         let effective = Self::approve(&manifest, policy)?;
@@ -493,6 +508,8 @@ impl Runtime {
             .map_err(LoadError::from)?;
         Self::validate_rail_bindings(loaded.rail_bindings(), &manifest)
             .map_err(LifecycleError::Load)?;
+        validate_statusline_elements(loaded.statusline_bindings(), &manifest.name)
+            .map_err(LifecycleError::Load)?;
         let effective = Self::approve(&manifest, policy).map_err(LifecycleError::Load)?;
         self.commit(&loaded, manifest, identity, &effective)
             .map_err(LifecycleError::Load)
@@ -532,6 +549,10 @@ impl Runtime {
         self.core.with_mut(|state| {
             state.capabilities.remove_plugin(name);
             state.plugins.remove(name);
+            // Remove all statusline elements registered by this plugin (ADR-0016).
+            // Elements are keyed by fully-qualified id (`<plugin>.<id>`); we
+            // identify them by the `plugin` field on the state entry.
+            state.statusline_state.retain(|_, s| s.plugin != *name);
         });
     }
 
@@ -705,6 +726,26 @@ impl Runtime {
         // Record the plugin in the shared core (must precede setup so a setup()
         // that emits/invokes can reach itself and other plugins).
         let event_keys = loaded.event_keys().to_vec();
+        // Build the statusline state entries from the validated bindings before
+        // the closure (to avoid borrowing `loaded` inside the RefCell borrow).
+        let statusline_entries: Vec<(String, crate::core::StatuslineState)> = loaded
+            .statusline_bindings()
+            .iter()
+            .map(|b| {
+                let fq_id = format!("{}.{}", name.as_str(), b.id);
+                let entry = crate::core::StatuslineState {
+                    text: b.text.clone(),
+                    icon: b.icon.clone(),
+                    color: b.color,
+                    tooltip: b.tooltip.clone(),
+                    zone: b.zone,
+                    priority: b.priority,
+                    kind: b.kind,
+                    plugin: name.clone(),
+                };
+                (fq_id, entry)
+            })
+            .collect();
         self.core.with_mut(|state| {
             // Claim capabilities for real now (pre-checked above).
             for capability in &manifest.capabilities {
@@ -721,6 +762,12 @@ impl Runtime {
                     event_keys: event_keys.clone(),
                 },
             );
+            // Register the plugin's statusline elements with their declaration
+            // defaults (ADR-0016). The plugin can later update mutable fields
+            // via `mote.statusline.set()`.
+            for (fq_id, entry) in statusline_entries {
+                state.statusline_state.insert(fq_id, entry);
+            }
         });
 
         // Register the plugin's hooks into dispatch. The invoker reads the
@@ -833,31 +880,171 @@ fn run_setup(module: &mote_lua::Table) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.1 bundled Lucide names (mirrors `mote_ui::icon_registry::BUNDLED_LUCIDE_NAMES`).
+///
+/// This list MUST be kept in sync with that constant and the sprite file.
+const BUNDLED_LUCIDE_NAMES: &[&str] = &[
+    "arrow-left",
+    "arrow-right",
+    "bookmark",
+    "circle-plus",
+    "clock",
+    "layers",
+    "lock",
+    "lock-keyhole",
+    "panel-left-close",
+    "plus",
+    "rotate-cw",
+    "rss",
+    "settings",
+    "triangle-alert",
+    "x",
+];
+
+/// Step-3 statusline element validation (ADR-0016).
+///
+/// Validates each element in the plugin's `M.statusline` table:
+/// 1. `id` is non-empty and unique within the table.
+/// 2. `text` is present when `kind ∈ {"text", "icon-text"}`.
+/// 3. `icon` is present when `kind ∈ {"icon", "icon-text"}` and is a valid
+///    ADR-0013 source string (`"lucide:<name>"` in the bundled set).
+/// 4. Reserved v2 fields (`action`, `disabled`) trigger a warning log; the
+///    element still registers.
+///
+/// On success, elements are logged as accepted (deferred rendering note per
+/// ADR-0016: a plugin's elements appear in the runtime element list; actual
+/// chrome rendering is driven by the shell push).
+fn validate_statusline_elements(
+    bindings: &[StatuslineBinding],
+    plugin_name: &PluginName,
+) -> Result<(), LoadError> {
+    let mut seen_ids = std::collections::HashSet::new();
+
+    for (idx, binding) in bindings.iter().enumerate() {
+        let index = idx + 1; // 1-based for error messages
+
+        // --- 1. id non-empty + unique ---
+        if binding.id.is_empty() {
+            return Err(LoadError::StatusLine {
+                index,
+                reason: "statusline element `id` must be non-empty".to_owned(),
+            });
+        }
+        if !seen_ids.insert(binding.id.clone()) {
+            return Err(LoadError::StatusLine {
+                index,
+                reason: format!(
+                    "duplicate statusline element id `{}` within plugin `{}`",
+                    binding.id,
+                    plugin_name.as_str()
+                ),
+            });
+        }
+
+        // --- 2. text required for text/icon-text kinds ---
+        if binding.kind.requires_text() && binding.text.is_none() {
+            return Err(LoadError::StatusLine {
+                index,
+                reason: format!(
+                    "statusline element `{}` has kind `{}` which requires `text`, but none was declared",
+                    binding.id,
+                    binding.kind.as_str()
+                ),
+            });
+        }
+
+        // --- 3. icon required + validated for icon/icon-text kinds ---
+        if binding.kind.requires_icon() {
+            match &binding.icon {
+                None => {
+                    return Err(LoadError::StatusLine {
+                        index,
+                        reason: format!(
+                            "statusline element `{}` has kind `{}` which requires `icon`, but none was declared",
+                            binding.id,
+                            binding.kind.as_str()
+                        ),
+                    });
+                }
+                Some(icon) => validate_statusline_icon(icon, &binding.id, index)?,
+            }
+        }
+
+        // --- 4. Reserved v2 fields: warning log, element still registers ---
+        if binding.has_reserved_action {
+            log::warn!(
+                "mote-shell: plugin `{}` statusline element `{}` (index {}) declares reserved \
+                 v2 field `action` — ignored in v0.1 (ADR-0016); element registers read-only",
+                plugin_name.as_str(),
+                binding.id,
+                index
+            );
+        }
+        if binding.has_reserved_disabled {
+            log::warn!(
+                "mote-shell: plugin `{}` statusline element `{}` (index {}) declares reserved \
+                 v2 field `disabled` — ignored in v0.1 (ADR-0016); element rendered as enabled",
+                plugin_name.as_str(),
+                binding.id,
+                index
+            );
+        }
+
+        log::info!(
+            "mote-shell: plugin `{}` declared statusline element `{}` (zone={}, priority={}, kind={})",
+            plugin_name.as_str(),
+            binding.id,
+            binding.zone.as_str(),
+            binding.priority,
+            binding.kind.as_str(),
+        );
+    }
+    Ok(())
+}
+
+/// Validates an ADR-0013 icon source string for a statusline element.
+fn validate_statusline_icon(icon: &str, element_id: &str, index: usize) -> Result<(), LoadError> {
+    let Some((pack, name)) = icon.split_once(':') else {
+        return Err(LoadError::StatusLine {
+            index,
+            reason: format!(
+                "statusline element `{element_id}` icon `{icon}` is not in `<pack>:<name>` format; \
+                 expected e.g. `lucide:lock`"
+            ),
+        });
+    };
+
+    if pack != "lucide" {
+        return Err(LoadError::StatusLine {
+            index,
+            reason: format!(
+                "statusline element `{element_id}` uses unknown icon pack `{pack}` in `{icon}`; \
+                 registered packs: lucide"
+            ),
+        });
+    }
+
+    if !BUNDLED_LUCIDE_NAMES.contains(&name) {
+        return Err(LoadError::StatusLine {
+            index,
+            reason: format!(
+                "statusline element `{element_id}` uses unknown lucide icon `{name}` in `{icon}`; \
+                 valid names: {}",
+                BUNDLED_LUCIDE_NAMES.join(", ")
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Validates an ADR-0013 icon source string for a rail binding entry.
 ///
 /// Accepts only `"lucide:<name>"` where `<name>` is a name bundled in the
-/// Lucide sprite (`chrome/assets/lucide-sprite.svg`). This list mirrors
-/// `mote_ui::icon_registry::BUNDLED_LUCIDE_NAMES` and must be kept in sync
-/// with that constant and the sprite file.
+/// Lucide sprite (`chrome/assets/lucide-sprite.svg`). Uses the shared
+/// [`BUNDLED_LUCIDE_NAMES`] constant which must be kept in sync with
+/// `mote_ui::icon_registry::BUNDLED_LUCIDE_NAMES` and the sprite file.
 fn validate_rail_icon(icon: &str, index: usize) -> Result<(), LoadError> {
-    // --- v0.1 bundled Lucide names (mirrors mote-ui icon_registry) ---
-    const BUNDLED: &[&str] = &[
-        "arrow-left",
-        "arrow-right",
-        "bookmark",
-        "circle-plus",
-        "clock",
-        "layers",
-        "lock",
-        "panel-left-close",
-        "plus",
-        "rotate-cw",
-        "rss",
-        "settings",
-        "triangle-alert",
-        "x",
-    ];
-
     let Some((pack, name)) = icon.split_once(':') else {
         return Err(LoadError::RailBinding {
             index,
@@ -874,13 +1061,13 @@ fn validate_rail_icon(icon: &str, index: usize) -> Result<(), LoadError> {
         });
     }
 
-    if !BUNDLED.contains(&name) {
+    if !BUNDLED_LUCIDE_NAMES.contains(&name) {
         return Err(LoadError::RailBinding {
             index,
             reason: format!(
                 "unknown lucide icon `{name}` in `{icon}`; \
                  valid names: {}",
-                BUNDLED.join(", ")
+                BUNDLED_LUCIDE_NAMES.join(", ")
             ),
         });
     }

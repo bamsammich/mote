@@ -146,6 +146,23 @@ description = "Backs the secret subsystem (typically a password manager, opt-in)
 required_api = ["resolve_secret"]
 required_events = []
 
+# --- statusline capabilities (ADR-0016) -------------------------------------
+# `statusline.publish-clickable` is a v2 capability reserved for future use.
+# In v0.1, plugins register read-only statusline elements declaratively via
+# `M.statusline`; click handlers (`action`) are not available until this
+# capability is fulfilled. The capability is registered now so the registry
+# accepts it as a valid term in `capabilities`/`consumes` without schema error.
+
+[[capability]]
+name = "statusline.publish-clickable"
+composability = "non-exclusive"
+dispatch = "aggregate"
+critical = false
+description = "Reserved v2 capability: grants a plugin the right to declare clickable statusline elements with `action` handlers (ADR-0016). In v0.1 all statusline elements are read-only; this capability is a forward-compat placeholder."
+[capability.contract]
+required_api = []
+required_events = []
+
 # --- contract-only capability -----------------------------------------------
 # `password-manager-form-services` is a capability CONTRACT consumed by password
 # managers (DESIGN §Worked example). The fulfiller plugin is conventionally named

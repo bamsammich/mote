@@ -22,7 +22,38 @@
 //! there is unambiguously the plugin's fault.
 
 use mlua::{Lua, Table, Value};
-use mote_types::{PluginName, SchemaVersion};
+use mote_types::{PluginName, SchemaVersion, StatusColor, StatusKind, StatusZone};
+
+/// A raw status-line element extracted from `M.statusline[i]` (ADR-0016).
+///
+/// Fields are parsed from Lua strings at extraction time; semantic validation
+/// (icon registry check, `id` uniqueness, `action`/`disabled` warning) is
+/// deferred to load-step 3 in `mote-runtime`.
+#[derive(Debug, Clone)]
+pub struct StatuslineBinding {
+    /// The element id as declared (not yet namespaced with the plugin name).
+    pub id: String,
+    /// Display zone.
+    pub zone: StatusZone,
+    /// Display priority (higher → closer to zone's outer edge).
+    pub priority: i32,
+    /// Rendering kind.
+    pub kind: StatusKind,
+    /// Text content, if present in the Lua table.
+    pub text: Option<String>,
+    /// Icon source string, if present in the Lua table.
+    pub icon: Option<String>,
+    /// Color token (defaults to `"fg"` when absent).
+    pub color: StatusColor,
+    /// Tooltip string, if present.
+    pub tooltip: Option<String>,
+    /// Whether the Lua entry contained a reserved v2 `action` field. When
+    /// `true`, the runtime emits a warning log and ignores the field.
+    pub has_reserved_action: bool,
+    /// Whether the Lua entry contained a reserved v2 `disabled` field. When
+    /// `true`, the runtime emits a warning log and ignores the field.
+    pub has_reserved_disabled: bool,
+}
 
 use crate::error::LuaError;
 use crate::sandbox::new_sandbox;
@@ -107,10 +138,11 @@ pub struct RailBinding {
 /// has been extracted — but whose `setup()` has **not** been called.
 ///
 /// Holds the validated [`Manifest`], the declared key names from
-/// `M.hooks` / `M.events` / `M.api`, the rail bindings from `M.rail`, a flag
-/// for whether `M.setup` is present, and a handle to the loaded `M` table for
-/// a later `setup()` / dispatch layer.  The owning [`Lua`] state is retained so
-/// the module handle stays valid.
+/// `M.hooks` / `M.events` / `M.api`, the rail bindings from `M.rail`, the
+/// statusline bindings from `M.statusline`, a flag for whether `M.setup` is
+/// present, and a handle to the loaded `M` table for a later `setup()` /
+/// dispatch layer.  The owning [`Lua`] state is retained so the module handle
+/// stays valid.
 #[derive(Debug)]
 pub struct LoadedPlugin {
     lua: Lua,
@@ -121,6 +153,8 @@ pub struct LoadedPlugin {
     api_keys: Vec<String>,
     /// Rail bindings declared in `M.rail` (ADR-0014). Absent ⇒ empty.
     rail_bindings: Vec<RailBinding>,
+    /// Statusline bindings declared in `M.statusline` (ADR-0016). Absent ⇒ empty.
+    statusline_bindings: Vec<StatuslineBinding>,
     has_setup: bool,
 }
 
@@ -162,6 +196,17 @@ impl LoadedPlugin {
     #[must_use]
     pub fn rail_bindings(&self) -> &[RailBinding] {
         &self.rail_bindings
+    }
+
+    /// Statusline bindings declared in `M.statusline` (ADR-0016).
+    ///
+    /// Absent or empty ⇒ empty slice. Structural validation happens at load
+    /// time (required fields present, known zone/kind/color strings); semantic
+    /// validation (icon registry check, id uniqueness, reserved-field warnings)
+    /// is performed at load-step 3 in `mote-runtime`.
+    #[must_use]
+    pub fn statusline_bindings(&self) -> &[StatuslineBinding] {
+        &self.statusline_bindings
     }
 
     /// Whether the module declares a `setup` field.
@@ -235,6 +280,7 @@ pub fn load_plugin_in(lua: Lua, source: &str, chunk_name: &str) -> Result<Loaded
     let event_keys = string_keys(&module, "events")?;
     let api_keys = string_keys(&module, "api")?;
     let rail_bindings = extract_rail_bindings(&module)?;
+    let statusline_bindings = extract_statusline_bindings(&module)?;
 
     // Detect `setup` presence WITHOUT invoking it (ADR-0001). We only read the
     // field; we never call it.
@@ -249,6 +295,7 @@ pub fn load_plugin_in(lua: Lua, source: &str, chunk_name: &str) -> Result<Loaded
         event_keys,
         api_keys,
         rail_bindings,
+        statusline_bindings,
         has_setup,
     })
 }
@@ -462,6 +509,158 @@ fn rail_string_array(
         }
     }
     Ok(out)
+}
+
+/// Extracts the optional top-level `M.statusline` array (ADR-0016).
+///
+/// Absent ⇒ empty. Present-but-not-a-table ⇒
+/// [`LuaError::StatuslineNotATable`]. Each entry must be a table with required
+/// string fields `id`, `zone`, `kind`, and required integer `priority`. The
+/// optional fields `text`, `icon`, `color`, and `tooltip` are strings. The
+/// reserved v2 fields `action` and `disabled` are detected and flagged in
+/// [`StatuslineBinding`]; they are **not** parsed into the type.
+///
+/// **Semantic validation** (icon registry check, id uniqueness,
+/// `action`/`disabled` warning log) is **not** performed here — that is
+/// `mote-runtime`'s load-step 3 concern.
+fn extract_statusline_bindings(module: &Table) -> Result<Vec<StatuslineBinding>, LuaError> {
+    let value: Value = module.get("statusline").map_err(LuaError::Lua)?;
+    let table = match value {
+        Value::Nil => return Ok(Vec::new()),
+        Value::Table(t) => t,
+        other => {
+            return Err(LuaError::StatuslineNotATable {
+                got: other.type_name(),
+            });
+        }
+    };
+
+    let mut bindings = Vec::new();
+    for (idx, item) in table.sequence_values::<Value>().enumerate() {
+        let index = idx + 1; // 1-based for error messages
+        let entry_val = item.map_err(LuaError::Lua)?;
+        let Value::Table(entry) = entry_val else {
+            return Err(LuaError::StatuslineEntryNotATable {
+                index,
+                got: entry_val.type_name(),
+            });
+        };
+
+        // --- Required: id (string) ---
+        let id = sl_required_string(&entry, index, "id")?;
+
+        // --- Required: zone (string, parsed) ---
+        let zone_str = sl_required_string(&entry, index, "zone")?;
+        let zone = StatusZone::from_wire(&zone_str).ok_or(LuaError::StatuslineEntryFieldType {
+            index,
+            field: "zone",
+            expected: r#"one of "left" | "center" | "right""#,
+            got: "other string",
+        })?;
+
+        // --- Required: priority (integer) ---
+        let priority = sl_required_integer(&entry, index, "priority")?;
+
+        // --- Required: kind (string, parsed) ---
+        let kind_str = sl_required_string(&entry, index, "kind")?;
+        let kind = StatusKind::from_wire(&kind_str).ok_or(LuaError::StatuslineEntryFieldType {
+            index,
+            field: "kind",
+            expected: r#"one of "text" | "icon" | "icon-text""#,
+            got: "other string",
+        })?;
+
+        // --- Optional: text, icon, tooltip (strings) ---
+        let text = sl_optional_string(&entry, index, "text")?;
+        let icon = sl_optional_string(&entry, index, "icon")?;
+        let tooltip = sl_optional_string(&entry, index, "tooltip")?;
+
+        // --- Optional: color (string, parsed; defaults to "fg") ---
+        let color = match sl_optional_string(&entry, index, "color")? {
+            None => StatusColor::Fg,
+            Some(s) => StatusColor::from_wire(&s).ok_or(LuaError::StatuslineEntryFieldType {
+                index,
+                field: "color",
+                expected: r#"one of "fg" | "accent" | "warn" | "mute""#,
+                got: "other string",
+            })?,
+        };
+
+        // --- Detect reserved v2 fields (action, disabled) ---
+        // We check for their presence only; we do NOT parse their values.
+        let has_reserved_action = !matches!(
+            entry.get::<Value>("action").map_err(LuaError::Lua)?,
+            Value::Nil
+        );
+        let has_reserved_disabled = !matches!(
+            entry.get::<Value>("disabled").map_err(LuaError::Lua)?,
+            Value::Nil
+        );
+
+        bindings.push(StatuslineBinding {
+            id,
+            zone,
+            priority,
+            kind,
+            text,
+            icon,
+            color,
+            tooltip,
+            has_reserved_action,
+            has_reserved_disabled,
+        });
+    }
+    Ok(bindings)
+}
+
+/// Reads a required string field from a statusline entry table.
+fn sl_required_string(
+    entry: &Table,
+    index: usize,
+    field: &'static str,
+) -> Result<String, LuaError> {
+    match entry.get::<Value>(field).map_err(LuaError::Lua)? {
+        Value::String(s) => Ok(s.to_str().map_err(LuaError::Lua)?.to_owned()),
+        Value::Nil => Err(LuaError::StatuslineEntryMissingField { index, field }),
+        other => Err(LuaError::StatuslineEntryFieldType {
+            index,
+            field,
+            expected: "string",
+            got: other.type_name(),
+        }),
+    }
+}
+
+/// Reads an optional string field from a statusline entry table.
+fn sl_optional_string(
+    entry: &Table,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<String>, LuaError> {
+    match entry.get::<Value>(field).map_err(LuaError::Lua)? {
+        Value::Nil => Ok(None),
+        Value::String(s) => Ok(Some(s.to_str().map_err(LuaError::Lua)?.to_owned())),
+        other => Err(LuaError::StatuslineEntryFieldType {
+            index,
+            field,
+            expected: "string",
+            got: other.type_name(),
+        }),
+    }
+}
+
+/// Reads a required integer field from a statusline entry table.
+fn sl_required_integer(entry: &Table, index: usize, field: &'static str) -> Result<i32, LuaError> {
+    match entry.get::<Value>(field).map_err(LuaError::Lua)? {
+        Value::Integer(n) => Ok(i32::try_from(n).unwrap_or(i32::MAX)),
+        Value::Nil => Err(LuaError::StatuslineEntryMissingField { index, field }),
+        other => Err(LuaError::StatuslineEntryFieldType {
+            index,
+            field,
+            expected: "integer",
+            got: other.type_name(),
+        }),
+    }
 }
 
 /// Reads an optional array-of-strings manifest field.

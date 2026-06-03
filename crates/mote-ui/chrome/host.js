@@ -925,10 +925,11 @@
           if (countChip) {
             countChip.textContent = String(payload.tabs.length);
           }
-          // P1: also update the status-line tab count segment.
-          var slTabSeg = document.querySelector(".sl .seg[data-sl-tabs]");
-          if (slTabSeg) {
-            slTabSeg.textContent = payload.tabs.length + " tabs";
+          // P4: update the built-in mote.tabcount statusline element.
+          var slTabEl = document.querySelector('[data-sl-el="mote.tabcount"]');
+          if (slTabEl) {
+            var n = payload.tabs.length;
+            slTabEl.textContent = n + (n === 1 ? " tab" : " tabs");
           }
         }
         break;
@@ -1637,6 +1638,100 @@
   // R4: handle the `focus_omnibox` applyOp pushed by `Ctrl+L`.
   // Focuses the omnibox input and selects all existing text — the standard
   // address-bar behavior. Chained via prevApplyOp so existing handlers are
+  // ---- applyOp handler for set_statusline_elements (ADR-0016, P4) ----------
+  //
+  // Receives a `{ elements: [{ id, zone, kind, text, icon, color, tooltip }] }`
+  // payload from the shell after each plugin load/unload or mote.statusline.set
+  // call. Rebuilds every plugin-registered element in the appropriate zone.
+  // Built-in mote.* elements (mode, security, tabcount) are NOT replaced here
+  // — they are static in the HTML and updated by their own applyOps.
+  //
+  // ADR-0005: no innerHTML on payload — all DOM construction uses
+  // createElement / textContent / setAttribute only.
+  function wireStatuslineOp() {
+    var prevApplyOp =
+      typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
+
+    window.mote.applyOp = function (op, payload) {
+      if (op !== "set_statusline_elements") {
+        if (prevApplyOp) prevApplyOp(op, payload);
+        return;
+      }
+      if (!payload || !Array.isArray(payload.elements)) return;
+
+      // Group elements by zone (only plugin-registered elements — built-ins
+      // are identified by the "mote." prefix and are left in place).
+      var byZone = { left: [], center: [], right: [] };
+      payload.elements.forEach(function (el) {
+        if (!el || !el.id || el.id.startsWith("mote.")) return; // skip built-ins
+        var zone = el.zone || "left";
+        if (!byZone[zone]) byZone[zone] = [];
+        byZone[zone].push(el);
+      });
+
+      // Sort each zone by priority descending (higher priority → outer edge).
+      Object.keys(byZone).forEach(function (zone) {
+        byZone[zone].sort(function (a, b) {
+          return (b.priority || 0) - (a.priority || 0);
+        });
+      });
+
+      // Render a single element node (ADR-0005 safe DOM construction).
+      function renderEl(el) {
+        var div = document.createElement("div");
+        div.className = "sl-el";
+        div.setAttribute("data-sl-el", el.id);
+        if (el.color && el.color !== "fg") {
+          div.setAttribute("data-sl-color", el.color);
+        }
+        if (el.tooltip) {
+          div.setAttribute("title", el.tooltip);
+        }
+
+        if ((el.kind === "icon" || el.kind === "icon-text") && el.icon) {
+          // ADR-0013: icon source is "lucide:<name>"
+          var parts = el.icon.split(":");
+          if (parts.length === 2 && parts[0] === "lucide") {
+            var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            svg.setAttribute("class", "sl-icon");
+            svg.setAttribute("aria-hidden", "true");
+            svg.setAttribute("width", "12");
+            svg.setAttribute("height", "12");
+            var use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+            use.setAttribute("href", "assets/lucide-sprite.svg#icon-" + parts[1]);
+            svg.appendChild(use);
+            div.appendChild(svg);
+          }
+        }
+
+        if ((el.kind === "text" || el.kind === "icon-text") && el.text) {
+          var span = document.createElement("span");
+          span.textContent = el.text;
+          div.appendChild(span);
+        }
+
+        return div;
+      }
+
+      // For each zone: remove old plugin elements, append new ones.
+      Object.keys(byZone).forEach(function (zoneName) {
+        var zoneEl = document.querySelector('[data-sl-zone="' + zoneName + '"]');
+        if (!zoneEl) return;
+
+        // Remove plugin elements (those without the "mote." prefix).
+        Array.from(zoneEl.querySelectorAll("[data-sl-el]")).forEach(function (node) {
+          var id = node.getAttribute("data-sl-el") || "";
+          if (!id.startsWith("mote.")) zoneEl.removeChild(node);
+        });
+
+        // Append new plugin elements.
+        byZone[zoneName].forEach(function (el) {
+          zoneEl.appendChild(renderEl(el));
+        });
+      });
+    };
+  }
+
   // preserved.
   function wireFocusOmniboxOp() {
     var prevApplyOp =
@@ -1674,6 +1769,8 @@
     // Must run after all prior applyOp handlers are chained so the
     // prevApplyOp capture is complete.
     wireWorkspaceStrip();
+    // P4: chain the set_statusline_elements applyOp handler (ADR-0016).
+    wireStatuslineOp();
     // R4: chain the focus_omnibox applyOp handler (Ctrl+L). Must run after
     // wireOmnibox installs the initial applyOp so prevApplyOp is defined.
     wireFocusOmniboxOp();

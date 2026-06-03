@@ -40,6 +40,7 @@ const BUNDLED_LUCIDE_NAMES: &[&str] = &[
     "clock",
     "layers",
     "lock",
+    "lock-keyhole",
     "panel-left-close",
     "plus",
     "rotate-cw",
@@ -150,6 +151,9 @@ impl IconRegistry {
         ("collapse.sidebar", "panel-left-close"),
         ("statusline.security_https", "lock"),
         ("statusline.security_http", "triangle-alert"),
+        // Theme override: a plugin or theme may swap the HTTPS lock icon for
+        // the keyhole variant (ADR-0016 §theme override test).
+        ("statusline.security_https_keyhole", "lock-keyhole"),
     ];
 
     /// Returns a registry pre-loaded with all defaults from ADR-0013.
@@ -381,6 +385,7 @@ mod tests {
             "collapse.sidebar",
             "statusline.security_https",
             "statusline.security_http",
+            "statusline.security_https_keyhole",
         ];
         for action in required {
             assert!(
