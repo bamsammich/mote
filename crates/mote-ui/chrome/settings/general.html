@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      CSP (ADR-0005): chrome-origin resource only; no external fetches, no
+      inline scripts, no eval. style-src keeps 'unsafe-inline' for the managed
+      indicator dynamic color, consistent with the main chrome.html policy.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; connect-src 'self';"
+    />
+    <title>settings — general</title>
+    <link rel="stylesheet" href="../tokens.css" />
+    <link rel="stylesheet" href="../base.css" />
+    <link rel="stylesheet" href="../components/kbd.css" />
+    <link rel="stylesheet" href="../components/button.css" />
+    <link rel="stylesheet" href="../components/field.css" />
+    <link rel="stylesheet" href="../components/badge.css" />
+    <link rel="stylesheet" href="settings.css" />
+    <script src="settings.js" defer></script>
+  </head>
+  <body class="mote-root" data-theme="dusk">
+    <div class="settings-root">
+
+      <!-- [settings] header + section tab strip -->
+      <header class="settings-header">
+        <div class="settings-title">
+          <span class="settings-lockup lockup" aria-label="settings panel">
+            <span class="br">[</span><span class="name">settings</span><span class="br">]</span>
+          </span>
+        </div>
+        <nav class="settings-tabs" aria-label="settings sections" role="tablist">
+          <button class="settings-tab" data-section="general" role="tab" aria-label="general settings">general</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="plugins" role="tab" aria-label="plugins settings">plugins</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="integrity" role="tab" aria-label="integrity settings">integrity</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="keybinds" role="tab" aria-label="keybinds reference">keybinds</button>
+        </nav>
+      </header>
+
+      <!-- general section content -->
+      <main class="settings-body" role="main">
+        <section class="settings-section" aria-label="general settings">
+
+          <!-- appearance -->
+          <div class="settings-group">
+            <div class="settings-group-label">appearance</div>
+
+            <div class="settings-row">
+              <label class="settings-row-label" for="theme-select">theme</label>
+              <div class="settings-row-control field">
+                <select id="theme-select" aria-label="select theme">
+                  <option value="dusk">dusk</option>
+                  <option value="vellum">vellum</option>
+                  <!-- installed custom themes appended here by the shell -->
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- search -->
+          <div class="settings-group">
+            <div class="settings-group-label">search</div>
+
+            <div class="settings-row">
+              <label class="settings-row-label" for="search-engine-name">search engine name</label>
+              <div class="settings-row-control field">
+                <input
+                  id="search-engine-name"
+                  type="text"
+                  placeholder="DuckDuckGo"
+                  aria-label="search engine name"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+
+            <div class="settings-row">
+              <label class="settings-row-label" for="search-engine-url">search url template</label>
+              <div class="settings-row-control field">
+                <input
+                  id="search-engine-url"
+                  type="text"
+                  placeholder="https://duckduckgo.com/?q={q}"
+                  aria-label="search url template — use {q} for the query"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+              <span class="settings-row-reflect">use {q} for the query</span>
+            </div>
+          </div>
+
+          <!-- performance -->
+          <div class="settings-group">
+            <div class="settings-group-label">performance</div>
+
+            <div class="settings-row">
+              <span class="settings-row-label" id="hw-accel-label">hardware acceleration</span>
+              <div class="settings-row-control">
+                <div
+                  class="toggle"
+                  role="switch"
+                  aria-checked="true"
+                  aria-labelledby="hw-accel-label"
+                  tabindex="0"
+                >
+                  <span class="switch on" id="hw-accel-switch"></span>
+                  <span class="label">enabled</span>
+                </div>
+              </div>
+              <span class="settings-row-reflect">takes effect after restart</span>
+            </div>
+          </div>
+
+          <!-- privacy -->
+          <div class="settings-group">
+            <div class="settings-group-label">privacy</div>
+
+            <div class="settings-row">
+              <span class="settings-row-label" id="zoom-persist-label">remember zoom per site</span>
+              <div class="settings-row-control">
+                <div
+                  class="toggle"
+                  role="switch"
+                  aria-checked="false"
+                  aria-labelledby="zoom-persist-label"
+                  tabindex="0"
+                >
+                  <span class="switch" id="zoom-persist-switch"></span>
+                  <span class="label">disabled</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!--
+            startup behavior row is intentionally omitted in v0.1 because
+            session-restore does not exist yet (ADR-0017).
+          -->
+
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

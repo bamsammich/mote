@@ -116,6 +116,31 @@ pub const COMPONENT_CSS: &[(&str, &str)] = &[
     ("tooltip", include_str!("../chrome/components/tooltip.css")),
 ];
 
+/// Shared settings panel stylesheet — loaded by each settings section page.
+///
+/// Covers `.settings-root`, `.settings-header`, `.settings-tabs`,
+/// `.settings-body`, the plugin list, integrity table, and keybinds table.
+/// Token-only; no raw hex.
+pub const SETTINGS_CSS: &str = include_str!("../chrome/settings/settings.css");
+
+/// Shared settings panel JavaScript bootstrap — loaded by each settings page.
+///
+/// Wires tab navigation, section-specific controls, and the `keybinds_list`
+/// bridge op. ADR-0005: never assigns innerHTML; uses textContent/createElement.
+pub const SETTINGS_JS: &str = include_str!("../chrome/settings/settings.js");
+
+/// Settings → General section HTML (theme, search engine, hw-accel, zoom-persist).
+pub const SETTINGS_GENERAL_HTML: &str = include_str!("../chrome/settings/general.html");
+
+/// Settings → Plugins section HTML (plugin list, capability chips, install button).
+pub const SETTINGS_PLUGINS_HTML: &str = include_str!("../chrome/settings/plugins.html");
+
+/// Settings → Integrity section HTML (sortable plugin table, filter, reverify).
+pub const SETTINGS_INTEGRITY_HTML: &str = include_str!("../chrome/settings/integrity.html");
+
+/// Settings → Keybinds section HTML (read-only chord reference, grouped by scope).
+pub const SETTINGS_KEYBINDS_HTML: &str = include_str!("../chrome/settings/keybinds.html");
+
 /// The `[mote]` wordmark SVG.
 pub const WORDMARK_SVG: &str = include_str!("../chrome/assets/wordmark.svg");
 
@@ -716,6 +741,36 @@ mod tests {
                 assert!(
                     !HOST_JS.contains(&evasion),
                     "host.js must not concat `{needle}` via string fragments (`{evasion}`)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_js_never_uses_innerhtml() {
+        // settings.js is the shared chrome bridge for the settings panel —
+        // the ADR-0005 structured-DOM discipline applies equally.
+        let code = js_strip_noncode(SETTINGS_JS);
+        for needle in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            assert!(
+                !code.contains(needle),
+                "settings.js executable code must not contain `{needle}` (ADR-0005)"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_js_no_string_concat_evasion() {
+        for needle in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            for evasion in [
+                format!("+\"{needle}"),
+                format!("+'{needle}"),
+                format!("+ \"{needle}"),
+                format!("+ '{needle}"),
+            ] {
+                assert!(
+                    !SETTINGS_JS.contains(&evasion),
+                    "settings.js must not concat `{needle}` via string fragments (`{evasion}`)"
                 );
             }
         }

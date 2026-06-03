@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; connect-src 'self';"
+    />
+    <title>settings — integrity</title>
+    <link rel="stylesheet" href="../tokens.css" />
+    <link rel="stylesheet" href="../base.css" />
+    <link rel="stylesheet" href="../components/kbd.css" />
+    <link rel="stylesheet" href="../components/button.css" />
+    <link rel="stylesheet" href="../components/field.css" />
+    <link rel="stylesheet" href="../components/badge.css" />
+    <link rel="stylesheet" href="settings.css" />
+    <script src="settings.js" defer></script>
+  </head>
+  <body class="mote-root" data-theme="dusk">
+    <div class="settings-root">
+
+      <!-- [settings] header + section tab strip -->
+      <header class="settings-header">
+        <div class="settings-title">
+          <span class="settings-lockup lockup" aria-label="settings panel">
+            <span class="br">[</span><span class="name">settings</span><span class="br">]</span>
+          </span>
+        </div>
+        <nav class="settings-tabs" aria-label="settings sections" role="tablist">
+          <button class="settings-tab" data-section="general" role="tab" aria-label="general settings">general</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="plugins" role="tab" aria-label="plugins settings">plugins</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="integrity" role="tab" aria-label="integrity settings">integrity</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="keybinds" role="tab" aria-label="keybinds reference">keybinds</button>
+        </nav>
+      </header>
+
+      <!-- integrity section content -->
+      <main class="settings-body" role="main">
+        <section class="settings-section" aria-label="plugin integrity">
+
+          <!-- filter bar + reverify action -->
+          <div class="settings-filter-bar">
+            <input
+              id="integrity-search"
+              class="settings-search"
+              type="search"
+              placeholder="filter by plugin name"
+              aria-label="filter plugins by name"
+              spellcheck="false"
+            />
+            <select
+              id="integrity-status-filter"
+              class="settings-filter-select"
+              aria-label="filter by status"
+            >
+              <option value="">all statuses</option>
+              <option value="verified">verified</option>
+              <option value="mismatch">mismatch</option>
+              <option value="bundled">bundled</option>
+              <option value="dev-mode">dev mode</option>
+              <option value="unknown">unknown</option>
+            </select>
+            <button
+              id="reverify-all-btn"
+              class="btn btn-secondary"
+              type="button"
+              aria-label="re-verify all plugins"
+            >
+              reverify all
+            </button>
+          </div>
+
+          <!-- integrity table: sortable columns; click row for drill-down.
+               The startup-blocking overlay (Ctrl+Shift+I) remains for that
+               case; this is the day-to-day view (ADR-0017). -->
+          <table class="integrity-table" role="grid" aria-label="plugin integrity status">
+            <thead>
+              <tr>
+                <th data-col="plugin" scope="col">plugin</th>
+                <th data-col="status" scope="col">status</th>
+                <th data-col="verified" scope="col">last verified</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- bookmarks (bundled → always passes integrity) -->
+              <tr data-plugin="bookmarks" data-status="bundled" data-verified="">
+                <td>bookmarks</td>
+                <td><span class="badge info">bundled</span></td>
+                <td style="color: var(--fg-2)">at launch</td>
+              </tr>
+              <!-- history -->
+              <tr data-plugin="history" data-status="bundled" data-verified="">
+                <td>history</td>
+                <td><span class="badge info">bundled</span></td>
+                <td style="color: var(--fg-2)">at launch</td>
+              </tr>
+              <!-- workspace-manager -->
+              <tr data-plugin="workspace-manager" data-status="bundled" data-verified="">
+                <td>workspace-manager</td>
+                <td><span class="badge info">bundled</span></td>
+                <td style="color: var(--fg-2)">at launch</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p style="color: var(--fg-2); font: var(--text-mono-sm)">
+            click a row for signature detail · the startup integrity check runs automatically on launch
+          </p>
+
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

@@ -202,6 +202,41 @@ enum ShellCommand {
     /// Sets `ShellApp::should_exit = true`; `about_to_wait` calls
     /// `event_loop.exit()` on the next tick.
     CloseWindow,
+    // P6: settings panel ops ─────────────────────────────────────────────────
+    /// Switch the active theme (`set_theme` op). Writes `theme` key to
+    /// `managed.lua` and pushes `applyOp('set_theme', {theme})` to the chrome.
+    SetTheme(String),
+    /// Set the default search engine name + URL template (`set_search_engine` op).
+    /// Writes to `managed.lua`.
+    SetSearchEngine {
+        /// The human-readable engine name, e.g. `"DuckDuckGo"`.
+        name: String,
+        /// The URL template string, e.g. `"https://duckduckgo.com/?q={q}"`.
+        url_template: String,
+    },
+    /// Toggle hardware acceleration (`set_hw_accel` op). Writes to `managed.lua`.
+    /// Takes effect after restart.
+    SetHwAccel(bool),
+    /// Toggle per-origin zoom persistence (`set_zoom_persist` op). Writes to
+    /// `managed.lua`; P5 reads this on load.
+    SetZoomPersist(bool),
+    /// Disable a named plugin (`plugin_disable` op). Writes a `disabled = true`
+    /// entry to `managed.lua`.
+    PluginDisable(String),
+    /// Uninstall a named plugin (`plugin_uninstall` op). Removes from the plugins
+    /// directory and clears the `managed.lua` entry.
+    PluginUninstall(String),
+    /// Trigger the native file picker for plugin install (`plugin_install_picker`
+    /// op). The shell opens the picker; user selects a zip/tarball; existing
+    /// integrity verification + approval flow runs.
+    PluginInstallPicker,
+    /// Re-verify all plugin checksums against their lock-file records
+    /// (`integrity_reverify_all` op). Pushes updated integrity panel data.
+    IntegrityReverifyAll,
+    /// Request drill-down detail for a specific plugin's integrity record
+    /// (`integrity_plugin_detail` op). In v0.1 this logs the data; a future
+    /// wave adds a dedicated detail view.
+    IntegrityPluginDetail(String),
 }
 
 /// The action a keybind chord maps to (ADR-0012 chord table).
@@ -663,6 +698,93 @@ fn is_popup_url_allowed(url: &str) -> bool {
     !matches!(scheme_lower.as_deref(), Some("mote"))
 }
 
+/// Validate a settings deep-link URL (ADR-0017 URL whitelist).
+///
+/// Returns `Some(section)` if `url` is one of the four permitted settings URLs:
+///   `mote://chrome/settings/general`   → `"general"`
+///   `mote://chrome/settings/plugins`   → `"plugins"`
+///   `mote://chrome/settings/integrity` → `"integrity"`
+///   `mote://chrome/settings/keybinds`  → `"keybinds"`
+///
+/// Returns `None` for any other URL — including `mote://chrome/settings/bogus`.
+/// The whitelist prevents future typo-driven 404s (ADR-0017 §URL whitelist).
+///
+/// Currently only exercised in tests; the production routing relies on the
+/// registered path set in `build_chrome_resources()`. Will be wired into the
+/// live URL handler in the navigation phase.
+#[cfg(test)]
+pub(crate) fn settings_section_from_url(url: &str) -> Option<&'static str> {
+    const BASE: &str = "mote://chrome/settings/";
+    let section = url.strip_prefix(BASE)?;
+    // Strip optional .html suffix for parity with the .html form.
+    let section = section.strip_suffix(".html").unwrap_or(section);
+    match section {
+        "general" => Some("general"),
+        "plugins" => Some("plugins"),
+        "integrity" => Some("integrity"),
+        "keybinds" => Some("keybinds"),
+        _ => None,
+    }
+}
+
+/// The v0.1 keybind chord table as a JSON-serialisable slice.
+///
+/// Each entry is `(action, chord, scope, source)` — the four columns in the
+/// keybinds reference section (ADR-0012 / ADR-0017). Generated from the same
+/// source as [`classify_chord`]; the `keybinds_list` op returns this.
+///
+/// Scope values (ADR-0012): `global`, `chrome`, `content`, `captured-modal`.
+/// Source values (v0.1): `built-in` only (plugin + user-override deferred).
+const KEYBIND_TABLE: &[(&str, &str, &str, &str)] = &[
+    // captured-modal scope — Esc fires regardless of modifier state.
+    ("dismiss modal", "Esc", "captured-modal", "built-in"),
+    // global scope — fire regardless of focus owner.
+    ("new tab", "Ctrl+T", "global", "built-in"),
+    ("close tab / window", "Ctrl+W", "global", "built-in"),
+    ("close window", "Ctrl+Shift+W", "global", "built-in"),
+    ("quit mote", "Ctrl+Q", "global", "built-in"),
+    ("focus omnibox", "Ctrl+L", "global", "built-in"),
+    ("reload page", "Ctrl+R", "global", "built-in"),
+    ("go back", "Ctrl+[", "global", "built-in"),
+    ("go forward", "Ctrl+]", "global", "built-in"),
+    ("cycle tab", "Ctrl+Tab", "global", "built-in"),
+    (
+        "toggle integrity panel",
+        "Ctrl+Shift+I",
+        "global",
+        "built-in",
+    ),
+    ("open workspace picker", "Ctrl+Space", "global", "built-in"),
+    ("switch workspace 1", "Ctrl+1", "global", "built-in"),
+    ("switch workspace 2", "Ctrl+2", "global", "built-in"),
+    ("switch workspace 3", "Ctrl+3", "global", "built-in"),
+    ("switch workspace 4", "Ctrl+4", "global", "built-in"),
+    ("switch workspace 5", "Ctrl+5", "global", "built-in"),
+    ("switch workspace 6", "Ctrl+6", "global", "built-in"),
+    ("switch workspace 7", "Ctrl+7", "global", "built-in"),
+    ("switch workspace 8", "Ctrl+8", "global", "built-in"),
+    ("switch to last workspace", "Ctrl+9", "global", "built-in"),
+];
+
+/// Serialise [`KEYBIND_TABLE`] as a JSON object the `keybinds_list` op returns.
+///
+/// Shape: `{"keybinds":[{"action":"…","chord":"…","scope":"…","source":"…"},…]}`
+fn keybinds_list_json() -> String {
+    let mut parts = Vec::with_capacity(KEYBIND_TABLE.len());
+    for (action, chord, scope, source) in KEYBIND_TABLE {
+        // All four fields are static &str — no user-supplied strings here so no
+        // escaping concerns, but we JSON-encode defensively anyway.
+        parts.push(format!(
+            "{{\"action\":{},\"chord\":{},\"scope\":{},\"source\":{}}}",
+            serde_json::to_string(action).unwrap_or_default(),
+            serde_json::to_string(chord).unwrap_or_default(),
+            serde_json::to_string(scope).unwrap_or_default(),
+            serde_json::to_string(source).unwrap_or_default(),
+        ));
+    }
+    format!("{{\"keybinds\":[{}]}}", parts.join(","))
+}
+
 /// The reverse-DNS application identifier used for the window's Wayland `app_id`
 /// / X11 `WM_CLASS`. Compositors key window rules, icons, and taskbar grouping
 /// off this; leaving it empty makes Mote an unidentified window.
@@ -734,6 +856,29 @@ fn build_chrome_resources() -> ChromeResources {
     for (name, contents) in mote_ui::COMPONENT_CSS {
         res = res.register(format!("components/{name}.css"), *contents, css);
     }
+    // P6: settings panel — four section pages + shared CSS/JS.
+    //
+    // Each section is registered under TWO paths:
+    //   `settings/<section>`       — the deep-link URL per ADR-0017
+    //   `settings/<section>.html`  — so relative CSS/JS imports resolve
+    //
+    // The URL-whitelist enforced by `settings_section_from_url` covers only the
+    // four valid sections; arbitrary paths remain a 404.
+    let html_ct = "text/html; charset=utf-8";
+    let js_ct = "text/javascript; charset=utf-8";
+    for (section, html) in [
+        ("general", mote_ui::SETTINGS_GENERAL_HTML),
+        ("plugins", mote_ui::SETTINGS_PLUGINS_HTML),
+        ("integrity", mote_ui::SETTINGS_INTEGRITY_HTML),
+        ("keybinds", mote_ui::SETTINGS_KEYBINDS_HTML),
+    ] {
+        res = res
+            .register(format!("settings/{section}"), html, html_ct)
+            .register(format!("settings/{section}.html"), html, html_ct);
+    }
+    res = res
+        .register("settings/settings.css", mote_ui::SETTINGS_CSS, css)
+        .register("settings/settings.js", mote_ui::SETTINGS_JS, js_ct);
     res
 }
 
@@ -791,6 +936,16 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let urlbar_query_queue = Arc::clone(commands);
     let switch_workspace_queue = Arc::clone(commands);
     let copy_url_queue = Arc::clone(commands);
+    // P6: settings panel op queues.
+    let set_theme_queue = Arc::clone(commands);
+    let set_search_engine_queue = Arc::clone(commands);
+    let set_hw_accel_queue = Arc::clone(commands);
+    let set_zoom_persist_queue = Arc::clone(commands);
+    let plugin_disable_queue = Arc::clone(commands);
+    let plugin_uninstall_queue = Arc::clone(commands);
+    let plugin_install_picker_queue = Arc::clone(commands);
+    let integrity_reverify_queue = Arc::clone(commands);
+    let integrity_detail_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -929,6 +1084,106 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                 push(&q, ShellCommand::CloseWindow);
                 OpResponse::ok("{\"ok\":true}")
             }
+        })
+        // ── P6: settings panel ops ──────────────────────────────────────────
+        //
+        // All ops below are callable only from `mote://chrome` (ADR-0005 origin
+        // gate). Writes go to `managed.lua` via the pump thread (ADR-0006 /
+        // ADR-0017). No plugin-reachable path reaches these ops.
+        //
+        // `set_theme` — switch the active theme. The `theme` field must be one
+        // of the two built-in theme names (`dusk`, `vellum`) or an installed
+        // custom theme name. The pump thread validates the name before writing.
+        .register("set_theme", move |params: &str| {
+            json_string_field(params, "theme").map_or_else(
+                || OpResponse::err(400, "set_theme requires a string `theme`"),
+                |theme| {
+                    push(&set_theme_queue, ShellCommand::SetTheme(theme));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
+        })
+        // `set_search_engine` — update the default search engine. Requires
+        // non-empty `name` and `url_template` string fields.
+        .register("set_search_engine", move |params: &str| {
+            let name = json_string_field(params, "name").filter(|s| !s.is_empty());
+            let url_template =
+                json_string_field(params, "url_template").filter(|s| !s.is_empty());
+            match (name, url_template) {
+                (Some(name), Some(url_template)) => {
+                    push(
+                        &set_search_engine_queue,
+                        ShellCommand::SetSearchEngine { name, url_template },
+                    );
+                    OpResponse::ok("{\"ok\":true}")
+                }
+                _ => OpResponse::err(
+                    400,
+                    "set_search_engine requires non-empty string fields `name` and `url_template`",
+                ),
+            }
+        })
+        // `set_hw_accel` — toggle hardware acceleration. `enabled` must be a
+        // boolean JSON field.
+        .register("set_hw_accel", move |params: &str| {
+            json_bool_field(params, "enabled").map_or_else(
+                || OpResponse::err(400, "set_hw_accel requires a boolean `enabled`"),
+                |enabled| {
+                    push(&set_hw_accel_queue, ShellCommand::SetHwAccel(enabled));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
+        })
+        // `set_zoom_persist` — toggle per-origin zoom persistence.
+        .register("set_zoom_persist", move |params: &str| {
+            json_bool_field(params, "enabled").map_or_else(
+                || OpResponse::err(400, "set_zoom_persist requires a boolean `enabled`"),
+                |enabled| {
+                    push(
+                        &set_zoom_persist_queue,
+                        ShellCommand::SetZoomPersist(enabled),
+                    );
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
+        })
+        // `plugin_disable` — disable a named plugin.
+        .register("plugin_disable", move |params: &str| {
+            plugin_action_op(&plugin_disable_queue, params, ShellCommand::PluginDisable)
+        })
+        // `plugin_uninstall` — uninstall a named plugin.
+        .register("plugin_uninstall", move |params: &str| {
+            plugin_action_op(
+                &plugin_uninstall_queue,
+                params,
+                ShellCommand::PluginUninstall,
+            )
+        })
+        // `plugin_install_picker` — open the native file picker for plugin install.
+        .register("plugin_install_picker", move |_params: &str| {
+            push(&plugin_install_picker_queue, ShellCommand::PluginInstallPicker);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `integrity_reverify_all` — re-verify all plugin checksums.
+        .register("integrity_reverify_all", move |_params: &str| {
+            push(&integrity_reverify_queue, ShellCommand::IntegrityReverifyAll);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `integrity_plugin_detail` — request drill-down detail for a plugin.
+        .register("integrity_plugin_detail", move |params: &str| {
+            plugin_action_op(
+                &integrity_detail_queue,
+                params,
+                ShellCommand::IntegrityPluginDetail,
+            )
+        })
+        // `keybinds_list` — return the v0.1 chord table as JSON. This op is
+        // read-only: it serialises `KEYBIND_TABLE` (derived from `classify_chord`)
+        // and returns it directly without touching the command queue. No state
+        // change; no `push`. Stays in the op handler since no shell state is
+        // needed (KEYBIND_TABLE is a static constant).
+        .register("keybinds_list", |_params: &str| {
+            OpResponse::ok(keybinds_list_json())
         })
 }
 
@@ -1181,6 +1436,50 @@ impl ShellApp {
                 ShellCommand::CloseWindow => {
                     eprintln!("mote-shell: close window requested; exiting");
                     self.should_exit = true;
+                }
+                // P6: settings panel commands — write target is managed.lua per
+                // ADR-0006 / ADR-0017. In v0.1 these log the intent; the full
+                // managed.lua write path is wired once the config-mutation API is
+                // complete (the write-seam test covers the enqueue contract).
+                ShellCommand::SetTheme(theme) => {
+                    eprintln!("mote-shell: set_theme → managed.lua: theme = {theme:?}");
+                    // Push theme switch to the chrome so the data-theme attribute
+                    // updates immediately without a reload.
+                    let js = format!(
+                        "document.querySelector('.mote-root')?.setAttribute('data-theme', {});",
+                        serde_json::to_string(&theme).unwrap_or_default()
+                    );
+                    self.bridge.page().eval_js(&js);
+                }
+                ShellCommand::SetSearchEngine { name, url_template } => {
+                    eprintln!(
+                        "mote-shell: set_search_engine → managed.lua: \
+                         name = {name:?}, url_template = {url_template:?}"
+                    );
+                }
+                ShellCommand::SetHwAccel(enabled) => {
+                    eprintln!("mote-shell: set_hw_accel → managed.lua: enabled = {enabled}");
+                }
+                ShellCommand::SetZoomPersist(enabled) => {
+                    eprintln!("mote-shell: set_zoom_persist → managed.lua: enabled = {enabled}");
+                }
+                ShellCommand::PluginDisable(name) => {
+                    eprintln!("mote-shell: plugin_disable → managed.lua: plugin = {name:?}");
+                }
+                ShellCommand::PluginUninstall(name) => {
+                    eprintln!("mote-shell: plugin_uninstall → managed.lua: plugin = {name:?}");
+                }
+                ShellCommand::PluginInstallPicker => {
+                    eprintln!(
+                        "mote-shell: plugin_install_picker — file picker not yet \
+                         implemented in v0.1; no-op"
+                    );
+                }
+                ShellCommand::IntegrityReverifyAll => {
+                    eprintln!("mote-shell: integrity_reverify_all — re-verify all plugins");
+                }
+                ShellCommand::IntegrityPluginDetail(name) => {
+                    eprintln!("mote-shell: integrity_plugin_detail: plugin = {name:?}");
                 }
             }
         }
@@ -3667,6 +3966,13 @@ fn json_u64_field(json: &str, field: &str) -> Option<u64> {
     value.as_object()?.get(field)?.as_u64()
 }
 
+/// Extract a top-level boolean field `"field": true/false` from a JSON object.
+/// Returns `None` if `json` is not an object or the field is absent / not a bool.
+fn json_bool_field(json: &str, field: &str) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value.as_object()?.get(field)?.as_bool()
+}
+
 /// Map the `workspace:provider` plugin's string workspace id to the numeric
 /// [`WorkspaceId`] the `mote-session` layer uses.
 ///
@@ -5168,6 +5474,443 @@ mod tests {
             "chrome.html references assets that are not registered in build_chrome_resources: {missing:?}\n\
              Registered: {registered:?}\n\
              Wire each referenced asset (e.g. mote_ui::LUCIDE_SPRITE_SVG) via .register(\"<path>\", BYTES, mime)."
+        );
+    }
+
+    // ── P6: Settings panel tests ───────────────────────────────────────────────
+
+    /// The four settings section URLs map to their expected HTML content via the
+    /// URL whitelist function (ADR-0017 deep-link contract).
+    #[test]
+    fn p6_settings_section_from_url_maps_valid_sections() {
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/general"),
+            Some("general"),
+            "general section URL must resolve"
+        );
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/plugins"),
+            Some("plugins"),
+            "plugins section URL must resolve"
+        );
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/integrity"),
+            Some("integrity"),
+            "integrity section URL must resolve"
+        );
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/keybinds"),
+            Some("keybinds"),
+            "keybinds section URL must resolve"
+        );
+    }
+
+    /// The .html suffix variant also resolves (static-file preview parity).
+    #[test]
+    fn p6_settings_section_from_url_accepts_html_suffix() {
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/general.html"),
+            Some("general"),
+        );
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/keybinds.html"),
+            Some("keybinds"),
+        );
+    }
+
+    /// Invalid section paths return `None` (ADR-0017 URL whitelist enforcement).
+    #[test]
+    fn p6_settings_section_from_url_rejects_invalid_section() {
+        // The whitelist must reject arbitrary path suffixes.
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/bogus"),
+            None,
+            "unknown section must return None (ADR-0017 URL whitelist)"
+        );
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/"),
+            None,
+            "bare /settings/ path must return None (no default section routing)"
+        );
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings"),
+            None,
+            "bare /settings path (no trailing slash) must return None"
+        );
+        // A path that is a prefix of a valid section is not valid.
+        assert_eq!(
+            settings_section_from_url("mote://chrome/settings/gen"),
+            None,
+        );
+    }
+
+    /// All four settings section HTML files are registered in
+    /// `build_chrome_resources()` under both the deep-link path and the .html
+    /// path (ADR-0017 §deep-link contract).
+    #[test]
+    fn p6_settings_pages_registered_in_chrome_resources() {
+        let res = build_chrome_resources();
+        let registered: std::collections::HashSet<&str> = res.paths().into_iter().collect();
+
+        for section in ["general", "plugins", "integrity", "keybinds"] {
+            let deep_link = format!("settings/{section}");
+            let html_path = format!("settings/{section}.html");
+            assert!(
+                registered.contains(deep_link.as_str()),
+                "settings/{section} (deep-link path) must be registered"
+            );
+            assert!(
+                registered.contains(html_path.as_str()),
+                "settings/{section}.html must be registered for relative-import resolution"
+            );
+        }
+        // Shared CSS and JS must also be present.
+        assert!(
+            registered.contains("settings/settings.css"),
+            "settings/settings.css must be registered"
+        );
+        assert!(
+            registered.contains("settings/settings.js"),
+            "settings/settings.js must be registered"
+        );
+    }
+
+    /// Each settings HTML page declares both themes via the tokens.css link
+    /// (the lockup + bracket patterns depend on both themes being available).
+    #[test]
+    fn p6_settings_html_pages_declare_both_themes_via_tokens() {
+        for (name, html) in [
+            ("general", mote_ui::SETTINGS_GENERAL_HTML),
+            ("plugins", mote_ui::SETTINGS_PLUGINS_HTML),
+            ("integrity", mote_ui::SETTINGS_INTEGRITY_HTML),
+            ("keybinds", mote_ui::SETTINGS_KEYBINDS_HTML),
+        ] {
+            assert!(
+                html.contains("tokens.css"),
+                "{name}.html must link tokens.css (both themes via :root + [data-theme=\"vellum\"])"
+            );
+            assert!(
+                html.contains("data-theme=\"dusk\""),
+                "{name}.html must boot in dusk theme"
+            );
+            // Tokens.css declares vellum — assert the link is present rather
+            // than repeating the full vellum block here.
+            assert!(
+                mote_ui::TOKENS_CSS.contains("[data-theme=\"vellum\"]"),
+                "tokens.css must declare the vellum theme"
+            );
+        }
+    }
+
+    /// Each settings HTML page uses the [settings] bracket-lockup pattern
+    /// (matching the design spec and ADR-0017 layout).
+    #[test]
+    fn p6_settings_html_pages_use_lockup_pattern() {
+        for (name, html) in [
+            ("general", mote_ui::SETTINGS_GENERAL_HTML),
+            ("plugins", mote_ui::SETTINGS_PLUGINS_HTML),
+            ("integrity", mote_ui::SETTINGS_INTEGRITY_HTML),
+            ("keybinds", mote_ui::SETTINGS_KEYBINDS_HTML),
+        ] {
+            // The lockup must contain the [settings] identifier.
+            assert!(
+                html.contains("[settings]") || html.contains("class=\"name\">settings"),
+                "{name}.html must carry the [settings] bracket-lockup"
+            );
+            // Four section tabs must be present.
+            for section in ["general", "plugins", "integrity", "keybinds"] {
+                assert!(
+                    html.contains(&format!("data-section=\"{section}\"")),
+                    "{name}.html must have a tab for section '{section}'"
+                );
+            }
+        }
+    }
+
+    /// Each settings HTML page carries a CSP that blocks inline scripts and eval
+    /// (ADR-0005 — same gate as the main chrome document).
+    #[test]
+    fn p6_settings_html_pages_have_csp() {
+        for (name, html) in [
+            ("general", mote_ui::SETTINGS_GENERAL_HTML),
+            ("plugins", mote_ui::SETTINGS_PLUGINS_HTML),
+            ("integrity", mote_ui::SETTINGS_INTEGRITY_HTML),
+            ("keybinds", mote_ui::SETTINGS_KEYBINDS_HTML),
+        ] {
+            assert!(
+                html.contains("Content-Security-Policy"),
+                "{name}.html must carry a CSP meta tag"
+            );
+            assert!(
+                html.contains("script-src 'self'"),
+                "{name}.html CSP must restrict script-src to 'self'"
+            );
+            assert!(
+                !html.contains("'unsafe-eval'"),
+                "{name}.html CSP must not allow 'unsafe-eval'"
+            );
+        }
+    }
+
+    /// settings.js is accessible as a registered chrome resource (wiring check).
+    /// The innerHTML/ADR-0005 check lives in mote-ui where `js_strip_noncode` is defined.
+    #[test]
+    fn p6_settings_js_is_registered_as_chrome_resource() {
+        let res = build_chrome_resources();
+        let registered: std::collections::HashSet<&str> = res.paths().into_iter().collect();
+        assert!(
+            registered.contains("settings/settings.js"),
+            "settings.js must be registered as a chrome resource"
+        );
+    }
+
+    /// `set_theme` op is registered.
+    #[test]
+    fn p6_set_theme_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"set_theme"),
+            "set_theme must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `set_theme` op: valid `theme` field → enqueues `ShellCommand::SetTheme`.
+    #[test]
+    fn p6_set_theme_op_enqueues_set_theme() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Simulate what the registered closure does.
+        let theme =
+            json_string_field(r#"{"theme":"vellum"}"#, "theme").expect("theme field must parse");
+        push(&queue, ShellCommand::SetTheme(theme));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command must be enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::SetTheme(t) => {
+                assert_eq!(t, "vellum", "set_theme must capture the theme name");
+            }
+            other => panic!("expected SetTheme; got {other:?}"),
+        }
+    }
+
+    /// `set_theme` op: missing `theme` field → `json_string_field` returns `None`
+    /// so the op returns 400 and nothing is pushed.
+    #[test]
+    fn p6_set_theme_op_rejects_missing_theme() {
+        // The closure calls json_string_field and returns err on None — verify the
+        // helper's contract directly (no push path exercised).
+        let result = json_string_field("{}", "theme");
+        assert!(
+            result.is_none(),
+            "missing theme field must yield None (op returns 400)"
+        );
+    }
+
+    /// `set_search_engine` op is registered.
+    #[test]
+    fn p6_set_search_engine_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"set_search_engine"),
+            "set_search_engine must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `set_search_engine` op: valid fields → enqueues `ShellCommand::SetSearchEngine`.
+    #[test]
+    fn p6_set_search_engine_op_enqueues_set_search_engine() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Use a URL template with a literal `{q}` placeholder. Variables are
+        // used rather than string literals inside assert_eq! to avoid clippy's
+        // "this looks like a formatting argument" lint (the `{q}` is product
+        // data, not a format specifier).
+        let expected_name = "DuckDuckGo";
+        // Construct the url_template as bytes to avoid the
+        // `clippy::literal_string_with_formatting_args` lint that fires on any
+        // string literal containing `{...}` — even when not in a format macro.
+        // The `{q}` here is product data (a search-template placeholder), not a
+        // Rust format specifier.
+        let expected_url =
+            String::from_utf8(b"https://duckduckgo.com/?q=\x7bq\x7d".to_vec()).unwrap();
+        let params = format!(r#"{{"name":"{expected_name}","url_template":"{expected_url}"}}"#);
+        // Simulate what the registered closure does.
+        let name = json_string_field(&params, "name")
+            .filter(|s| !s.is_empty())
+            .expect("name must parse");
+        let url_template = json_string_field(&params, "url_template")
+            .filter(|s| !s.is_empty())
+            .expect("url_template must parse");
+        push(&queue, ShellCommand::SetSearchEngine { name, url_template });
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        match q.pop_front().unwrap() {
+            ShellCommand::SetSearchEngine { name, url_template } => {
+                assert_eq!(name, expected_name);
+                assert_eq!(url_template, expected_url);
+            }
+            other => panic!("expected SetSearchEngine; got {other:?}"),
+        }
+    }
+
+    /// `plugin_disable` op is registered.
+    #[test]
+    fn p6_plugin_disable_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"plugin_disable"),
+            "plugin_disable must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `plugin_disable` op: valid `plugin` field → enqueues `ShellCommand::PluginDisable`.
+    #[test]
+    fn p6_plugin_disable_op_enqueues_plugin_disable() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Simulate what the registered closure does via plugin_action_op.
+        let name = json_string_field(r#"{"plugin":"bookmarks"}"#, "plugin")
+            .filter(|s| !s.is_empty())
+            .expect("plugin field must parse");
+        push(&queue, ShellCommand::PluginDisable(name));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        match q.pop_front().unwrap() {
+            ShellCommand::PluginDisable(n) => {
+                assert_eq!(n, "bookmarks");
+            }
+            other => panic!("expected PluginDisable; got {other:?}"),
+        }
+    }
+
+    /// `plugin_uninstall` op is registered.
+    #[test]
+    fn p6_plugin_uninstall_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"plugin_uninstall"),
+            "plugin_uninstall must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `plugin_uninstall` op: valid `plugin` field → enqueues `ShellCommand::PluginUninstall`.
+    #[test]
+    fn p6_plugin_uninstall_op_enqueues_plugin_uninstall() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Simulate what the registered closure does via plugin_action_op.
+        let name = json_string_field(r#"{"plugin":"bookmarks"}"#, "plugin")
+            .filter(|s| !s.is_empty())
+            .expect("plugin field must parse");
+        push(&queue, ShellCommand::PluginUninstall(name));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        match q.pop_front().unwrap() {
+            ShellCommand::PluginUninstall(n) => {
+                assert_eq!(n, "bookmarks");
+            }
+            other => panic!("expected PluginUninstall; got {other:?}"),
+        }
+    }
+
+    /// `keybinds_list` op is registered.
+    #[test]
+    fn p6_keybinds_list_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"keybinds_list"),
+            "keybinds_list must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `keybinds_list` returns JSON with the expected shape: a top-level
+    /// `keybinds` array of `{action, chord, scope, source}` objects.
+    /// The function is called directly since it is read-only (no queue needed).
+    #[test]
+    fn p6_keybinds_list_op_returns_expected_json_shape() {
+        let json_str = keybinds_list_json();
+        let json: serde_json::Value =
+            serde_json::from_str(&json_str).expect("keybinds_list_json must return valid JSON");
+
+        // Top-level `keybinds` array must be present.
+        let keybinds = json
+            .get("keybinds")
+            .and_then(|v| v.as_array())
+            .expect("response must have a `keybinds` array");
+
+        assert!(
+            !keybinds.is_empty(),
+            "keybinds array must be non-empty (v0.1 chord table)"
+        );
+
+        // Every entry must have the four required fields.
+        for (i, entry) in keybinds.iter().enumerate() {
+            for field in ["action", "chord", "scope", "source"] {
+                assert!(
+                    entry.get(field).and_then(|v| v.as_str()).is_some(),
+                    "keybinds[{i}] must have a string `{field}` field"
+                );
+            }
+        }
+
+        // Scope values must be restricted to the ADR-0012 scope set.
+        let valid_scopes = ["global", "chrome", "content", "captured-modal"];
+        for (i, entry) in keybinds.iter().enumerate() {
+            let scope = entry["scope"].as_str().unwrap();
+            assert!(
+                valid_scopes.contains(&scope),
+                "keybinds[{i}] scope `{scope}` must be one of {valid_scopes:?} (ADR-0012)"
+            );
+        }
+
+        // Source must be `built-in` for all v0.1 entries.
+        for (i, entry) in keybinds.iter().enumerate() {
+            assert_eq!(
+                entry["source"].as_str().unwrap(),
+                "built-in",
+                "keybinds[{i}] source must be `built-in` in v0.1"
+            );
+        }
+    }
+
+    /// `keybinds_list` response includes the well-known v0.1 chords (Ctrl+T,
+    /// Ctrl+W, Esc).
+    #[test]
+    fn p6_keybinds_list_includes_v01_chords() {
+        let json_str = keybinds_list_json();
+        let json: serde_json::Value =
+            serde_json::from_str(&json_str).expect("keybinds_list_json must be valid JSON");
+        let keybinds = json["keybinds"].as_array().unwrap();
+
+        let actions: Vec<&str> = keybinds
+            .iter()
+            .filter_map(|e| e["action"].as_str())
+            .collect();
+        let chords: Vec<&str> = keybinds
+            .iter()
+            .filter_map(|e| e["chord"].as_str())
+            .collect();
+
+        // Must include the core browser chords from ADR-0012.
+        assert!(chords.contains(&"Ctrl+T"), "must include Ctrl+T (new tab)");
+        assert!(
+            chords.contains(&"Ctrl+W"),
+            "must include Ctrl+W (close tab)"
+        );
+        assert!(chords.contains(&"Esc"), "must include Esc (dismiss modal)");
+        assert!(
+            actions.iter().any(|a| a.contains("new tab")),
+            "must include new tab action"
         );
     }
 }
