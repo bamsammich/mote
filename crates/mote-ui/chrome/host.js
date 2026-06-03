@@ -1172,19 +1172,23 @@
     }
   }
 
-  // P6: wire the settings rail button — navigates to the settings panel.
+  // P6: wire the settings rail button — opens the settings panel in a
+  // new tab.
   //
   // The cog is slot 4 of the activity bar ([data-action='open-settings']).
-  // Clicking it invokes `navigate` to `mote://chrome/settings/general`, which
-  // the shell routes to the general section HTML (ADR-0017 deep-link contract).
-  // The settings page is a full document load, not a sidebar panel switch.
+  // Clicking it invokes `new_tab` with the settings URL; the shell routes
+  // mote:// URLs through `create_content_page` (ADR-0015) which uses CEF's
+  // global request context. Per-profile contexts cannot load mote:// URLs
+  // — the S1 navigation guard cancels them — so navigating the active tab
+  // (the original P6 wiring) silently failed. Opening in a new tab also
+  // matches the Chrome `chrome://settings` convention.
   function wireSettingsButton() {
     var btn = document.querySelector("[data-action='open-settings']");
     if (!btn) return;
     btn.addEventListener("click", function () {
       if (window.mote && window.mote.invoke) {
         window.mote
-          .invoke("navigate", { url: "mote://chrome/settings/general" })
+          .invoke("new_tab", { url: "mote://chrome/settings/general" })
           .catch(function () {});
       }
     });

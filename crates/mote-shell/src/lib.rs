@@ -153,8 +153,11 @@ const DEFAULT_START_URL: &str = "mote://chrome/newtab.html";
 enum ShellCommand {
     /// Navigate the **active** tab to `url` (the omnibox `navigate` op).
     Navigate(String),
-    /// Open a new tab (and switch to it).
-    NewTab,
+    /// Open a new tab (and switch to it). Optional URL: when set, the new
+    /// tab loads that URL via `create_content_page` (which routes `mote://`
+    /// URLs through the global request context per ADR-0015); when `None`,
+    /// the default newtab page (`mote://chrome/newtab.html`) is used.
+    NewTab(Option<String>),
     /// Close the tab with this id.
     CloseTab(u64),
     /// Switch the active tab to this id.
@@ -1005,8 +1008,12 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                 },
             )
         })
-        .register("new_tab", move |_params: &str| {
-            push(&new_queue, ShellCommand::NewTab);
+        .register("new_tab", move |params: &str| {
+            // Optional `url` param: when present, the new tab opens at that
+            // URL via `create_content_page` (ADR-0015 routes mote:// through
+            // the global context). When absent, default newtab page applies.
+            let url = json_string_field(params, "url");
+            push(&new_queue, ShellCommand::NewTab(url));
             OpResponse::ok("{\"ok\":true}")
         })
         .register("close_tab", move |params: &str| {
@@ -1463,7 +1470,7 @@ impl ShellApp {
         for command in drained {
             match command {
                 ShellCommand::Navigate(url) => self.navigate_active(&url),
-                ShellCommand::NewTab => self.open_tab(None),
+                ShellCommand::NewTab(url) => self.open_tab(url),
                 ShellCommand::CloseTab(id) => self.close_tab(TabId::new(id)),
                 ShellCommand::SelectTab(id) => self.select_tab(TabId::new(id)),
                 ShellCommand::FocusOwner(owner) => self.set_focus_owner(owner),
