@@ -887,6 +887,7 @@ const BUNDLED_LUCIDE_NAMES: &[&str] = &[
     "arrow-left",
     "arrow-right",
     "bookmark",
+    "bookmark-fill",
     "circle-plus",
     "clock",
     "layers",

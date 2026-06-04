@@ -904,15 +904,34 @@
           updateSecurityIndicator(payload.url);
         }
         // Update bookmark-toggle visual state when present.
+        //
+        // The is-bookmarked class swaps the color to var(--accent) (see
+        // omnibox.css). Filling the glyph requires swapping the <use href>
+        // between #icon-bookmark (outline) and #icon-bookmark-fill (solid)
+        // because CSS cannot pierce <symbol> shadow DOM; the symbol's
+        // fill="none" attribute wins over any CSS rule on the host <svg>.
         if (payload && typeof payload.bookmarked === "boolean") {
           var bm = document.querySelector(".bookmark-toggle");
           if (bm) {
+            var useEl = bm.querySelector("use");
             if (payload.bookmarked) {
               bm.classList.add("is-bookmarked");
               bm.setAttribute("aria-pressed", "true");
+              if (useEl) {
+                useEl.setAttribute(
+                  "href",
+                  "assets/lucide-sprite.svg#icon-bookmark-fill"
+                );
+              }
             } else {
               bm.classList.remove("is-bookmarked");
               bm.setAttribute("aria-pressed", "false");
+              if (useEl) {
+                useEl.setAttribute(
+                  "href",
+                  "assets/lucide-sprite.svg#icon-bookmark"
+                );
+              }
             }
           }
         }

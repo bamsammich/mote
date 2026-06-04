@@ -18,8 +18,16 @@
     <path d="m6 6 12 12"/>
   </symbol>
 
-  <!-- chrome.bookmark -->
+  <!-- chrome.bookmark — outline (default state) -->
   <symbol id="icon-bookmark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>
+  </symbol>
+
+  <!-- chrome.bookmark filled — toggled when a URL is bookmarked. Same path as
+       icon-bookmark but with fill=currentColor so the active state is a solid
+       glyph instead of a stroked outline. Chrome JS swaps the <use href>
+       between #icon-bookmark and #icon-bookmark-fill on bookmark toggle. -->
+  <symbol id="icon-bookmark-fill" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
     <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>
   </symbol>
 

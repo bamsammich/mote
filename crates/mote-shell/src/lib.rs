@@ -665,6 +665,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         tab_zoom_levels: std::collections::HashMap::new(),
         hover_url_last: None,
         zoom_clear_at: None,
+        nav_state_last: (false, false),
     };
 
     let event_loop = EventLoop::new()?;
@@ -1657,6 +1658,15 @@ struct ShellApp {
     hover_url_last: Option<String>,
     /// When the zoom status indicator auto-clears (set after each zoom action).
     zoom_clear_at: Option<Instant>,
+    /// The last `(can_go_back, can_go_forward)` pair pushed to the chrome.
+    /// Tracked so [`sync_nav_state`](Self::sync_nav_state) only re-pushes when
+    /// the nav state actually changes. CEF updates these flags asynchronously
+    /// via `on_loading_state_change`; `push_state_to_chrome` runs on URL
+    /// change (`set_url`) which is BEFORE CEF commits the new history entry,
+    /// so the nav state pushed there is stale. The poll-on-change path here
+    /// is what lights up the back/forward buttons after a navigation
+    /// completes.
+    nav_state_last: (bool, bool),
 }
 
 impl std::fmt::Debug for ShellApp {
@@ -4166,6 +4176,38 @@ impl ShellApp {
         self.push_statusline_to_chrome();
     }
 
+    /// Poll the active tab's nav state (`can_go_back`, `can_go_forward`) and
+    /// push a `set_nav_state` op to the chrome when the pair changes.
+    ///
+    /// `push_state_to_chrome` already pushes nav state on every state push,
+    /// but state pushes fire on URL change (`sync_active_url`) which runs
+    /// BEFORE CEF commits the new history entry — `can_go_back` is still
+    /// stale at that point. CEF fires `on_loading_state_change` separately
+    /// once the entry is committed (`NavState` cache updates), and this poll
+    /// catches that and pushes to chrome so the back/forward keycap buttons
+    /// reflect reality. Runs each `about_to_wait` tick.
+    fn sync_nav_state(&mut self) {
+        let (can_go_back, can_go_forward) = self
+            .active_page()
+            .map_or((false, false), |p| (p.can_go_back(), p.can_go_forward()));
+        let new_state = (can_go_back, can_go_forward);
+        if new_state == self.nav_state_last {
+            return;
+        }
+        self.nav_state_last = new_state;
+        if !self.chrome_ready {
+            // Defer the first push to once the chrome is mounted; the
+            // chrome-ready path in about_to_wait calls push_state_to_chrome
+            // which covers the initial nav state alongside set_url + set_tabs.
+            return;
+        }
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_nav_state',\
+             {{can_go_back:{can_go_back},can_go_forward:{can_go_forward}}});"
+        ));
+    }
+
     /// Route a keyboard event to the logical focus owner.
     fn route_key(&self, event: &winit::event::KeyEvent) {
         let target: Option<&Page> = match self.focus {
@@ -4327,6 +4369,7 @@ impl ApplicationHandler for ShellApp {
         self.sync_active_url();
         self.sync_active_title();
         self.sync_hover_url();
+        self.sync_nav_state();
         self.maybe_run_housekeeping();
         self.upload_frames();
 
