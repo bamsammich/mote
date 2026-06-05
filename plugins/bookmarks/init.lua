@@ -138,7 +138,10 @@ M.api = {
   --- list_bookmarks(filter) — filter is an optional substring query string.
   --- Returns an array of record tables { url, title, added }.
   --- If filter is a non-empty string, only records whose url or title
-  --- contains the filter (case-sensitive) are returned.
+  --- contains the filter are returned.  Matching is case-insensitive (ASCII
+  --- lowercase fold on both the filter and the candidate fields).  This is an
+  --- intentional v0.1 improvement: the original case-sensitive match caused
+  --- queries like "google" to miss bookmarks titled "Google" (I5).
   list_bookmarks = function(filter)
     local results = {}
     local keys = storage.list_keys()
@@ -150,9 +153,12 @@ M.api = {
         if rec ~= nil then
           local include = true
           if filter ~= nil and filter ~= "" then
-            local f = tostring(filter)
-            include = rec.url:find(f, 1, true) ~= nil
-              or rec.title:find(f, 1, true) ~= nil
+            -- Lowercase both sides for case-insensitive ASCII matching.
+            local f        = tostring(filter):lower()
+            local url_lc   = rec.url:lower()
+            local title_lc = rec.title:lower()
+            include = url_lc:find(f, 1, true) ~= nil
+              or title_lc:find(f, 1, true) ~= nil
           end
           if include then
             results[#results + 1] = rec
@@ -176,10 +182,9 @@ M.events = {
   --- records, each tagged `source="bookmark"`, or an empty table when the
   --- text is empty or nothing matches.
   ---
-  --- Matching inherits `list_bookmarks`'s case-sensitive substring search
-  --- (both url and title).  Case-sensitivity is a known v0.1 limitation —
-  --- a future mote.text host API can add Unicode folding; changing it here
-  --- requires no history change (the collector pattern is open by design).
+  --- Matching delegates to `list_bookmarks`, which now performs case-insensitive
+  --- ASCII substring matching (both url and title).  Unicode folding is a
+  --- future concern; ASCII lowercase is correct for the v0.1 scope.
   ["urlbar:suggest"] = function(payload)
     local text = payload and payload.text or ""
     if text == "" then

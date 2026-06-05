@@ -43,23 +43,6 @@
     return true;
   }
 
-  // Parse the user's omnibox text into a navigable URL. A bare host or a term
-  // is given a scheme; the canonical normalization + provider routing is a
-  // Wave-C concern (the shell's `navigate` op accepts whatever we send).
-  function toUrl(text) {
-    var t = (text || "").trim();
-    if (t === "") return null;
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(data|mote|about):/i.test(t)) {
-      return t;
-    }
-    // Looks like a domain (has a dot, no spaces) → https. Otherwise leave as-is
-    // and let the shell decide (Wave C adds a search provider).
-    if (/^[^\s]+\.[^\s]+$/.test(t)) {
-      return "https://" + t;
-    }
-    return "https://" + t;
-  }
-
   // ---- Completion popup helpers ------------------------------------------
 
   // Return the completion dropdown element and the current selected index (-1
@@ -438,10 +421,15 @@
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
-      var url = toUrl(input.value);
-      if (!url) return;
+      var text = (input.value || "").trim();
+      if (!text) return;
       if (window.mote && window.mote.invoke) {
-        window.mote.invoke("navigate", { url: url }).catch(function () {});
+        // Route free-text submit through omnibox_submit so the shell can
+        // resolve it: plain queries become search URLs (via the configured
+        // provider), URL-like inputs get https:// prepended or pass through.
+        // Suggestion-row clicks still use navigate directly — those carry
+        // real URLs from history/bookmarks and must not be re-resolved.
+        window.mote.invoke("omnibox_submit", { text: text }).catch(function () {});
       }
       // Blur after committing — keyboard-first expectation: Enter returns focus
       // to the page so the next ⌘K (or click) re-opens the bar with select-all.
@@ -899,7 +887,15 @@
       case "set_url":
         var input = document.getElementById("omnibox-input");
         if (input && payload && typeof payload.url === "string") {
-          input.value = payload.url;
+          // E1: new-tab pages expose their internal mote:// URL in the
+          // omnibox, which looks wrong. Show an empty omnibox with its
+          // placeholder text instead — the mode stays [url] so the
+          // security-dot and mode indicator are correct.
+          if (isNewtabUrl(payload.url)) {
+            input.value = "";
+          } else {
+            input.value = payload.url;
+          }
           // P2: update the security indicator on navigation.
           updateSecurityIndicator(payload.url);
         }
@@ -2065,12 +2061,13 @@
             action: function () { copyToClipboard(selectedText); },
           });
           rows.push({
-            label: "search google for selection",
+            label: "search for selection",
             action: function () {
-              var q = encodeURIComponent(selectedText);
+              // Route through omnibox_submit so the shell resolves the text
+              // against the configured search engine (no hardcoded engine).
               if (window.mote && window.mote.invoke) {
                 window.mote
-                  .invoke("new_tab", { url: "https://www.google.com/search?q=" + q })
+                  .invoke("omnibox_submit", { text: selectedText })
                   .catch(function () {});
               }
             },

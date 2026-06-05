@@ -434,11 +434,40 @@ M.api = {
     end
 
     -- -----------------------------------------------------------------------
-    -- Step 3: cap at 10 results.
+    -- Step 3: dedup by URL across the merged set (I3).
+    --
+    -- Policy: when a URL appears in multiple sources, keep the LAST occurrence
+    -- in traversal order.  Because contributor rows (e.g. bookmarks) are
+    -- appended AFTER history rows, a bookmark entry overwrites a history entry
+    -- for the same URL — the bookmark is considered higher-signal (explicitly
+    -- saved by the user).
+    --
+    -- Implementation: two-pass — build a URL→index map (last-wins), then
+    -- collect the surviving rows in insertion order (stable output).
+    -- -----------------------------------------------------------------------
+    local seen   = {}  -- url → index of surviving entry (last occurrence)
+    local order  = {}  -- insertion-order list of unique URLs
+    for i, rec in ipairs(suggestions) do
+      local url = rec and rec.url
+      if type(url) == "string" and url ~= "" then
+        if seen[url] == nil then
+          order[#order + 1] = url
+        end
+        seen[url] = i  -- last-wins: bookmark overwrites history
+      end
+    end
+
+    local deduped = {}
+    for _, url in ipairs(order) do
+      deduped[#deduped + 1] = suggestions[seen[url]]
+    end
+
+    -- -----------------------------------------------------------------------
+    -- Step 4: cap at 10 results (applied after dedup so the cap is on unique URLs).
     -- -----------------------------------------------------------------------
     local result = {}
-    for i = 1, math.min(#suggestions, 10) do
-      result[i] = suggestions[i]
+    for i = 1, math.min(#deduped, 10) do
+      result[i] = deduped[i]
     end
     return result
   end,

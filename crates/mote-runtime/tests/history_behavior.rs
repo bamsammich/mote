@@ -1099,3 +1099,76 @@ fn history_survives_reload() {
         log.shutdown().expect("session-2 audit shuts down");
     }
 }
+
+// ---------------------------------------------------------------------------
+// I3: dedup tests — a URL present in both history and bookmarks yields ONE row
+// ---------------------------------------------------------------------------
+
+/// Consumer: seeds one history visit AND one bookmark for the SAME URL, then
+/// calls `query("foo")`.  Expects exactly 1 suggestion (the duplicate is
+/// removed).  Returns `"count=N,source=S"` where S is the source of the first
+/// (and only) row.
+const CONSUMER_QUERY_DEDUP_SAME_URL: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "dedup-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:history_provider", "ui:urlbar_provider", "ui:bookmarks_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- Same URL in both history and bookmarks.
+    capabilities.invoke("ui:history_provider", "record_visit",
+      { url = "https://foo-shared.example", time = 1700000001000 })
+    capabilities.invoke("ui:history_provider", "update_title",
+      { url = "https://foo-shared.example", title = "Foo Shared" })
+    capabilities.invoke("ui:bookmarks_provider", "add_bookmark",
+      { url = "https://foo-shared.example", title = "Foo Shared Bookmark" })
+    local results = capabilities.invoke("ui:urlbar_provider", "query", "foo")
+    local n = 0
+    local src0 = "none"
+    if type(results) == "table" then
+      n = #results
+      if n > 0 and type(results[1]) == "table" then
+        src0 = tostring(results[1].source or "none")
+      end
+    end
+    return {
+      action  = "modify",
+      payload = "count=" .. tostring(n) .. ",source=" .. src0,
+    }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// A URL that appears in both history and bookmarks must produce exactly ONE
+/// suggestion row after the merge+dedup step.  The first (surviving) row's
+/// source tells us the dedup policy: the bookmark row is preferred when both
+/// exist (it is the higher-signal entry per the policy note in history/init.lua).
+#[test]
+fn i3_duplicate_url_in_history_and_bookmarks_yields_one_row() {
+    let (mut rt, mut log) = make_runtime();
+    let policy = GrantAsRequested;
+    rt.load(HISTORY_SRC, identity(), &policy)
+        .expect("history plugin loads");
+    rt.load(BOOKMARKS_SRC, identity(), &policy)
+        .expect("bookmarks plugin loads");
+    rt.load(CONSUMER_QUERY_DEDUP_SAME_URL, identity(), &policy)
+        .expect("consumer loads");
+
+    let payload = dispatch_and_read(&mut rt);
+    // The URL appears in both sources; after dedup only one row must survive.
+    assert_eq!(
+        payload, "count=1,source=bookmark",
+        "a URL in both history and bookmarks must yield exactly 1 row (bookmark preferred); \
+         got payload={payload:?}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}

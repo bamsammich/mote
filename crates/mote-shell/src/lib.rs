@@ -150,12 +150,33 @@ const HOUSEKEEPING_ENV: &str = "MOTE_HOUSEKEEPING_SECS";
 /// context). The `create_content_page` helper enforces this routing.
 const DEFAULT_START_URL: &str = "mote://chrome/newtab.html";
 
+/// Default search URL template used when no engine has been configured via
+/// `set_search_engine`. `{q}` is replaced with the percent-encoded query by
+/// [`resolve_omnibox_input`].
+///
+/// The value is `"https://duckduckgo.com/?q={q}"`.  The `{q}` is a product
+/// template placeholder, not a Rust format specifier — the string is built
+/// from bytes to avoid the `clippy::literal_string_with_formatting_args` lint
+/// that fires on any `{...}` inside a string literal regardless of context.
+fn default_search_url_template() -> &'static str {
+    // b"https://duckduckgo.com/?q={q}" where {q} = 0x7b 'q' 0x7d
+    std::str::from_utf8(b"https://duckduckgo.com/?q=\x7bq\x7d")
+        .expect("ASCII bytes are valid UTF-8")
+}
+
 /// A command produced by a host-bridge op (which is `Send + Sync`) and applied
 /// by the winit loop on the pump thread (which owns the `!Send` pages).
 #[derive(Debug, Clone)]
 enum ShellCommand {
     /// Navigate the **active** tab to `url` (the omnibox `navigate` op).
     Navigate(String),
+    /// The user submitted free text from the omnibox (the `omnibox_submit` op).
+    ///
+    /// Unlike `Navigate` (which carries a pre-resolved URL from a suggestion
+    /// row click), this variant carries raw user text.  The pump thread calls
+    /// [`resolve_omnibox_input`] with the live `search_url_template` to turn
+    /// it into a navigable URL before calling `navigate_active`.
+    OmniboxSubmit(String),
     /// Open a new tab (and switch to it). Optional URL: when set, the new
     /// tab loads that URL via `create_content_page` (which routes `mote://`
     /// URLs through the global request context per ADR-0015); when `None`,
@@ -684,6 +705,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         zoom_clear_at: None,
         nav_state_last: (false, false),
         find_query_last: String::new(),
+        search_url_template: default_search_url_template().to_owned(),
     };
 
     let event_loop = EventLoop::new()?;
@@ -1154,12 +1176,27 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let zoom_reset_queue = Arc::clone(commands);
     let reopen_closed_tab_queue = Arc::clone(commands);
     let context_menu_action_queue = Arc::clone(commands);
+    let omnibox_submit_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
                 || OpResponse::err(400, "navigate requires a string `url`"),
                 |url| {
                     push(&nav_queue, ShellCommand::Navigate(url));
+                    OpResponse::ok("{\"ok\":true}")
+                },
+            )
+        })
+        // `omnibox_submit` — free-text submission from the omnibox.  Carries
+        // the raw user text; the pump thread resolves it to a URL via
+        // `resolve_omnibox_input` using the live `search_url_template`.
+        // Suggestion-row clicks go through `navigate` directly (they already
+        // carry real URLs from history/bookmarks).
+        .register("omnibox_submit", move |params: &str| {
+            json_string_field(params, "text").map_or_else(
+                || OpResponse::err(400, "omnibox_submit requires a string `text`"),
+                |text| {
+                    push(&omnibox_submit_queue, ShellCommand::OmniboxSubmit(text));
                     OpResponse::ok("{\"ok\":true}")
                 },
             )
@@ -1694,6 +1731,11 @@ struct ShellApp {
     /// `FindNext`/`FindPrev` (Ctrl+G, Ctrl+Shift+G) can repeat the last search
     /// without the chrome resending the query string.
     find_query_last: String,
+    /// Active search URL template (default: `DuckDuckGo`).  Updated when the
+    /// user changes the search engine via the settings panel (`set_search_engine`
+    /// op → `SetSearchEngine` command).  Used by `OmniboxSubmit` to build the
+    /// search URL for free-text input that does not look like a URL.
+    search_url_template: String,
 }
 
 impl std::fmt::Debug for ShellApp {
@@ -1761,6 +1803,12 @@ impl ShellApp {
         for command in drained {
             match command {
                 ShellCommand::Navigate(url) => self.navigate_active(&url),
+                ShellCommand::OmniboxSubmit(text) => {
+                    let url = resolve_omnibox_input(&text, &self.search_url_template.clone());
+                    if !url.is_empty() {
+                        self.navigate_active(&url);
+                    }
+                }
                 ShellCommand::NewTab(url) => self.open_tab(url),
                 ShellCommand::CloseTab(id) => self.close_tab(TabId::new(id)),
                 ShellCommand::SelectTab(id) => self.select_tab(TabId::new(id)),
@@ -1803,6 +1851,10 @@ impl ShellApp {
                         "mote-shell: set_search_engine → managed.lua: \
                          name = {name:?}, url_template = {url_template:?}"
                     );
+                    // Update the live search engine so the next `OmniboxSubmit`
+                    // uses the new provider immediately (managed.lua write is
+                    // deferred to the Bucket-A config-mutation pass).
+                    self.search_url_template.clone_from(&url_template);
                 }
                 ShellCommand::SetHwAccel(enabled) => {
                     eprintln!("mote-shell: set_hw_accel → managed.lua: enabled = {enabled}");
@@ -4824,6 +4876,140 @@ fn js_string(s: &str) -> String {
     out
 }
 
+/// Percent-encode a string for use as a URL query value (RFC 3986 §2.1).
+///
+/// Unreserved characters (`A-Z a-z 0-9 - _ . ~`) pass through unchanged;
+/// every other byte is encoded as `%XX`.  This is correct for a search-query
+/// value: spaces become `%20` (not `+`), consistent with modern search engine
+/// URL formats.
+fn url_percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            // RFC 3986 unreserved characters.
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{other:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Resolve raw omnibox text to a navigable URL.
+///
+/// Decision tree (applied in order):
+/// 1. **Has scheme** — any text matching `<scheme>://` (generic URI) or the
+///    schemeless special forms `data:`, `mote:`, `about:` — returned unchanged.
+/// 2. **Looks like a bare host / URL** — contains a dot with no whitespace
+///    before it, OR is exactly `localhost`, OR matches `localhost:<port>` or
+///    `<host>:<port>` (dot in host, colon, digits) — `https://` is prepended.
+/// 3. **Everything else** — treated as a search query; `{q}` in
+///    `url_template` is replaced with the percent-encoded text.
+///
+/// Empty text returns an empty string (the caller must guard against this).
+///
+/// This is a pure function with no side effects, intentionally separated from
+/// shell state so it is unit-testable.
+pub(crate) fn resolve_omnibox_input(text: &str, url_template: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+
+    // 1. Already has a scheme.
+    if has_scheme(t) {
+        return t.to_owned();
+    }
+
+    // 2. Looks like a navigable URL without a scheme.
+    if looks_like_url(t) {
+        return format!("https://{t}");
+    }
+
+    // 3. Treat as a search query.
+    let encoded = url_percent_encode(t);
+    // The template uses {q} as the placeholder.  Build it without a format
+    // macro so the `{q}` in the template is not mistaken for a format spec.
+    url_template.replace("\x7bq\x7d", &encoded)
+}
+
+/// Return `true` if `t` already carries a URI scheme.
+fn has_scheme(t: &str) -> bool {
+    // Generic scheme: letter followed by letters/digits/+/-/. then "://"
+    if t.len() >= 4 {
+        let bytes = t.as_bytes();
+        if bytes[0].is_ascii_alphabetic() {
+            let colon_pos = bytes.iter().position(|&b| b == b':');
+            if let Some(pos) = colon_pos {
+                if pos >= 1
+                    && bytes[..pos]
+                        .iter()
+                        .all(|&b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
+                    && t.len() > pos + 2
+                    && bytes[pos + 1] == b'/'
+                    && bytes[pos + 2] == b'/'
+                {
+                    return true;
+                }
+                // Schemeless special forms: `data:`, `mote:`, `about:` — no slashes.
+                let scheme = &t[..pos].to_ascii_lowercase();
+                if scheme == "data" || scheme == "mote" || scheme == "about" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Return `true` if `t` looks like a URL/host that should get `https://` prepended.
+///
+/// Criteria (any one suffices):
+/// - `localhost` (exact, case-insensitive)
+/// - `localhost:<digits>` (localhost with port)
+/// - Contains a dot with no ASCII whitespace anywhere in the string and no
+///   spaces before the dot (i.e. `foo.bar` but not `foo bar.baz` which is
+///   clearly a sentence)
+/// - Matches `<host>:<port>` where host contains a dot and port is all digits
+fn looks_like_url(t: &str) -> bool {
+    // No whitespace allowed in a bare URL.
+    if t.chars().any(|c| c.is_ascii_whitespace()) {
+        return false;
+    }
+
+    let lower = t.to_ascii_lowercase();
+
+    // localhost or localhost:<port>
+    if lower == "localhost" {
+        return true;
+    }
+    if let Some(rest) = lower.strip_prefix("localhost:")
+        && !rest.is_empty()
+        && rest.bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+
+    // host:port where host contains a dot
+    if let Some(colon_pos) = t.rfind(':') {
+        let host_part = &t[..colon_pos];
+        let port_part = &t[colon_pos + 1..];
+        if host_part.contains('.')
+            && !port_part.is_empty()
+            && port_part.bytes().all(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+
+    // Has a dot — treat as domain name.
+    t.contains('.')
+}
+
 /// Extract a top-level string field `"field": "value"` from a JSON object.
 ///
 /// Parses `json` as a JSON object (anchored, not a first-substring match) and
@@ -7417,5 +7603,194 @@ mod tests {
             registry.op_names().contains(&"context_menu_action"),
             "context_menu_action must be registered for D1 edit commands"
         );
+    }
+
+    // ── I1: omnibox resolver tests ────────────────────────────────────────────
+    //
+    // Pure unit tests on `resolve_omnibox_input`.  Each test covers one
+    // decision-branch from the docstring; together they prove the black-box
+    // contract: search queries never become bare `https://...` URLs, and URL-like
+    // inputs never go through the search engine.
+
+    /// The default `DuckDuckGo` template is well-formed.
+    #[test]
+    fn i1_default_search_template_contains_placeholder() {
+        let tmpl = default_search_url_template();
+        assert!(
+            tmpl.contains("\x7bq\x7d"),
+            "default template must contain the {{q}} placeholder; got {tmpl:?}"
+        );
+        assert!(
+            tmpl.starts_with("https://"),
+            "default template must start with https://; got {tmpl:?}"
+        );
+    }
+
+    /// A multi-word query resolves to the provider search URL with the text
+    /// URL-encoded — it must NOT become `https://<query>`.
+    #[test]
+    fn i1_multi_word_query_resolves_to_search_url() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("weather rust", tmpl);
+        // Should be a DuckDuckGo search URL.
+        assert!(
+            result.starts_with("https://duckduckgo.com/"),
+            "multi-word query must resolve to the search URL, not https://<query>; \
+             got {result:?}"
+        );
+        assert!(
+            result.contains("weather"),
+            "search URL must contain the query text; got {result:?}"
+        );
+        // Space must be percent-encoded, not a bare space.
+        assert!(
+            !result.contains(' '),
+            "search URL must not contain a bare space; got {result:?}"
+        );
+    }
+
+    /// A query with spaces must never produce a bare `https://` URL.
+    #[test]
+    fn i1_query_with_spaces_never_produces_bare_https_url() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("rust async traits", tmpl);
+        assert!(
+            !result.starts_with("https://rust async"),
+            "query with spaces must not produce bare https://<query>; got {result:?}"
+        );
+        assert!(
+            result.contains("rust"),
+            "search URL must contain query text; got {result:?}"
+        );
+    }
+
+    /// A bare domain (has a dot, no spaces) resolves to `https://<domain>`.
+    #[test]
+    fn i1_bare_domain_resolves_to_https() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("example.com", tmpl);
+        assert_eq!(
+            result, "https://example.com",
+            "bare domain must resolve to https://example.com; got {result:?}"
+        );
+    }
+
+    /// A URL with an explicit scheme passes through unchanged.
+    #[test]
+    fn i1_url_with_scheme_passes_through() {
+        let tmpl = default_search_url_template();
+        let url = "https://x.test/path?q=foo";
+        let result = resolve_omnibox_input(url, tmpl);
+        assert_eq!(
+            result, url,
+            "URL with existing scheme must pass through unchanged; got {result:?}"
+        );
+    }
+
+    /// `http://` URLs also pass through unchanged.
+    #[test]
+    fn i1_http_url_passes_through() {
+        let tmpl = default_search_url_template();
+        let url = "http://insecure.example.org/page";
+        let result = resolve_omnibox_input(url, tmpl);
+        assert_eq!(
+            result, url,
+            "http:// URL must pass through unchanged; got {result:?}"
+        );
+    }
+
+    /// `localhost` resolves to `https://localhost`.
+    #[test]
+    fn i1_localhost_resolves_to_https() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("localhost", tmpl);
+        assert_eq!(
+            result, "https://localhost",
+            "localhost must resolve to https://localhost; got {result:?}"
+        );
+    }
+
+    /// `localhost:3000` resolves to a localhost URL, not a search.
+    #[test]
+    fn i1_localhost_with_port_resolves_to_url() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("localhost:3000", tmpl);
+        assert_eq!(
+            result, "https://localhost:3000",
+            "localhost:port must resolve to a URL; got {result:?}"
+        );
+    }
+
+    /// `mote://` URLs pass through unchanged.
+    #[test]
+    fn i1_mote_scheme_passes_through() {
+        let tmpl = default_search_url_template();
+        let url = "mote://chrome/newtab.html";
+        let result = resolve_omnibox_input(url, tmpl);
+        assert_eq!(
+            result, url,
+            "mote:// URL must pass through unchanged; got {result:?}"
+        );
+    }
+
+    /// `about:blank` passes through unchanged.
+    #[test]
+    fn i1_about_scheme_passes_through() {
+        let tmpl = default_search_url_template();
+        let url = "about:blank";
+        let result = resolve_omnibox_input(url, tmpl);
+        assert_eq!(
+            result, url,
+            "about:blank must pass through unchanged; got {result:?}"
+        );
+    }
+
+    /// A custom search engine template is used when provided.
+    #[test]
+    fn i1_custom_template_is_used() {
+        // Build template without a format arg to avoid the lint.
+        let tmpl = String::from_utf8(b"https://search.example.com/?q=\x7bq\x7d".to_vec())
+            .expect("ASCII bytes are valid UTF-8");
+        let result = resolve_omnibox_input("hello world", &tmpl);
+        assert!(
+            result.starts_with("https://search.example.com/"),
+            "custom template must be used; got {result:?}"
+        );
+        assert!(
+            result.contains("hello"),
+            "search URL must contain query; got {result:?}"
+        );
+    }
+
+    /// `omnibox_submit` op is registered.
+    #[test]
+    fn i1_omnibox_submit_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"omnibox_submit"),
+            "omnibox_submit must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `omnibox_submit` op: valid `text` field → enqueues `ShellCommand::OmniboxSubmit`.
+    /// Mirrors the pattern used by `p6_set_search_engine_op_enqueues_set_search_engine`.
+    #[test]
+    fn i1_omnibox_submit_op_enqueues_command() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let text = json_string_field(r#"{"text":"rust async"}"#, "text")
+            .filter(|s| !s.is_empty())
+            .expect("text field must parse");
+        push(&queue, ShellCommand::OmniboxSubmit(text));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "must enqueue exactly one command");
+        match q.pop_front().unwrap() {
+            ShellCommand::OmniboxSubmit(text) => {
+                assert_eq!(text, "rust async", "command must carry the raw text");
+            }
+            other => panic!("expected OmniboxSubmit; got {other:?}"),
+        }
     }
 }

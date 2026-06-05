@@ -325,3 +325,98 @@ fn bookmarks_survive_reload() {
         log.shutdown().expect("session-2 audit shuts down");
     }
 }
+
+// ---------------------------------------------------------------------------
+// I5: case-insensitive match tests for list_bookmarks
+// ---------------------------------------------------------------------------
+
+/// Consumer: adds a bookmark whose title has mixed case but whose URL does NOT
+/// contain the search term; the lowercase query must still match via the title.
+const CONSUMER_CASE_INSENSITIVE_TITLE: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "bm-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:bookmarks_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- URL has no "google" in it; only the title does (with capital G).
+    capabilities.invoke("ui:bookmarks_provider", "add_bookmark",
+      { url = "https://search.example.com", title = "Google Search" })
+    -- Lowercase filter "google" must match title "Google Search".
+    local bms = capabilities.invoke("ui:bookmarks_provider", "list_bookmarks", "google")
+    local count = 0
+    if bms ~= nil then count = #bms end
+    return { action = "modify", payload = tostring(count) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// Consumer: adds a bookmark whose URL has mixed case, searches with lowercase.
+const CONSUMER_CASE_INSENSITIVE_URL: &str = r#"
+local M = {}
+M.manifest = {
+  schema = "v1",
+  name = "bm-consumer",
+  version = "1.0.0",
+  permissions = { "net:intercept_request", "events:on" },
+  consumes = { "ui:bookmarks_provider" },
+  identity_scope = "per_identity",
+}
+M.hooks = {
+  ["net:intercept_request"] = function(req)
+    -- URL has mixed case in the path
+    capabilities.invoke("ui:bookmarks_provider", "add_bookmark",
+      { url = "https://GitHub.com/user/repo", title = "my repo" })
+    -- Lowercase query should match the mixed-case URL
+    local bms = capabilities.invoke("ui:bookmarks_provider", "list_bookmarks", "github")
+    local count = 0
+    if bms ~= nil then count = #bms end
+    return { action = "modify", payload = tostring(count) }
+  end,
+}
+function M.setup() end
+return M
+"#;
+
+/// `list_bookmarks` with a lowercase filter must match a bookmark whose title
+/// starts with a capital letter (`"google"` matches `"Google"`).
+#[test]
+fn i5_list_bookmarks_filter_is_case_insensitive_on_title() {
+    let (mut rt, mut log) = make_runtime();
+    load_pair(&mut rt, CONSUMER_CASE_INSENSITIVE_TITLE);
+
+    let count_str = dispatch_and_read(&mut rt);
+    assert_eq!(
+        count_str, "1",
+        "lowercase filter 'google' must match bookmark titled 'Google' (case-insensitive); \
+         got count={count_str}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
+
+/// `list_bookmarks` with a lowercase filter must match a bookmark whose URL
+/// contains mixed-case characters.
+#[test]
+fn i5_list_bookmarks_filter_is_case_insensitive_on_url() {
+    let (mut rt, mut log) = make_runtime();
+    load_pair(&mut rt, CONSUMER_CASE_INSENSITIVE_URL);
+
+    let count_str = dispatch_and_read(&mut rt);
+    assert_eq!(
+        count_str, "1",
+        "lowercase filter 'github' must match bookmark URL 'https://GitHub.com/user/repo' \
+         (case-insensitive); got count={count_str}"
+    );
+
+    drain(&log);
+    log.shutdown().expect("audit log shuts down cleanly");
+}
