@@ -1859,6 +1859,9 @@
       // Clear the input so the user types a fresh query (find mode is not a URL).
       if (input) {
         input.value = "";
+        // C1: update placeholder and aria-label for find context.
+        input.placeholder = "find in page";
+        input.setAttribute("aria-label", "find in page");
         // Trigger mode prefix update.
         applyOmniboxMode(omni, modeNameEl, "find");
         input.focus();
@@ -1872,12 +1875,25 @@
         window.mote.invoke("stop_finding", {}).catch(function () {});
       }
       setFindCount("");
-      if (input) input.value = "";
+      if (input) {
+        input.value = "";
+        // C1: restore url-mode placeholder and aria-label on exit.
+        input.placeholder = "enter a url";
+        input.setAttribute("aria-label", "address");
+      }
       applyOmniboxMode(omni, modeNameEl, "url");
       if (input) input.blur();
     }
 
     window.mote.applyOp = function (op, payload) {
+      // C4: handle find_count updates pushed from the shell's sync_find_result.
+      if (op === "find_count") {
+        if (payload && typeof payload.label === "string") {
+          setFindCount(payload.label);
+        }
+        return;
+      }
+
       if (op !== "focus_find") {
         if (prevApplyOp) prevApplyOp(op, payload);
         return;
@@ -1904,13 +1920,18 @@
           }
         });
 
-        // Keydown: Enter → find_next; Escape → stop + exit.
+        // Keydown: Enter → find_next; Shift+Enter → find_prev; Escape → stop + exit.
+        // C3: Shift+Enter wires find_prev (backward search).
         input.addEventListener("keydown", function (ev) {
           if (!_inFindMode) return;
           if (ev.key === "Enter") {
             ev.preventDefault();
             if (window.mote && window.mote.invoke) {
-              window.mote.invoke("find_next", {}).catch(function () {});
+              if (ev.shiftKey) {
+                window.mote.invoke("find_prev", {}).catch(function () {});
+              } else {
+                window.mote.invoke("find_next", {}).catch(function () {});
+              }
             }
             return;
           }
@@ -1930,6 +1951,9 @@
             if (!_inFindMode) return;
             _inFindMode = false;
             setFindCount("");
+            // C1: restore url-mode attributes on blur-triggered exit.
+            input.placeholder = "enter a url";
+            input.setAttribute("aria-label", "address");
             applyOmniboxMode(omni, modeNameEl, "url");
           }, 0);
         });

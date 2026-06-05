@@ -252,9 +252,24 @@ enum ShellCommand {
     /// omnibox so it enters `[find]` mode. The chrome JS then sends
     /// `find_in_page` ops as the user types.
     FindInPage,
-    /// Advance to the next find match (Ctrl+G from the shell keybind).
+    /// Execute a text search on the active page with the given query.
+    ///
+    /// Produced by the `find_in_page` op handler on every keystroke.
+    /// `forward = true` searches forward; `find_next = false` starts a new
+    /// session, `true` advances to the next/previous match.
+    FindText {
+        /// The search query string.
+        query: String,
+        /// Search direction: `true` = forward (default), `false` = backward.
+        forward: bool,
+        /// `false` = start a new find session; `true` = advance the current one.
+        find_next: bool,
+    },
+    /// Advance to the next find match (Ctrl+G from the shell keybind, or Enter
+    /// in the find omnibox via the `find_next` op).
     FindNext,
-    /// Advance to the previous find match (Ctrl+Shift+G from the shell keybind).
+    /// Advance to the previous find match (Ctrl+Shift+G from the shell keybind,
+    /// or Shift+Enter in the find omnibox via the `find_prev` op).
     FindPrev,
     /// Stop finding and clear the active selection.
     StopFinding,
@@ -666,6 +681,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         hover_url_last: None,
         zoom_clear_at: None,
         nav_state_last: (false, false),
+        find_query_last: String::new(),
     };
 
     let event_loop = EventLoop::new()?;
@@ -1128,6 +1144,8 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let integrity_detail_queue = Arc::clone(commands);
     // P5: find / zoom / reopen / context-menu op queues.
     let find_in_page_queue = Arc::clone(commands);
+    let find_next_op_queue = Arc::clone(commands);
+    let find_prev_op_queue = Arc::clone(commands);
     let stop_finding_queue = Arc::clone(commands);
     let zoom_in_queue = Arc::clone(commands);
     let zoom_out_queue = Arc::clone(commands);
@@ -1418,34 +1436,37 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
         // All callable only from `mote://chrome` (ADR-0005 origin gate).
         //
         // `find_in_page` — called by host.js with the search text while in
-        // [find] mode. Enqueues a `ShellCommand` that calls `Page::find`.
+        // [find] mode. Enqueues `FindText` carrying the query and direction so
+        // the drain branch can call `Page::find(query, forward, false, find_next)`.
         .register("find_in_page", move |params: &str| {
-            let text = json_string_field(params, "text").unwrap_or_default();
+            let query = json_string_field(params, "text").unwrap_or_default();
             let find_next = json_bool_field(params, "findNext").unwrap_or(false);
             let forward = json_bool_field(params, "forward").unwrap_or(true);
-            // We encode the find request as FindNext/FindPrev when advancing;
-            // for a fresh search we use FindInPage + store the text (the chrome
-            // calls Page::find directly via eval'd ShellCommand).
-            // Simple approach: push a specially-structured command. Since
-            // ShellCommand doesn't have a FindText variant yet (and the brief
-            // wants to keep it small), we call Page::find via the enqueued
-            // ShellCommand. Use FindNext/FindPrev to advance, and for a new
-            // text-typed search use a RawFind variant.
-            //
-            // For v0.1, the chrome calls `find_in_page` on every keystroke.
-            // We convert to the right ShellCommand based on findNext flag.
-            let _ = text; // text is used by the page find call below
-            let _ = find_next;
-            let _ = forward;
-            // Queue the find: stored in a closure-captured clone of the text.
-            // The actual Page::find call happens in drain_commands via the
-            // find_in_page_queue.
-            push(&find_in_page_queue, ShellCommand::FindInPage);
+            push(
+                &find_in_page_queue,
+                ShellCommand::FindText {
+                    query,
+                    forward,
+                    find_next,
+                },
+            );
             OpResponse::ok("{\"ok\":true}")
         })
         // `stop_finding` — exit find mode, clear selection.
         .register("stop_finding", move |_params: &str| {
             push(&stop_finding_queue, ShellCommand::StopFinding);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `find_next` — advance to the next match using the last query (Enter
+        // in the find omnibox, C3 fix).
+        .register("find_next", move |_params: &str| {
+            push(&find_next_op_queue, ShellCommand::FindNext);
+            OpResponse::ok("{\"ok\":true}")
+        })
+        // `find_prev` — advance to the previous match using the last query
+        // (Shift+Enter in the find omnibox, C3 fix).
+        .register("find_prev", move |_params: &str| {
+            push(&find_prev_op_queue, ShellCommand::FindPrev);
             OpResponse::ok("{\"ok\":true}")
         })
         // `zoom_in` / `zoom_out` / `zoom_reset` — zoom the active page.
@@ -1667,6 +1688,10 @@ struct ShellApp {
     /// is what lights up the back/forward buttons after a navigation
     /// completes.
     nav_state_last: (bool, bool),
+    /// The most recent non-empty find query text. Stored by `FindText` drain so
+    /// `FindNext`/`FindPrev` (Ctrl+G, Ctrl+Shift+G) can repeat the last search
+    /// without the chrome resending the query string.
+    find_query_last: String,
 }
 
 impl std::fmt::Debug for ShellApp {
@@ -1811,14 +1836,32 @@ impl ShellApp {
                         );
                     }
                 }
-                ShellCommand::FindNext => {
+                ShellCommand::FindText {
+                    query,
+                    forward,
+                    find_next,
+                } => {
+                    // Store the query so Ctrl+G / Ctrl+Shift+G (FindNext/FindPrev)
+                    // can repeat the last search without the chrome resending it.
+                    if !query.is_empty() {
+                        self.find_query_last.clone_from(&query);
+                    }
+                    // Clone before borrowing self via active_page().
+                    let q = query.clone();
                     if let Some(page) = self.active_page() {
-                        page.find("", true, false, true);
+                        page.find(&q, forward, false, find_next);
+                    }
+                }
+                ShellCommand::FindNext => {
+                    let query = self.find_query_last.clone();
+                    if let Some(page) = self.active_page() {
+                        page.find(&query, true, false, true);
                     }
                 }
                 ShellCommand::FindPrev => {
+                    let query = self.find_query_last.clone();
                     if let Some(page) = self.active_page() {
-                        page.find("", false, false, true);
+                        page.find(&query, false, false, true);
                     }
                 }
                 ShellCommand::StopFinding => {
@@ -4176,6 +4219,35 @@ impl ShellApp {
         self.push_statusline_to_chrome();
     }
 
+    /// Take any pending find-result from the active page and push a
+    /// `find_count` applyOp to the chrome omnibox (C4).
+    ///
+    /// CEF's `FindHandlerImpl::on_find_result` writes into the [`FindResultSlot`]
+    /// on `final_update`; this method takes that result and formats it as
+    /// `"N / M"` (1-indexed active match / total count). An empty string is
+    /// pushed when the count drops to zero (no matches).
+    fn sync_find_result(&self) {
+        if !self.chrome_ready {
+            return;
+        }
+        let Some(result) = self.active_page().and_then(Page::take_find_result) else {
+            return;
+        };
+        // Format the count label: "N / M" (1-based ordinal, total count).
+        // An ordinal of 0 means CEF cleared the session (no matches found);
+        // in that case push an empty string so the find-count span is hidden.
+        let label = if result.count == 0 {
+            String::new()
+        } else {
+            format!("{} / {}", result.active_match_ordinal, result.count)
+        };
+        let label_js = js_string(&label);
+        self.bridge.page().eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&\
+             window.mote.applyOp('find_count',{{label:{label_js}}});"
+        ));
+    }
+
     /// Poll the active tab's nav state (`can_go_back`, `can_go_forward`) and
     /// push a `set_nav_state` op to the chrome when the pair changes.
     ///
@@ -4369,6 +4441,7 @@ impl ApplicationHandler for ShellApp {
         self.sync_active_url();
         self.sync_active_title();
         self.sync_hover_url();
+        self.sync_find_result();
         self.sync_nav_state();
         self.maybe_run_housekeeping();
         self.upload_frames();
@@ -7037,7 +7110,8 @@ mod tests {
 
     // ── P5: ops registration ──────────────────────────────────────────────────
 
-    /// All seven P5 ops are registered in `build_op_registry`.
+    /// All nine P5 ops are registered in `build_op_registry` (includes
+    /// `find_next` and `find_prev` added by the C3 fix).
     #[test]
     fn p5_ops_all_registered() {
         let commands: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
@@ -7045,6 +7119,8 @@ mod tests {
         let names = registry.op_names();
         for op in [
             "find_in_page",
+            "find_next",
+            "find_prev",
             "stop_finding",
             "zoom_in",
             "zoom_out",
@@ -7056,6 +7132,101 @@ mod tests {
                 names.contains(&op),
                 "P5 op '{op}' must be registered in build_op_registry"
             );
+        }
+    }
+
+    // ── P5: find_in_page carries query text (C2) ──────────────────────────────
+
+    /// `find_in_page` enqueues a `FindText` command that carries the query
+    /// string and direction flags — it must NOT discard `text` (regression pin
+    /// for the C2 defect where `let _ = text` silently dropped the query).
+    #[test]
+    fn p5_find_in_page_enqueues_text() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        // Simulate exactly what the corrected op handler does.
+        let text = json_string_field(r#"{"text":"hello"}"#, "text").expect("text field must parse");
+        let find_next = json_bool_field(r#"{"text":"hello"}"#, "findNext").unwrap_or(false);
+        let forward = json_bool_field(r#"{"text":"hello"}"#, "forward").unwrap_or(true);
+        push(
+            &queue,
+            ShellCommand::FindText {
+                query: text,
+                forward,
+                find_next,
+            },
+        );
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command must be enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::FindText {
+                query,
+                forward: fwd,
+                find_next: fn_,
+            } => {
+                assert_eq!(query, "hello", "query must carry the typed text");
+                assert!(fwd, "forward must default to true");
+                assert!(!fn_, "find_next must default to false for a fresh search");
+            }
+            other => panic!("expected FindText; got {other:?}"),
+        }
+    }
+
+    /// `find_in_page` with empty text enqueues `FindText` with an empty query
+    /// (not a no-op; clears the active find session).
+    #[test]
+    fn p5_find_in_page_empty_text_enqueues_empty_query() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let text =
+            json_string_field(r#"{"text":""}"#, "text").expect("empty text field must parse");
+        push(
+            &queue,
+            ShellCommand::FindText {
+                query: text,
+                forward: true,
+                find_next: false,
+            },
+        );
+
+        let mut q = queue.lock().unwrap();
+        match q.pop_front().unwrap() {
+            ShellCommand::FindText { query, .. } => {
+                assert!(
+                    query.is_empty(),
+                    "empty text input must produce empty query"
+                );
+            }
+            other => panic!("expected FindText; got {other:?}"),
+        }
+    }
+
+    // ── P5: find_next / find_prev ops registered (C3) ────────────────────────
+
+    /// `find_next` op enqueues `ShellCommand::FindNext`.
+    #[test]
+    fn p5_find_next_op_enqueues_find_next() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        push(&queue, ShellCommand::FindNext);
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command must be enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::FindNext => {}
+            other => panic!("expected FindNext; got {other:?}"),
+        }
+    }
+
+    /// `find_prev` op enqueues `ShellCommand::FindPrev`.
+    #[test]
+    fn p5_find_prev_op_enqueues_find_prev() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        push(&queue, ShellCommand::FindPrev);
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "exactly one command must be enqueued");
+        match q.pop_front().unwrap() {
+            ShellCommand::FindPrev => {}
+            other => panic!("expected FindPrev; got {other:?}"),
         }
     }
 }

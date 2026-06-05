@@ -63,8 +63,8 @@ mod scheme;
 
 pub use bridge::{HostBridge, OpHandler, OpRegistry, OpResponse};
 pub use browser::{
-    ChromePage, ChromePageRequest, ContextMenuKind, ContextMenuRequest, Page, PageOptions,
-    PageRole, PopupTabRequest,
+    ChromePage, ChromePageRequest, ContextMenuKind, ContextMenuRequest, FindResult, Page,
+    PageOptions, PageRole, PopupTabRequest,
 };
 pub use engine::{Engine, EngineConfig};
 pub use error::{CefError, Result};

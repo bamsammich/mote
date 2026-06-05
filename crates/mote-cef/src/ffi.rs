@@ -39,16 +39,16 @@ use std::sync::{Arc, Mutex};
 use cef::rc::Rc as _;
 use cef::{
     Browser, BrowserSettings, CefString, CefStringUtf16, Client, ContextMenuHandler,
-    ContextMenuMediaType, ContextMenuParams, DictionaryValue, DisplayHandler, Frame, ImplClient,
-    ImplContextMenuHandler, ImplContextMenuParams, ImplDisplayHandler, ImplFrame,
-    ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
-    ImplResourceRequestHandler, LifeSpanHandler, LoadHandler, PaintElementType, PopupFeatures,
-    Rect, RenderHandler, Request, RequestHandler, ResourceRequestHandler, ReturnValue, ScreenInfo,
-    WindowInfo, WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDisplayHandler,
-    WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler,
-    WrapResourceRequestHandler, wrap_client, wrap_context_menu_handler, wrap_display_handler,
-    wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
-    wrap_resource_request_handler,
+    ContextMenuMediaType, ContextMenuParams, DictionaryValue, DisplayHandler, FindHandler, Frame,
+    ImplClient, ImplContextMenuHandler, ImplContextMenuParams, ImplDisplayHandler, ImplFindHandler,
+    ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequest,
+    ImplRequestHandler, ImplResourceRequestHandler, LifeSpanHandler, LoadHandler, PaintElementType,
+    PopupFeatures, Rect, RenderHandler, Request, RequestHandler, ResourceRequestHandler,
+    ReturnValue, ScreenInfo, WindowInfo, WindowOpenDisposition, WrapClient, WrapContextMenuHandler,
+    WrapDisplayHandler, WrapFindHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
+    WrapRequestHandler, WrapResourceRequestHandler, wrap_client, wrap_context_menu_handler,
+    wrap_display_handler, wrap_find_handler, wrap_life_span_handler, wrap_load_handler,
+    wrap_render_handler, wrap_request_handler, wrap_resource_request_handler,
 };
 
 use crate::browser::PageRole;
@@ -500,6 +500,88 @@ impl HoverUrlSlot {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = value;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FindResultSlot — the latest find-result count from CEF's FindHandler.
+// ---------------------------------------------------------------------------
+
+/// The latest find result pushed by CEF's `OnFindResult` callback.
+///
+/// Written by [`FindHandlerImpl::on_find_result`] and read (drained) by the
+/// shell each tick to push a `find_count` applyOp to the chrome omnibox (C4).
+/// Only the `final_update` notification carries the authoritative count; the
+/// intermediate ones are ignored.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FindResultSlot {
+    inner: Arc<Mutex<Option<FindResult>>>,
+}
+
+/// A single find-result notification from CEF.
+#[derive(Debug, Clone, Copy)]
+pub struct FindResult {
+    /// 1-based index of the currently-highlighted match.
+    pub active_match_ordinal: i32,
+    /// Total number of matches found.
+    pub count: i32,
+}
+
+impl FindResultSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take the latest result, leaving `None` in its place.
+    pub(crate) fn take(&self) -> Option<FindResult> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn set(&self, result: FindResult) {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+    }
+}
+
+#[derive(Clone)]
+struct FindState {
+    result: FindResultSlot,
+}
+
+wrap_find_handler! {
+    struct FindHandlerImpl {
+        state: FindState,
+    }
+
+    impl FindHandler {
+        /// CEF delivers incremental find-result notifications here.
+        ///
+        /// `final_update != 0` marks the last notification for a find round;
+        /// only that one carries the authoritative total count. We skip
+        /// intermediate notifications to avoid noisy per-match chatter.
+        fn on_find_result(
+            &self,
+            _browser: Option<&mut Browser>,
+            _identifier: ::std::os::raw::c_int,
+            count: ::std::os::raw::c_int,
+            _selection_rect: Option<&Rect>,
+            active_match_ordinal: ::std::os::raw::c_int,
+            final_update: ::std::os::raw::c_int,
+        ) {
+            guard((), || {
+                if final_update != 0 {
+                    self.state.result.set(FindResult {
+                        active_match_ordinal,
+                        count,
+                    });
+                }
+            });
+        }
     }
 }
 
@@ -994,6 +1076,8 @@ struct ClientState {
     display: DisplayHandler,
     life_span: LifeSpanHandler,
     context_menu: ContextMenuHandler,
+    /// CEF find-result handler (wired for C4: match count in the omnibox).
+    find: FindHandler,
 }
 
 wrap_client! {
@@ -1025,20 +1109,26 @@ wrap_client! {
         fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
             guard(None, || Some(self.state.context_menu.clone()))
         }
+
+        fn find_handler(&self) -> Option<FindHandler> {
+            guard(None, || Some(self.state.find.clone()))
+        }
     }
 }
 
 /// Builds a fully-wired CEF [`Client`] for an off-screen browser of trust `role`.
 ///
 /// Returns the client plus the [`FrameSlot`], [`NavState`], [`TitleSlot`],
-/// [`UrlSlot`], [`ViewSize`], [`PopupTabQueue`], [`HoverUrlSlot`], and
-/// [`ContextMenuQueue`] the owning `Page` reads from.
+/// [`UrlSlot`], [`ViewSize`], [`PopupTabQueue`], [`HoverUrlSlot`],
+/// [`ContextMenuQueue`], and [`FindResultSlot`] the owning `Page` reads from.
 ///
 /// The `PopupTabQueue` is written by [`LifeSpanHandlerImpl::on_before_popup`]
 /// (ADR-0011) and drained each tick by the shell. The `UrlSlot` is written by
 /// `on_address_change` (main frame only). The `HoverUrlSlot` is written by
 /// `on_status_message` (P5). The `ContextMenuQueue` is written by
-/// `on_before_context_menu` (P5).
+/// `on_before_context_menu` (P5). The `FindResultSlot` is written by
+/// `FindHandlerImpl::on_find_result` (P5, C4) and taken each tick by the shell
+/// to push a `find_count` applyOp to the chrome omnibox.
 ///
 /// Keeping construction here keeps every `cef::` handler type inside the FFI
 /// module. The `role` is wired into the request handler's `on_before_browse`
@@ -1057,6 +1147,7 @@ pub(crate) fn build_client(
     PopupTabQueue,
     HoverUrlSlot,
     ContextMenuQueue,
+    FindResultSlot,
 ) {
     let slot = FrameSlot::new();
     let nav = NavState::default();
@@ -1065,6 +1156,7 @@ pub(crate) fn build_client(
     let popups = PopupTabQueue::new();
     let hover_url = HoverUrlSlot::new();
     let context_menus = ContextMenuQueue::new();
+    let find_results = FindResultSlot::new();
 
     let render = RenderHandlerImpl::new(RenderState {
         slot: slot.clone(),
@@ -1083,6 +1175,12 @@ pub(crate) fn build_client(
     let context_menu = ContextMenuHandlerImpl::new(ContextMenuState {
         queue: context_menus.clone(),
     });
+    // Safety: the FindHandler only writes to an Arc<Mutex<_>> slot; no unsafe
+    // code paths are introduced beyond what the wrap_find_handler! macro
+    // generates (CEF refcount transmute, same pattern as all other handlers).
+    let find = FindHandlerImpl::new(FindState {
+        result: find_results.clone(),
+    });
 
     let client = ClientImpl::new(ClientState {
         render,
@@ -1091,6 +1189,7 @@ pub(crate) fn build_client(
         display,
         life_span,
         context_menu,
+        find,
     });
 
     (
@@ -1103,6 +1202,7 @@ pub(crate) fn build_client(
         popups,
         hover_url,
         context_menus,
+        find_results,
     )
 }
 

@@ -25,10 +25,10 @@ use cef::{
 use crate::bridge;
 use crate::error::{CefError, Result};
 use crate::ffi::{
-    self, ContextMenuQueue, FrameSlot, HoverUrlSlot, NavState, PopupTabQueue, TitleSlot, UrlSlot,
-    ViewSize,
+    self, ContextMenuQueue, FindResultSlot, FrameSlot, HoverUrlSlot, NavState, PopupTabQueue,
+    TitleSlot, UrlSlot, ViewSize,
 };
-pub use crate::ffi::{ContextMenuKind, ContextMenuRequest, PopupTabRequest};
+pub use crate::ffi::{ContextMenuKind, ContextMenuRequest, FindResult, PopupTabRequest};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
@@ -136,6 +136,10 @@ pub struct Page {
     /// Context-menu requests from `ContextMenuHandler::on_before_context_menu` (P5).
     /// The shell drains these each tick and renders a Mote-styled popover.
     context_menus: ContextMenuQueue,
+    /// Find-result notifications from `FindHandlerImpl::on_find_result` (P5, C4).
+    /// The shell takes the latest result each tick and pushes a `find_count`
+    /// applyOp to the chrome omnibox so the "N / M" counter updates.
+    find_results: FindResultSlot,
     /// Set to `true` once [`Page::close`] has been called so that the [`Drop`]
     /// impl does not issue a second `close_browser` to an already-closing host.
     closed: AtomicBool,
@@ -221,8 +225,18 @@ impl Page {
         profile: Option<&ProfileHandle>,
     ) -> Result<Self> {
         let size = ViewSize::new(options.width.cast_signed(), options.height.cast_signed());
-        let (client, frame, nav, title, url_slot, size, popups, hover_url, context_menus) =
-            ffi::build_client(size, interceptor, options.role);
+        let (
+            client,
+            frame,
+            nav,
+            title,
+            url_slot,
+            size,
+            popups,
+            hover_url,
+            context_menus,
+            find_results,
+        ) = ffi::build_client(size, interceptor, options.role);
         // Chrome pages are transparent so the composited page shows through;
         // content pages are opaque.
         let transparent = options.role == PageRole::Chrome;
@@ -239,6 +253,7 @@ impl Page {
             popups,
             hover_url,
             context_menus,
+            find_results,
             closed: AtomicBool::new(false),
         })
     }
@@ -311,6 +326,18 @@ impl Page {
     #[must_use]
     pub fn hover_url(&self) -> Option<String> {
         self.hover_url.get()
+    }
+
+    /// Take the latest find-result notification delivered by CEF's
+    /// `OnFindResult` callback (P5, C4). Returns `Some(FindResult)` when a new
+    /// final-update count arrived since the last call; `None` otherwise.
+    ///
+    /// The shell calls this each tick via `sync_find_result` and pushes a
+    /// `find_count` applyOp to the chrome omnibox so the "N / M" counter
+    /// updates.
+    #[must_use]
+    pub fn take_find_result(&self) -> Option<FindResult> {
+        self.find_results.take()
     }
 
     /// Navigate this page to `url`.
@@ -490,8 +517,8 @@ impl Page {
     /// starts a new session; `find_next = true` advances to the next match.
     ///
     /// CEF highlights all matches automatically. Match count is reported via
-    /// `CefFindHandler::OnFindResult` (not yet wired in v0.1); the status-line
-    /// `mote.findcount` element receives it when the callback is added.
+    /// `CefFindHandler::OnFindResult` (wired in P5 C4); the status-line
+    /// `mote.findcount` element and the omnibox counter receive it.
     pub fn find(&self, text: &str, forward: bool, match_case: bool, find_next: bool) {
         if let Some(host) = self.browser.host() {
             host.find(
@@ -670,8 +697,18 @@ impl ChromePageRequest {
         // Build the standard content-client handlers (render/load/request), then
         // wrap them in the chrome client that forwards process messages to the
         // browser-side router.
-        let (inner, frame, nav, title, url_slot, size, popups, hover_url, context_menus) =
-            ffi::build_client(size, Arc::new(AllowAll), PageRole::Chrome);
+        let (
+            inner,
+            frame,
+            nav,
+            title,
+            url_slot,
+            size,
+            popups,
+            hover_url,
+            context_menus,
+            find_results,
+        ) = ffi::build_client(size, Arc::new(AllowAll), PageRole::Chrome);
         let client = bridge::chrome_client(inner, router);
         // The chrome browser is always transparent (the page composites through
         // its `<main>` region).
@@ -693,6 +730,7 @@ impl ChromePageRequest {
             popups,
             hover_url,
             context_menus,
+            find_results,
             closed: AtomicBool::new(false),
         }))
     }
