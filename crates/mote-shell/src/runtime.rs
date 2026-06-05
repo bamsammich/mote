@@ -3321,23 +3321,27 @@ return M
     // -----------------------------------------------------------------------
 
     /// `workspace_id_for_slug` returns the stable numeric ids for the built-in
-    /// workspace slugs and `None` for unknown slugs.
+    /// workspace slugs and `None` for unknown slugs.  The slug list is the
+    /// plugin's ordered list; the 0-based position is the `WorkspaceId`.
     #[test]
     fn workspace_id_for_slug_maps_builtin_slugs() {
         use mote_types::WorkspaceId;
 
+        // The plugin's canonical ordering: ["default", "work"].
+        let slugs: Vec<String> = vec!["default".to_owned(), "work".to_owned()];
+
         assert_eq!(
-            crate::workspace_id_for_slug("default"),
+            crate::workspace_id_for_slug("default", &slugs),
             Some(WorkspaceId::new(0)),
-            "\"default\" must map to WorkspaceId(0) — the existing WORKSPACE const"
+            "\"default\" must map to WorkspaceId(0) — first in plugin list"
         );
         assert_eq!(
-            crate::workspace_id_for_slug("work"),
+            crate::workspace_id_for_slug("work", &slugs),
             Some(WorkspaceId::new(1)),
-            "\"work\" must map to WorkspaceId(1)"
+            "\"work\" must map to WorkspaceId(1) — second in plugin list"
         );
         assert!(
-            crate::workspace_id_for_slug("does-not-exist").is_none(),
+            crate::workspace_id_for_slug("does-not-exist", &slugs).is_none(),
             "unknown slug must return None"
         );
     }

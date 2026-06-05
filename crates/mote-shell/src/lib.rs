@@ -2201,7 +2201,10 @@ impl ShellApp {
             return;
         }
         // Map the string id to the numeric WorkspaceId the session uses.
-        let Some(new_ws) = workspace_id_for_slug(id) else {
+        // The plugin's ordered list is the single source of truth: the 0-based
+        // position in that list is the stable WorkspaceId.
+        let slugs = workspace_slugs_from_host(&self.host).unwrap_or_default();
+        let Some(new_ws) = workspace_id_for_slug(id, &slugs) else {
             eprintln!("mote-shell: switch_workspace({id}): unrecognised slug, ignoring");
             return;
         };
@@ -5038,20 +5041,24 @@ fn json_bool_field(json: &str, field: &str) -> Option<bool> {
 /// Map the `workspace:provider` plugin's string workspace id to the numeric
 /// [`WorkspaceId`] the `mote-session` layer uses.
 ///
-/// The built-in workspace set is fixed for v0.1 (`"default"` and `"work"`);
-/// this mapping is stable across restarts because `Session::flush` persists the
-/// numeric id. The mapping is authoritative here (the shell owns the mechanism)
-/// and must agree with the plugin's `BUILTIN_WORKSPACES` ordering.
+/// The slug is resolved to `WorkspaceId::new(index)` where `index` is the
+/// slug's 0-based position in `slugs` — the plugin's canonical ordered list
+/// (returned by `workspace:provider → list_workspaces`).  This makes the
+/// plugin the single source of truth: adding a third workspace to the plugin
+/// automatically resolves here without any shell change.
+///
+/// Backward-compatible: the plugin's default ordering is `["default", "work"]`
+/// so `"default" → WorkspaceId(0)` and `"work" → WorkspaceId(1)` are
+/// preserved exactly.
 ///
 /// Returns `None` for an unrecognised slug (defensive; the plugin validates
 /// ids before calling the shell, so `None` should not be reached in normal
 /// operation).
-pub(crate) fn workspace_id_for_slug(slug: &str) -> Option<WorkspaceId> {
-    match slug {
-        "default" => Some(WorkspaceId::new(0)),
-        "work" => Some(WorkspaceId::new(1)),
-        _ => None,
-    }
+pub(crate) fn workspace_id_for_slug(slug: &str, slugs: &[String]) -> Option<WorkspaceId> {
+    slugs
+        .iter()
+        .position(|s| s == slug)
+        .map(|i| WorkspaceId::new(i as u64))
 }
 
 /// Query `workspace:provider → list_workspaces` and return the ordered list of
@@ -7771,6 +7778,56 @@ mod tests {
             registry.op_names().contains(&"omnibox_submit"),
             "omnibox_submit must be registered; got: {:?}",
             registry.op_names()
+        );
+    }
+
+    // ── F1/F10: workspace_id_for_slug index-based resolution ─────────────────
+    //
+    // `workspace_id_for_slug` must resolve a slug to `WorkspaceId::new(index)`
+    // where `index` is the slug's 0-based position in the plugin's ordered list.
+    // The old hardcoded match is replaced with an index lookup so any workspace
+    // beyond "default" and "work" resolves correctly.
+
+    /// `workspace_id_for_slug` resolves slugs by their 0-based index in the
+    /// ordered slug list: "default" → 0, "work" → 1, "research" → 2, unknown → None.
+    /// The backward-compatible invariant (default=0, work=1) is preserved.
+    #[test]
+    fn f1_workspace_id_for_slug_resolves_by_ordered_index() {
+        let slugs: Vec<String> = vec![
+            "default".to_owned(),
+            "work".to_owned(),
+            "research".to_owned(),
+        ];
+
+        assert_eq!(
+            workspace_id_for_slug("default", &slugs),
+            Some(WorkspaceId::new(0)),
+            "\"default\" must map to WorkspaceId(0) — first in list"
+        );
+        assert_eq!(
+            workspace_id_for_slug("work", &slugs),
+            Some(WorkspaceId::new(1)),
+            "\"work\" must map to WorkspaceId(1) — second in list"
+        );
+        assert_eq!(
+            workspace_id_for_slug("research", &slugs),
+            Some(WorkspaceId::new(2)),
+            "\"research\" must map to WorkspaceId(2) — third in list (3rd workspace)"
+        );
+        assert_eq!(
+            workspace_id_for_slug("unknown", &slugs),
+            None,
+            "unrecognised slug must return None"
+        );
+    }
+
+    /// `workspace_id_for_slug` with an empty list returns None for any slug.
+    #[test]
+    fn f1_workspace_id_for_slug_empty_list_returns_none() {
+        assert_eq!(
+            workspace_id_for_slug("default", &[]),
+            None,
+            "empty slug list must return None for any slug"
         );
     }
 
