@@ -2,7 +2,7 @@
 
 This directory contains Architectural Decision Records (ADRs) for the Mote project, written in [MADR](https://adr.github.io/madr/) format.
 
-ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0017 are **Accepted** (approved by the maintainer 2026-06-02).
+ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0017 are **Accepted** (approved by the maintainer 2026-06-02). ADR-0018 is **Accepted** (approved by the maintainer 2026-06-05).
 
 ## Index
 
@@ -25,6 +25,7 @@ ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 
 | [0015](0015-mote-newtab-slot-architecture.md) | `mote://newtab` Slot Architecture + `mote://` Global-Request-Context Constraint | Accepted |
 | [0016](0016-status-line-plugin-api.md) | Status-Line Plugin API: Declarative Registration, Read-Only v1, Clickable v2 Planned | Accepted |
 | [0017](0017-settings-panel-layout-and-write-target.md) | Settings Panel: Multi-Section Layout, Deep-Link Contract, `managed.lua` Write Target, URL-Install Deferral | Accepted |
+| [0018](0018-omnibox-url-vs-search-determination.md) | Omnibox URL-vs-Search Determination: Public-Suffix-Based, HTTPS-Default with Loopback Exception | Accepted |
 
 ## Numbering convention
 
