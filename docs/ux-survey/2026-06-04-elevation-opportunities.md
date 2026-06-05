@@ -45,6 +45,8 @@ Shell features for the browser already shipped (Phase 2/5). The enabling infrast
 
 **Status (2026-06-04): all 14 landed on `main`** — `64b3b22` find · `144743f` context-menu · `c0b7197` omnibox · `71faecb` workspace · `49715d9` audit. 1067 workspace tests green (incl. new black-box tests per defect); clean chrome boot + **E1** (newtab omnibox blanking) live-verified via screenshot; the remaining items are unit-verified (GUI input injection is unavailable on this host, and the bundled plugins didn't unpack in the throwaway scratch profile). Bucket A remains intentionally untouched.
 
+**I1 follow-up (2026-06-05):** the omnibox search resolver was subsequently refined from "any dot → navigate, always https" to a researched, public-suffix-based heuristic matching Chrome/Firefox (navigate known-TLD hosts + IPs + localhost; search dotless/unknown-suffix words like `node.js`; https-default with a loopback→http exception). Recorded in **ADR-0018** (`b15d6ce`) and implemented in `28881c2` (adds the `psl` crate).
+
 - [x] **✓ C2 — find-in-page never searches.** `find_in_page` op does `let _ = text;` (`mote-shell/src/lib.rs:1437`); CEF's `Page::find` is never called with the query. Find mode is cosmetic.
 - [x] **✓ C3 — Enter in find does nothing.** `find_next`/`find_prev` ops aren't registered; only the shell-side Ctrl+G keybind works.
 - [x] **C4 — match count never populates.** `OnFindResult` is unwired, so the styled "N / M" counter is always blank.
