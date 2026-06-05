@@ -28,7 +28,7 @@ use crate::ffi::{
     self, ContextMenuQueue, FindResultSlot, FrameSlot, HoverUrlSlot, NavState, PopupTabQueue,
     TitleSlot, UrlSlot, ViewSize,
 };
-pub use crate::ffi::{ContextMenuKind, ContextMenuRequest, FindResult, PopupTabRequest};
+pub use crate::ffi::{ContextMenuKind, ContextMenuRequest, FindResult, PopupTabRequest, edit_flag};
 use crate::input::{self, ButtonAction, KeyInput, Modifiers, MouseButton, MousePosition};
 use crate::interceptor::{AllowAll, ResourceInterceptor};
 use crate::paint::PaintFrame;
@@ -537,6 +537,40 @@ impl Page {
     pub fn stop_finding(&self, clear_selection: bool) {
         if let Some(host) = self.browser.host() {
             host.stop_finding(i32::from(clear_selection));
+        }
+    }
+
+    /// Execute an edit command in this page's main frame.
+    ///
+    /// Used by the editable-field context menu (D1): the user picks `"cut"`,
+    /// `"copy"`, `"paste"`, `"select_all"`, `"undo"`, or `"redo"` from the
+    /// popover; `mote-shell` dispatches to this method to drive the frame
+    /// operation via CEF's `Frame::cut()`/`copy()`/`paste()`/`select_all()`/
+    /// `undo()`/`redo()`. The frame must be in focus (the content page has
+    /// focus when the context menu was invoked) for clipboard operations to
+    /// reach the correct widget.
+    ///
+    /// # Safety (mote-cef FFI carve-out, DISCIPLINES.md §1)
+    /// `Frame::cut()`/`copy()`/`paste()`/`select_all()`/`undo()`/`redo()` are
+    /// CEF frame dispatch calls. They reach a renderer-process widget via IPC
+    /// and do not dereference raw pointers on the browser-process side; the
+    /// `unsafe` attribute on the wrapper is the cef-rs macro scaffold. This is
+    /// contained to `mote-cef` as required by the CEF isolation discipline.
+    ///
+    /// No-op for unrecognised command strings (forward-compat safety) or when
+    /// there is no main frame.
+    pub fn edit_frame_command(&self, command: &str) {
+        let Some(frame) = self.browser.main_frame() else {
+            return;
+        };
+        match command {
+            "cut" => frame.cut(),
+            "copy" => frame.copy(),
+            "paste" => frame.paste(),
+            "select_all" => frame.select_all(),
+            "undo" => frame.undo(),
+            "redo" => frame.redo(),
+            _ => {} // unknown command — no-op (forward-compat)
         }
     }
 

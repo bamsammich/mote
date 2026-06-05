@@ -2003,6 +2003,14 @@
         : (payload && typeof payload.selected_text === "string") ? payload.selected_text : "";
       var canGoBack = !!(payload && (payload.canGoBack || payload.can_go_back));
       var canGoForward = !!(payload && (payload.canGoForward || payload.can_go_forward));
+      // Editable-field flags (D1). editFlags is a bitmask matching edit_flag::* constants.
+      var editFlags = (payload && typeof payload.editFlags === "number") ? payload.editFlags : 0;
+      var EF_UNDO       = 1;
+      var EF_REDO       = 2;
+      var EF_CUT        = 4;
+      var EF_COPY       = 8;
+      var EF_PASTE      = 16;
+      var EF_SELECT_ALL = 64;
       var rows = [];
 
       if (kind === "link") {
@@ -2072,6 +2080,29 @@
           label: "reload",
           action: ctxAction("reload"),
         });
+      } else if (kind === "editable") {
+        // editable-field context (textarea, input, contenteditable).
+        // Items are shown only when the corresponding CAN_* flag is set.
+        // Actions route through context_menu_action to the shell's
+        // Page::edit_frame_command → CEF Frame::cut()/copy()/paste()/… (D1).
+        if (editFlags & EF_UNDO) {
+          rows.push({ label: "undo", action: ctxAction("undo") });
+        }
+        if (editFlags & EF_REDO) {
+          rows.push({ label: "redo", action: ctxAction("redo") });
+        }
+        if (editFlags & EF_CUT) {
+          rows.push({ label: "cut", action: ctxAction("cut") });
+        }
+        if (editFlags & EF_COPY) {
+          rows.push({ label: "copy", action: ctxAction("copy") });
+        }
+        if (editFlags & EF_PASTE) {
+          rows.push({ label: "paste", action: ctxAction("paste") });
+        }
+        if (editFlags & EF_SELECT_ALL) {
+          rows.push({ label: "select all", action: ctxAction("select_all") });
+        }
       } else {
         // "page" context (no specific element target).
         if (canGoBack) {

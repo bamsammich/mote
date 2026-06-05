@@ -67,6 +67,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(test)]
+use mote_cef::edit_flag;
 use mote_cef::{
     ButtonAction, ChromePageRequest, ChromeResources, ContextMenuKind, ContextMenuRequest, Engine,
     EngineConfig, HostBridge, IdentityId, KeyAction, KeyInput, Modifiers, MouseButton,
@@ -4117,6 +4119,11 @@ impl ShellApp {
 
     /// Drain context-menu requests from every live tab and push `show_context_menu`
     /// to the chrome for each one, so `host.js` can render the Mote-styled popover.
+    ///
+    /// D10 fix: `can_go_back`/`can_go_forward` are hardcoded `false` by the CEF
+    /// callback (it has no access to the nav state at that point). We patch them
+    /// from the active page's live nav state here, before forwarding to chrome,
+    /// so the "go back"/"go forward" items appear only when navigation is possible.
     fn drain_context_menus(&self) {
         let requests: Vec<ContextMenuRequest> = self
             .tabs
@@ -4124,7 +4131,18 @@ impl ShellApp {
             .filter_map(|t| t.page.as_ref())
             .flat_map(Page::drain_context_menu_requests)
             .collect();
-        for req in requests {
+        if requests.is_empty() {
+            return;
+        }
+        let (can_go_back, can_go_forward) = self
+            .active_page()
+            .map_or((false, false), |p| (p.can_go_back(), p.can_go_forward()));
+        for mut req in requests {
+            // Patch nav state for page-kind menus (back/forward items).
+            // Editable and other kinds don't show nav items, but we patch
+            // unconditionally to keep the serialization consistent.
+            req.can_go_back = can_go_back;
+            req.can_go_forward = can_go_forward;
             self.push_context_menu_to_chrome(&req);
         }
     }
@@ -4134,32 +4152,7 @@ impl ShellApp {
         if !self.chrome_ready {
             return;
         }
-        let kind = match req.kind {
-            ContextMenuKind::Link => "link",
-            ContextMenuKind::Image => "image",
-            ContextMenuKind::SelectedText => "selection",
-            ContextMenuKind::Page => "page",
-        };
-        // All dynamic values come from the CEF callback (page-derived) —
-        // route through js_string / serde_json to prevent injection.
-        let target_url = req
-            .target_url
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), js_string);
-        let selected_text = req
-            .selected_text
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), js_string);
-        let can_go_back = req.can_go_back;
-        let can_go_forward = req.can_go_forward;
-        let x = req.x;
-        let y = req.y;
-        let payload = format!(
-            "{{\"kind\":{kind:?},\"targetUrl\":{target_url},\
-             \"selectedText\":{selected_text},\
-             \"x\":{x},\"y\":{y},\
-             \"canGoBack\":{can_go_back},\"canGoForward\":{can_go_forward}}}"
-        );
+        let payload = context_menu_payload(req);
         self.bridge.page().eval_js(&format!(
             "window.mote&&window.mote.applyOp&&\
              window.mote.applyOp('show_context_menu',{payload});"
@@ -4171,7 +4164,8 @@ impl ShellApp {
     /// Actions are one of the fixed strings the chrome knows about:
     /// `"new_tab"`, `"copy_link"`, `"copy_link_as_markdown"`, `"reload"`,
     /// `"go_back"`, `"go_forward"`, `"view_source"`, `"copy_selection"`,
-    /// `"search_google"`. Any unrecognised action is silently ignored (forward
+    /// `"search_google"`, `"cut"`, `"copy"`, `"paste"`, `"select_all"`,
+    /// `"undo"`, `"redo"`. Any unrecognised action is silently ignored (forward
     /// compatibility: a newer chrome version may send actions an old shell
     /// doesn't know about).
     fn handle_context_menu_action(&self, action: &str) {
@@ -4189,6 +4183,12 @@ impl ShellApp {
             "go_forward" => {
                 if let Some(page) = self.active_page() {
                     page.go_forward();
+                }
+            }
+            // D1: editable-field edit commands — dispatch via CEF frame API.
+            "cut" | "copy" | "paste" | "select_all" | "undo" | "redo" => {
+                if let Some(page) = self.active_page() {
+                    page.edit_frame_command(action);
                 }
             }
             _ => {
@@ -4761,6 +4761,42 @@ pub(crate) fn omnibox_mode_from_text(text: &str) -> &'static str {
 /// output or trusted compile-time constants — never a raw page-derived string.
 /// Adding a new `eval_js` call site without routing its dynamic args through
 /// `js_string` is a chrome-context injection bug.
+/// Serialize a [`ContextMenuRequest`] into the JSON payload string sent to
+/// `show_context_menu` in `host.js`.
+///
+/// Extracted as a free function so the serialization logic is unit-testable
+/// without a live chrome bridge (D1/D10 closest-seam tests).
+fn context_menu_payload(req: &ContextMenuRequest) -> String {
+    let kind = match req.kind {
+        ContextMenuKind::Link => "link",
+        ContextMenuKind::Image => "image",
+        ContextMenuKind::SelectedText => "selection",
+        ContextMenuKind::Editable => "editable",
+        ContextMenuKind::Page => "page",
+    };
+    let target_url = req
+        .target_url
+        .as_deref()
+        .map_or_else(|| "null".to_owned(), js_string);
+    let selected_text = req
+        .selected_text
+        .as_deref()
+        .map_or_else(|| "null".to_owned(), js_string);
+    let can_go_back = req.can_go_back;
+    let can_go_forward = req.can_go_forward;
+    let is_editable = req.is_editable;
+    let edit_flags = req.edit_flags;
+    let x = req.x;
+    let y = req.y;
+    format!(
+        "{{\"kind\":{kind:?},\"targetUrl\":{target_url},\
+         \"selectedText\":{selected_text},\
+         \"x\":{x},\"y\":{y},\
+         \"canGoBack\":{can_go_back},\"canGoForward\":{can_go_forward},\
+         \"isEditable\":{is_editable},\"editFlags\":{edit_flags}}}"
+    )
+}
+
 fn js_string(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() + 2);
@@ -7228,5 +7264,158 @@ mod tests {
             ShellCommand::FindPrev => {}
             other => panic!("expected FindPrev; got {other:?}"),
         }
+    }
+
+    // ── D1: editable-field context menu serialization ─────────────────────────
+
+    /// `context_menu_payload` for an editable request includes `"isEditable":true`
+    /// and `"editFlags"` with the supplied bitmask.
+    #[test]
+    fn d1_context_menu_payload_editable_sets_is_editable_and_edit_flags() {
+        let req = ContextMenuRequest {
+            kind: ContextMenuKind::Editable,
+            target_url: None,
+            selected_text: None,
+            x: 50,
+            y: 100,
+            can_go_back: false,
+            can_go_forward: false,
+            is_editable: true,
+            edit_flags: edit_flag::CAN_COPY | edit_flag::CAN_PASTE | edit_flag::CAN_SELECT_ALL,
+        };
+        let payload = context_menu_payload(&req);
+        assert!(
+            payload.contains("\"isEditable\":true"),
+            "payload must contain isEditable:true; got: {payload}"
+        );
+        let expected_flags = edit_flag::CAN_COPY | edit_flag::CAN_PASTE | edit_flag::CAN_SELECT_ALL;
+        assert!(
+            payload.contains(&format!("\"editFlags\":{expected_flags}")),
+            "payload must contain editFlags:{expected_flags}; got: {payload}"
+        );
+        assert!(
+            payload.contains("\"kind\":\"editable\""),
+            "payload kind must be \"editable\"; got: {payload}"
+        );
+    }
+
+    /// `context_menu_payload` for a page request has `"isEditable":false` and
+    /// `"editFlags":0`.
+    #[test]
+    fn d1_context_menu_payload_page_kind_has_false_editable() {
+        let req = ContextMenuRequest {
+            kind: ContextMenuKind::Page,
+            target_url: None,
+            selected_text: None,
+            x: 0,
+            y: 0,
+            can_go_back: false,
+            can_go_forward: false,
+            is_editable: false,
+            edit_flags: 0,
+        };
+        let payload = context_menu_payload(&req);
+        assert!(
+            payload.contains("\"isEditable\":false"),
+            "non-editable payload must have isEditable:false; got: {payload}"
+        );
+        assert!(
+            payload.contains("\"editFlags\":0"),
+            "non-editable payload must have editFlags:0; got: {payload}"
+        );
+    }
+
+    // ── D10: nav-state patch in context menu payload ──────────────────────────
+
+    /// `context_menu_payload` serializes `can_go_back = true` as
+    /// `"canGoBack":true`. This is the shell-patched value; verifying the
+    /// serialized form ensures that when the shell writes `req.can_go_back =
+    /// true` the chrome receives a truthy payload.
+    #[test]
+    fn d10_context_menu_payload_can_go_back_true() {
+        let req = ContextMenuRequest {
+            kind: ContextMenuKind::Page,
+            target_url: None,
+            selected_text: None,
+            x: 0,
+            y: 0,
+            can_go_back: true,
+            can_go_forward: false,
+            is_editable: false,
+            edit_flags: 0,
+        };
+        let payload = context_menu_payload(&req);
+        assert!(
+            payload.contains("\"canGoBack\":true"),
+            "patched can_go_back=true must appear in payload; got: {payload}"
+        );
+        assert!(
+            payload.contains("\"canGoForward\":false"),
+            "unpatched can_go_forward=false must appear in payload; got: {payload}"
+        );
+    }
+
+    /// `context_menu_payload` with both nav flags patched to `true` serializes
+    /// both as `true`. Verifies the full D10 patch path at the serialization seam.
+    #[test]
+    fn d10_context_menu_payload_both_nav_flags_patched() {
+        let req = ContextMenuRequest {
+            kind: ContextMenuKind::Page,
+            target_url: None,
+            selected_text: None,
+            x: 0,
+            y: 0,
+            can_go_back: true,
+            can_go_forward: true,
+            is_editable: false,
+            edit_flags: 0,
+        };
+        let payload = context_menu_payload(&req);
+        assert!(
+            payload.contains("\"canGoBack\":true"),
+            "patched can_go_back=true must appear in payload; got: {payload}"
+        );
+        assert!(
+            payload.contains("\"canGoForward\":true"),
+            "patched can_go_forward=true must appear in payload; got: {payload}"
+        );
+    }
+
+    /// A freshly constructed (un-patched) `ContextMenuRequest` has both nav
+    /// flags as `false` — confirming the CEF-side default before the shell patch.
+    #[test]
+    fn d10_context_menu_payload_default_nav_flags_are_false() {
+        let req = ContextMenuRequest {
+            kind: ContextMenuKind::Page,
+            target_url: None,
+            selected_text: None,
+            x: 0,
+            y: 0,
+            can_go_back: false,
+            can_go_forward: false,
+            is_editable: false,
+            edit_flags: 0,
+        };
+        let payload = context_menu_payload(&req);
+        assert!(
+            payload.contains("\"canGoBack\":false"),
+            "default can_go_back must be false in payload; got: {payload}"
+        );
+        assert!(
+            payload.contains("\"canGoForward\":false"),
+            "default can_go_forward must be false in payload; got: {payload}"
+        );
+    }
+
+    /// `context_menu_action` op is registered in `build_op_registry` (covers D1
+    /// edit-command dispatch path through the same op).
+    #[test]
+    fn d1_context_menu_action_op_is_registered() {
+        let commands: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&commands);
+        assert!(
+            registry.op_names().contains(&"context_menu_action"),
+            "context_menu_action must be registered for D1 edit commands"
+        );
     }
 }

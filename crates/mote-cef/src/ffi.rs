@@ -789,8 +789,29 @@ pub enum ContextMenuKind {
     Image,
     /// Right-click with text selected. `selected_text` carries the selection.
     SelectedText,
+    /// Right-click inside an editable field (`<textarea>`, `<input>`, rich
+    /// editor, etc.). `edit_flags` carries the [`CAN_*` bit masks](super::ffi)
+    /// for cut/copy/paste/select-all/undo/redo.
+    Editable,
     /// Plain page background — no link, no image, no selection.
     Page,
+}
+
+/// Bit-flag constants for [`ContextMenuRequest::edit_flags`], matching CEF's
+/// `cef_context_menu_edit_state_flags_t`.
+pub mod edit_flag {
+    /// Undo is available.
+    pub const CAN_UNDO: u32 = 1;
+    /// Redo is available.
+    pub const CAN_REDO: u32 = 2;
+    /// Cut is available (selection present + field writable).
+    pub const CAN_CUT: u32 = 4;
+    /// Copy is available (selection present).
+    pub const CAN_COPY: u32 = 8;
+    /// Paste is available (clipboard has text + field writable).
+    pub const CAN_PASTE: u32 = 16;
+    /// Select-all is available.
+    pub const CAN_SELECT_ALL: u32 = 64;
 }
 
 /// A context menu request intercepted from CEF's `on_before_context_menu`.
@@ -810,9 +831,24 @@ pub struct ContextMenuRequest {
     /// Window-local Y coordinate of the right-click point.
     pub y: i32,
     /// Whether the active tab can navigate back (for page context "back" item).
+    ///
+    /// Always `false` from the CEF callback; the shell patches this from the
+    /// active page's live nav state in `drain_context_menus` before forwarding
+    /// to `push_context_menu_to_chrome`.
     pub can_go_back: bool,
     /// Whether the active tab can navigate forward.
+    ///
+    /// Always `false` from the CEF callback; patched by the shell (same as
+    /// `can_go_back`).
     pub can_go_forward: bool,
+    /// Whether the right-click target is an editable field (`<textarea>`,
+    /// `<input>`, contenteditable, etc.). Sourced from
+    /// `ContextMenuParams::is_editable()`.
+    pub is_editable: bool,
+    /// Edit-command availability flags for an editable-field context menu.
+    /// Non-zero only when `is_editable` is `true`. Bit masks are defined in
+    /// [`edit_flag`].
+    pub edit_flags: u32,
 }
 
 /// Thread-safe queue of [`ContextMenuRequest`]s. Written by
@@ -888,10 +924,32 @@ wrap_context_menu_handler! {
 
                 let is_link      = (flags_raw & 4)  != 0;
                 let is_selection = (flags_raw & 16) != 0;
+                let is_editable  = (flags_raw & 32) != 0;
                 let is_image = media_type == ContextMenuMediaType::IMAGE;
 
-                // Priority: link > image > selected text > page.
-                let kind = if is_link {
+                // Extract the edit-command availability flags when the target is
+                // an editable field. The raw inner value of
+                // `cef_context_menu_edit_state_flags_t` maps directly to our
+                // `edit_flag::CAN_*` constants.
+                //
+                // Safety: `params` is a valid CEF object alive for the duration
+                // of this callback; `edit_state_flags()` reads a field on that
+                // object — no allocation, no threading hazard.
+                let edit_flags: u32 = if is_editable {
+                    use cef::sys::cef_context_menu_edit_state_flags_t;
+                    let raw: cef_context_menu_edit_state_flags_t =
+                        params.edit_state_flags().into();
+                    raw.0
+                } else {
+                    0
+                };
+
+                // Priority: editable > link > image > selected text > page.
+                // An editable field is the most specific context; it supersedes
+                // link/selection because the user intends to edit, not follow.
+                let kind = if is_editable {
+                    ContextMenuKind::Editable
+                } else if is_link {
                     ContextMenuKind::Link
                 } else if is_image {
                     ContextMenuKind::Image
@@ -934,8 +992,10 @@ wrap_context_menu_handler! {
                     selected_text,
                     x,
                     y,
-                    can_go_back: false,   // filled by shell after drain
-                    can_go_forward: false,
+                    can_go_back: false,   // patched from live nav state by the shell
+                    can_go_forward: false, // patched from live nav state by the shell
+                    is_editable,
+                    edit_flags,
                 });
             });
         }
@@ -1622,5 +1682,141 @@ mod tests {
             Some("https://example.com/result"),
             "successive writes must leave only the latest URL"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // D1: ContextMenuRequest — editable-field fields (is_editable, edit_flags).
+    // -----------------------------------------------------------------------
+
+    /// A `ContextMenuRequest` constructed with `is_editable = true` and
+    /// edit-flag bits set round-trips faithfully through the queue (D1 seam).
+    #[test]
+    fn context_menu_request_editable_fields_round_trip() {
+        use super::ContextMenuKind;
+        use super::ContextMenuQueue;
+        use super::ContextMenuRequest;
+        use super::edit_flag;
+
+        let q = ContextMenuQueue::new();
+        q.push(ContextMenuRequest {
+            kind: ContextMenuKind::Editable,
+            target_url: None,
+            selected_text: None,
+            x: 10,
+            y: 20,
+            can_go_back: false,
+            can_go_forward: false,
+            is_editable: true,
+            edit_flags: edit_flag::CAN_CUT
+                | edit_flag::CAN_COPY
+                | edit_flag::CAN_PASTE
+                | edit_flag::CAN_SELECT_ALL,
+        });
+        let mut drained = q.drain();
+        assert_eq!(drained.len(), 1, "exactly one request must be in the queue");
+        let req = drained.pop().unwrap();
+        assert!(
+            req.is_editable,
+            "is_editable must survive the queue round-trip"
+        );
+        assert_eq!(req.kind, ContextMenuKind::Editable);
+        assert_ne!(
+            req.edit_flags & edit_flag::CAN_CUT,
+            0,
+            "CAN_CUT must be set"
+        );
+        assert_ne!(
+            req.edit_flags & edit_flag::CAN_COPY,
+            0,
+            "CAN_COPY must be set"
+        );
+        assert_ne!(
+            req.edit_flags & edit_flag::CAN_PASTE,
+            0,
+            "CAN_PASTE must be set"
+        );
+        assert_ne!(
+            req.edit_flags & edit_flag::CAN_SELECT_ALL,
+            0,
+            "CAN_SELECT_ALL must be set"
+        );
+        assert_eq!(
+            req.edit_flags & edit_flag::CAN_UNDO,
+            0,
+            "CAN_UNDO not set in this request"
+        );
+        assert_eq!(
+            req.edit_flags & edit_flag::CAN_REDO,
+            0,
+            "CAN_REDO not set in this request"
+        );
+    }
+
+    /// A non-editable `Page`-kind request has `is_editable = false` and
+    /// `edit_flags = 0`, even if those were set by mistake.
+    #[test]
+    fn context_menu_request_page_kind_has_no_edit_flags() {
+        use super::ContextMenuKind;
+        use super::ContextMenuQueue;
+        use super::ContextMenuRequest;
+
+        let q = ContextMenuQueue::new();
+        q.push(ContextMenuRequest {
+            kind: ContextMenuKind::Page,
+            target_url: None,
+            selected_text: None,
+            x: 5,
+            y: 5,
+            can_go_back: false,
+            can_go_forward: false,
+            is_editable: false,
+            edit_flags: 0,
+        });
+        let req = q.drain().into_iter().next().unwrap();
+        assert!(!req.is_editable);
+        assert_eq!(req.edit_flags, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // D10: ContextMenuRequest — can_go_back / can_go_forward patch seam.
+    // -----------------------------------------------------------------------
+
+    /// After construction the nav fields default to `false` (CEF hardcodes them
+    /// at callback time). The shell patches them before forwarding — verify the
+    /// fields are mutable and hold the patched values.
+    #[test]
+    fn context_menu_request_nav_fields_are_mutable() {
+        use super::ContextMenuKind;
+        use super::ContextMenuRequest;
+
+        let mut req = ContextMenuRequest {
+            kind: ContextMenuKind::Page,
+            target_url: None,
+            selected_text: None,
+            x: 0,
+            y: 0,
+            can_go_back: false,
+            can_go_forward: false,
+            is_editable: false,
+            edit_flags: 0,
+        };
+        // Simulate what the shell does when patching from live nav state.
+        req.can_go_back = true;
+        req.can_go_forward = true;
+        assert!(req.can_go_back, "patched can_go_back must be true");
+        assert!(req.can_go_forward, "patched can_go_forward must be true");
+    }
+
+    /// `edit_flag` constants match the CEF `cef_context_menu_edit_state_flags_t`
+    /// bit values (undo=1, redo=2, cut=4, copy=8, paste=16, select-all=64).
+    #[test]
+    fn edit_flag_constants_match_cef_values() {
+        use super::edit_flag;
+        assert_eq!(edit_flag::CAN_UNDO, 1);
+        assert_eq!(edit_flag::CAN_REDO, 2);
+        assert_eq!(edit_flag::CAN_CUT, 4);
+        assert_eq!(edit_flag::CAN_COPY, 8);
+        assert_eq!(edit_flag::CAN_PASTE, 16);
+        assert_eq!(edit_flag::CAN_SELECT_ALL, 64);
     }
 }
