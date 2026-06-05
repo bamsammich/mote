@@ -60,6 +60,10 @@ arboard = "3"
 # Structured logging facade. Crates emit via log::info!/warn!/error!; the
 # application (mote-app / shell) installs the subscriber.
 log = "0.4"
+# Compile-time-embedded Mozilla Public Suffix List for omnibox URL-vs-search
+# determination (ADR-0018). `psl::suffix(host).is_known()` distinguishes a
+# real ICANN/private suffix from the implicit wildcard catch-all.
+psl = "2.1"
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.

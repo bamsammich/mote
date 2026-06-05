@@ -4904,40 +4904,179 @@ fn url_percent_encode(s: &str) -> String {
 
 /// Resolve raw omnibox text to a navigable URL.
 ///
-/// Decision tree (applied in order):
-/// 1. **Has scheme** — any text matching `<scheme>://` (generic URI) or the
-///    schemeless special forms `data:`, `mote:`, `about:` — returned unchanged.
-/// 2. **Looks like a bare host / URL** — contains a dot with no whitespace
-///    before it, OR is exactly `localhost`, OR matches `localhost:<port>` or
-///    `<host>:<port>` (dot in host, colon, digits) — `https://` is prepended.
-/// 3. **Everything else** — treated as a search query; `{q}` in
-///    `url_template` is replaced with the percent-encoded text.
+/// Implements ADR-0018 (first match wins):
 ///
-/// Empty text returns an empty string (the caller must guard against this).
+/// 1. **Explicit scheme** — `<scheme>://…` or the schemeless special forms
+///    `data:`, `mote:`, `about:` — returned as-is.
+/// 2. **Search (Firefox whitespace rule)** — leading `?`, or whitespace/quote
+///    before the first `.`/`:`/`?` — treat as a search query.
+/// 3. **Host-shaped → navigate** — IPv4, IPv6 (bracketed `[…]` or bare `::1`),
+///    `localhost`/`*.localhost`, or a dotted host whose public suffix is known
+///    (ICANN or private, via the PSL crate).  Dotless words and dotted hosts
+///    with an unknown suffix (`node.js`, `foo.internal`) → search.
+/// 4. **Scheme for schemeless navigations** — `https://` by default; loopback
+///    (`localhost`, `127.x.x.x`, `[::1]` / `::1`) → `http://`.
+/// 5. **Search** — `{q}` in `url_template` replaced with the RFC-3986
+///    percent-encoded query.  A template lacking `{q}` falls back to the
+///    built-in default.
 ///
-/// This is a pure function with no side effects, intentionally separated from
-/// shell state so it is unit-testable.
+/// Empty text returns an empty string.
 pub(crate) fn resolve_omnibox_input(text: &str, url_template: &str) -> String {
     let t = text.trim();
     if t.is_empty() {
         return String::new();
     }
 
-    // 1. Already has a scheme.
+    // Rule 1: already has a scheme.
     if has_scheme(t) {
         return t.to_owned();
     }
 
-    // 2. Looks like a navigable URL without a scheme.
-    if looks_like_url(t) {
-        return format!("https://{t}");
+    // Rule 2: Firefox whitespace/quote rule — leading `?` or whitespace/quote
+    // before the first delimiter → search immediately.
+    if is_search_by_whitespace_rule(t) {
+        return make_search(t, url_template);
     }
 
-    // 3. Treat as a search query.
-    let encoded = url_percent_encode(t);
-    // The template uses {q} as the placeholder.  Build it without a format
-    // macro so the `{q}` in the template is not mistaken for a format spec.
-    url_template.replace("\x7bq\x7d", &encoded)
+    // Rules 3 & 4: determine host + optional port, classify, prepend scheme.
+    //
+    // Strip path/query/fragment first so that authority-only classifiers
+    // (PSL suffix lookup, IP parse, localhost match) operate on just the
+    // host[:port] portion.  The full `t` (path/query/fragment included) is
+    // still used when building the navigation URL.
+    let authority = t.find(['/', '?', '#']).map_or(t, |i| &t[..i]);
+    let (host, _port_suffix) = split_host_port(authority);
+    if is_navigable_host(host) {
+        let scheme = if is_loopback(host) { "http" } else { "https" };
+        return format!("{scheme}://{t}");
+    }
+
+    // Rule 5: search fallback.
+    make_search(t, url_template)
+}
+
+/// Return the search URL for `query` using `url_template`, falling back to the
+/// built-in default if the template does not contain the `{q}` placeholder.
+fn make_search(query: &str, url_template: &str) -> String {
+    let encoded = url_percent_encode(query);
+    let placeholder = "\x7bq\x7d"; // literal {q}
+    let effective = if url_template.contains(placeholder) {
+        url_template
+    } else {
+        default_search_url_template()
+    };
+    effective.replace(placeholder, &encoded)
+}
+
+/// Return `(host, port_suffix)` by stripping a trailing `:<digits>` port.
+///
+/// IPv6 brackets are respected: `[::1]:8080` → `("[::1]", ":8080")`.
+/// A bare `::1` has colons that are NOT a port — it returns `("::1", "")`.
+fn split_host_port(t: &str) -> (&str, &str) {
+    // IPv6 in brackets: `[…]:port` or just `[…]`.
+    if t.starts_with('[')
+        && let Some(close) = t.find(']')
+    {
+        let after = &t[close + 1..];
+        if let Some(port_str) = after.strip_prefix(':')
+            && !port_str.is_empty()
+            && port_str.bytes().all(|b| b.is_ascii_digit())
+        {
+            return (&t[..=close], after);
+        }
+        return (&t[..=close], after);
+    }
+
+    // A bare IPv6 address like `::1` or `2001:db8::1` has multiple colons that
+    // are part of the address, not a port separator.  Only attempt port
+    // stripping when the string contains exactly one colon (e.g. `host:8080`
+    // or `127.0.0.1:8080`).
+    if t.bytes().filter(|&b| b == b':').count() == 1
+        && let Some(colon_pos) = t.rfind(':')
+    {
+        let port_str = &t[colon_pos + 1..];
+        if !port_str.is_empty() && port_str.bytes().all(|b| b.is_ascii_digit()) {
+            return (&t[..colon_pos], &t[colon_pos..]);
+        }
+    }
+
+    (t, "")
+}
+
+/// Return `true` if `t` should be treated as a search query due to the Firefox
+/// whitespace/quote rule: the string starts with `?`, or contains a space or
+/// quote (`"` / `'`) before the first `.`, `:`, or `?`.
+fn is_search_by_whitespace_rule(t: &str) -> bool {
+    // Leading `?` → search.
+    if t.starts_with('?') {
+        return true;
+    }
+
+    // Space anywhere in the string → search (covers "no whitespace in URLs").
+    if t.bytes().any(|b| b.is_ascii_whitespace()) {
+        return true;
+    }
+
+    // Quote before the first delimiter.
+    let first_delim = t.bytes().position(|b| b == b'.' || b == b':' || b == b'?');
+    let first_quote = t.bytes().position(|b| b == b'"' || b == b'\'');
+    matches!((first_quote, first_delim), (Some(q), Some(d)) if q < d)
+}
+
+/// Return `true` if `host` is a navigable target (IP, loopback, or a dotted
+/// name whose public suffix is known).
+fn is_navigable_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    use std::str::FromStr as _;
+
+    let lower = host.to_ascii_lowercase();
+
+    // localhost or *.localhost
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+
+    // Bracketed IPv6: strip brackets before parsing.
+    let addr_str = if host.starts_with('[') && host.ends_with(']') {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    };
+
+    // IPv4 or IPv6 literal (covers 127.x.x.x, ::1, etc.)
+    if IpAddr::from_str(addr_str).is_ok() {
+        return true;
+    }
+
+    // Dotted hostname with a known public suffix (ICANN or private).
+    // A dotless word, or a dotted host with an unknown suffix, returns false.
+    if host.contains('.')
+        && let Some(suffix) = psl::suffix(host.as_bytes())
+    {
+        return suffix.is_known();
+    }
+
+    false
+}
+
+/// Return `true` if `host` is a loopback address (navigations use `http://`).
+fn is_loopback(host: &str) -> bool {
+    use std::net::IpAddr;
+    use std::str::FromStr as _;
+
+    let lower = host.to_ascii_lowercase();
+
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+
+    let addr_str = if host.starts_with('[') && host.ends_with(']') {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    };
+
+    IpAddr::from_str(addr_str).is_ok_and(|addr| addr.is_loopback())
 }
 
 /// Return `true` if `t` already carries a URI scheme.
@@ -4967,50 +5106,6 @@ fn has_scheme(t: &str) -> bool {
         }
     }
     false
-}
-
-/// Return `true` if `t` looks like a URL/host that should get `https://` prepended.
-///
-/// Criteria (any one suffices):
-/// - `localhost` (exact, case-insensitive)
-/// - `localhost:<digits>` (localhost with port)
-/// - Contains a dot with no ASCII whitespace anywhere in the string and no
-///   spaces before the dot (i.e. `foo.bar` but not `foo bar.baz` which is
-///   clearly a sentence)
-/// - Matches `<host>:<port>` where host contains a dot and port is all digits
-fn looks_like_url(t: &str) -> bool {
-    // No whitespace allowed in a bare URL.
-    if t.chars().any(|c| c.is_ascii_whitespace()) {
-        return false;
-    }
-
-    let lower = t.to_ascii_lowercase();
-
-    // localhost or localhost:<port>
-    if lower == "localhost" {
-        return true;
-    }
-    if let Some(rest) = lower.strip_prefix("localhost:")
-        && !rest.is_empty()
-        && rest.bytes().all(|b| b.is_ascii_digit())
-    {
-        return true;
-    }
-
-    // host:port where host contains a dot
-    if let Some(colon_pos) = t.rfind(':') {
-        let host_part = &t[..colon_pos];
-        let port_part = &t[colon_pos + 1..];
-        if host_part.contains('.')
-            && !port_part.is_empty()
-            && port_part.bytes().all(|b| b.is_ascii_digit())
-        {
-            return true;
-        }
-    }
-
-    // Has a dot — treat as domain name.
-    t.contains('.')
 }
 
 /// Extract a top-level string field `"field": "value"` from a JSON object.
@@ -7706,25 +7801,25 @@ mod tests {
         );
     }
 
-    /// `localhost` resolves to `https://localhost`.
+    /// `localhost` resolves to `http://localhost` (loopback → http, ADR-0018 rule 4).
     #[test]
-    fn i1_localhost_resolves_to_https() {
+    fn i1_localhost_resolves_to_http() {
         let tmpl = default_search_url_template();
         let result = resolve_omnibox_input("localhost", tmpl);
         assert_eq!(
-            result, "https://localhost",
-            "localhost must resolve to https://localhost; got {result:?}"
+            result, "http://localhost",
+            "localhost must resolve to http://localhost (loopback uses http); got {result:?}"
         );
     }
 
-    /// `localhost:3000` resolves to a localhost URL, not a search.
+    /// `localhost:3000` resolves to `http://localhost:3000` (loopback → http, ADR-0018 rule 4).
     #[test]
-    fn i1_localhost_with_port_resolves_to_url() {
+    fn i1_localhost_with_port_resolves_to_http_url() {
         let tmpl = default_search_url_template();
         let result = resolve_omnibox_input("localhost:3000", tmpl);
         assert_eq!(
-            result, "https://localhost:3000",
-            "localhost:port must resolve to a URL; got {result:?}"
+            result, "http://localhost:3000",
+            "localhost:port must resolve to http://localhost:port; got {result:?}"
         );
     }
 
@@ -7752,6 +7847,151 @@ mod tests {
         );
     }
 
+    // ── ADR-0018 worked-examples matrix ──────────────────────────────────────
+    //
+    // These tests encode the exact worked-examples from ADR-0018 §Decision
+    // Outcome. They fail before the PSL-based resolver is in place and must
+    // pass after (fail-first per the project's always-test rule).
+
+    /// `node.js` has an unknown public suffix and must search (ADR-0018 rule 3).
+    #[test]
+    fn i1_adr0018_node_js_is_search() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("node.js", tmpl);
+        assert!(
+            result.starts_with("https://duckduckgo.com/"),
+            "node.js has unknown suffix and must resolve to search; got {result:?}"
+        );
+        assert!(
+            result.contains("node"),
+            "search URL must contain the query; got {result:?}"
+        );
+    }
+
+    /// `foo.internal` has an unknown public suffix and must search (ADR-0018 rule 3).
+    #[test]
+    fn i1_adr0018_foo_internal_is_search() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("foo.internal", tmpl);
+        assert!(
+            result.starts_with("https://duckduckgo.com/"),
+            "foo.internal has unknown suffix and must resolve to search; got {result:?}"
+        );
+    }
+
+    /// `weather` (dotless word) must search (ADR-0018 rule 3).
+    #[test]
+    fn i1_adr0018_dotless_word_is_search() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("weather", tmpl);
+        assert!(
+            result.starts_with("https://duckduckgo.com/"),
+            "dotless word must resolve to search; got {result:?}"
+        );
+    }
+
+    /// `what is 2.5` — space before the dot — must search (ADR-0018 rule 2).
+    #[test]
+    fn i1_adr0018_space_before_dot_is_search() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("what is 2.5", tmpl);
+        assert!(
+            result.starts_with("https://duckduckgo.com/"),
+            "space before dot must resolve to search; got {result:?}"
+        );
+    }
+
+    /// `google.com` (known ICANN suffix) must navigate to `https://google.com` (ADR-0018 rule 3/4).
+    #[test]
+    fn i1_adr0018_google_com_navigates() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("google.com", tmpl);
+        assert_eq!(
+            result, "https://google.com",
+            "google.com must navigate to https://google.com; got {result:?}"
+        );
+    }
+
+    /// `wikipedia.org` (known ICANN suffix) must navigate to `https://wikipedia.org` (ADR-0018 rule 3/4).
+    #[test]
+    fn i1_adr0018_wikipedia_org_navigates() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("wikipedia.org", tmpl);
+        assert_eq!(
+            result, "https://wikipedia.org",
+            "wikipedia.org must navigate to https://wikipedia.org; got {result:?}"
+        );
+    }
+
+    /// `127.0.0.1:8080` (loopback IPv4 with port) must navigate to `http://127.0.0.1:8080` (ADR-0018 rule 3/4).
+    #[test]
+    fn i1_adr0018_ipv4_loopback_with_port_is_http() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("127.0.0.1:8080", tmpl);
+        assert_eq!(
+            result, "http://127.0.0.1:8080",
+            "127.0.0.1:8080 must navigate to http://127.0.0.1:8080; got {result:?}"
+        );
+    }
+
+    /// `https://x.test/p` with explicit scheme passes through unchanged (ADR-0018 rule 1).
+    #[test]
+    fn i1_adr0018_explicit_https_passes_through() {
+        let tmpl = default_search_url_template();
+        let url = "https://x.test/p";
+        let result = resolve_omnibox_input(url, tmpl);
+        assert_eq!(
+            result, url,
+            "explicit https:// must pass through unchanged; got {result:?}"
+        );
+    }
+
+    /// `mote://chrome/settings` with explicit scheme passes through unchanged (ADR-0018 rule 1).
+    #[test]
+    fn i1_adr0018_mote_scheme_passes_through() {
+        let tmpl = default_search_url_template();
+        let url = "mote://chrome/settings";
+        let result = resolve_omnibox_input(url, tmpl);
+        assert_eq!(
+            result, url,
+            "mote:// must pass through unchanged; got {result:?}"
+        );
+    }
+
+    /// `foo.github.io` (known private suffix) must navigate to `https://foo.github.io` (ADR-0018 rule 3/4).
+    #[test]
+    fn i1_adr0018_known_private_suffix_navigates() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("foo.github.io", tmpl);
+        assert_eq!(
+            result, "https://foo.github.io",
+            "foo.github.io has a known private suffix and must navigate; got {result:?}"
+        );
+    }
+
+    /// Bare `::1` (IPv6 loopback without brackets) must navigate to `http://::1` (ADR-0018 rule 3/4).
+    #[test]
+    fn i1_adr0018_bare_ipv6_loopback_navigates_http() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("::1", tmpl);
+        assert_eq!(
+            result, "http://::1",
+            "bare ::1 must navigate to http://::1 (IPv6 loopback); got {result:?}"
+        );
+    }
+
+    /// Template without `{q}` falls back to the built-in default (ADR-0018 rule 5).
+    #[test]
+    fn i1_adr0018_invalid_template_falls_back_to_default() {
+        let bad_tmpl = "https://search.example.com/";
+        let result = resolve_omnibox_input("hello world", bad_tmpl);
+        let default_result = resolve_omnibox_input("hello world", default_search_url_template());
+        assert_eq!(
+            result, default_result,
+            "template without {{q}} must fall back to default; got {result:?}"
+        );
+    }
+
     /// A custom search engine template is used when provided.
     #[test]
     fn i1_custom_template_is_used() {
@@ -7766,6 +8006,61 @@ mod tests {
         assert!(
             result.contains("hello"),
             "search URL must contain query; got {result:?}"
+        );
+    }
+
+    /// Schemeless input with a path navigates to `https://<host>/<path>`.
+    #[test]
+    fn i1_schemeless_with_path_navigates() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("github.com/rust-lang/rust", tmpl);
+        assert_eq!(
+            result, "https://github.com/rust-lang/rust",
+            "schemeless URL with path must navigate; got {result:?}"
+        );
+    }
+
+    /// Schemeless input with path and query string navigates.
+    #[test]
+    fn i1_schemeless_with_path_and_query_navigates() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("example.org/a?b=c", tmpl);
+        assert_eq!(
+            result, "https://example.org/a?b=c",
+            "schemeless URL with path+query must navigate; got {result:?}"
+        );
+    }
+
+    /// Schemeless input with fragment navigates.
+    #[test]
+    fn i1_schemeless_with_fragment_navigates() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("example.com#frag", tmpl);
+        assert_eq!(
+            result, "https://example.com#frag",
+            "schemeless URL with fragment must navigate; got {result:?}"
+        );
+    }
+
+    /// `localhost:3000/app` (loopback with port and path) navigates to `http://`.
+    #[test]
+    fn i1_localhost_with_port_and_path_navigates_http() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("localhost:3000/app", tmpl);
+        assert_eq!(
+            result, "http://localhost:3000/app",
+            "localhost:port/path must navigate to http://; got {result:?}"
+        );
+    }
+
+    /// Non-loopback host with port and path navigates to `https://`.
+    #[test]
+    fn i1_host_with_port_and_path_navigates_https() {
+        let tmpl = default_search_url_template();
+        let result = resolve_omnibox_input("example.com:8443/x", tmpl);
+        assert_eq!(
+            result, "https://example.com:8443/x",
+            "host:port/path must navigate to https://; got {result:?}"
         );
     }
 
