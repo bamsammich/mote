@@ -709,9 +709,12 @@ impl PluginHost {
 
         let query = self.audit.query();
 
-        // Network/activity summary: collapse recent events into per-plugin counts.
+        // Network/activity summary: collapse recent Allow events into per-plugin
+        // counts.  Only allowed calls are counted here; denials remain in the
+        // `denials` section below.  Asserting Allowed over a mixed total would
+        // be a false claim on a transparency surface.
         let mut counts: Vec<(String, usize)> = query
-            .counts_per_plugin()
+            .allowed_counts_per_plugin()
             .into_iter()
             .map(|(p, c)| (p.as_str().to_owned(), c))
             .collect();

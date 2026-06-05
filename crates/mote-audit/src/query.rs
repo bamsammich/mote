@@ -117,6 +117,31 @@ impl QueryHandle {
         map
     }
 
+    /// Returns the number of [`Decision::Allow`] events per plugin across the
+    /// current ring buffer contents.
+    ///
+    /// Only events with `decision == Allow` are counted; denials are excluded.
+    /// Plugins whose every event was denied will not appear in the returned map.
+    ///
+    /// Note: counts reflect only what is in the ring buffer right now.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal ring buffer mutex is poisoned.
+    #[must_use]
+    pub fn allowed_counts_per_plugin(&self) -> HashMap<PluginName, usize> {
+        let events = self
+            .ring
+            .lock()
+            .expect("ring buffer mutex poisoned")
+            .recent(usize::MAX);
+        let mut map = HashMap::new();
+        for ev in events.into_iter().filter(|e| e.decision == Decision::Allow) {
+            *map.entry(ev.plugin).or_insert(0) += 1;
+        }
+        map
+    }
+
     /// Reads **all** durably flushed events from the `mote-storage` namespace
     /// in sequence order.
     ///
@@ -247,5 +272,26 @@ mod tests {
             .collect();
         let (q, _) = make_query(20, events);
         assert_eq!(q.recent(3).len(), 3);
+    }
+
+    #[test]
+    fn allowed_counts_per_plugin_counts_only_allowed() {
+        let (q, _) = make_query(
+            20,
+            vec![
+                ev("adblock", "op", Decision::Allow),
+                ev("adblock", "op", Decision::Allow),
+                ev("adblock", "op", Decision::Deny),
+                ev("vim-mode", "op", Decision::Deny),
+                ev("history", "op", Decision::Allow),
+            ],
+        );
+        let counts = q.allowed_counts_per_plugin();
+        // adblock: 2 allowed (1 denial excluded)
+        assert_eq!(counts[&plugin("adblock")], 2);
+        // history: 1 allowed
+        assert_eq!(counts[&plugin("history")], 1);
+        // vim-mode: only denials — must be absent from the map
+        assert!(!counts.contains_key(&plugin("vim-mode")));
     }
 }
