@@ -127,7 +127,10 @@ The block cursor:
 ## Behavior
 
 - **Tab** moves focus to the next chrome element (browser nav).
-- **Esc** blurs the omnibox without committing.
+- **Esc** blurs the omnibox without committing. When a completion suggestion is
+  highlighted, Esc is **two-stage**: the first Esc clears the highlight (the
+  typed text stays, the field keeps focus), the second Esc blurs. This matches
+  mainstream browsers (Esc reverts the highlighted suggestion, then defocuses).
 - **Enter** commits the action for the current mode.
 - **Backspace at the start of an empty field** does not change mode — the user must press `Esc` and re-enter.
 - **Typing `:`, `?`, `/` as the first char** switches mode and consumes the character.

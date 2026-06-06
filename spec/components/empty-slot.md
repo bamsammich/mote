@@ -86,6 +86,14 @@ This motif appears **only** for empty slots. Do not use the dot-grid texture as:
 
 Restricting it gives it semantic weight: when a user sees dots, they know there's a slot they could fill.
 
+**One sanctioned exception: the `mote://newtab` page background.** Per ADR-0015
+the new-tab page carries the dot-grid as a calm full-bleed page background (on
+`<html>`, ~12% opacity). This is the empty-tab canvas itself, not content
+sitting on top — so it does not violate the "behind bound content" rule. The
+newtab's declared slot (`newtab.center`) must NOT *also* apply `slot-empty`
+(that doubled the grid — CL-SPECDRIFT E12); the page background is the single
+source of the motif there.
+
 ## Programmatic API
 
 In production code, the empty-slot renderer is the runtime's responsibility, not a component to instantiate manually. The runtime walks the active theme's layout, finds any slot with no elements placed in it, and inserts an empty-slot element with the slot's name.

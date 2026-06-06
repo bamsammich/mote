@@ -119,6 +119,11 @@ The active theme decides segment order by placing `status-indicator` elements in
 ## Anti-patterns
 
 - ❌ Status line taller than 22px.
-- ❌ Icons in segments. Use text — this is the mono surface.
+- ❌ Emoji or multi-color icons in segments. A segment **may** carry a single
+  leading **Lucide stroke icon** at the 14px status-line size (per
+  `06_iconography.md` — e.g. `lock`/`circle-check`/`circle-x`); the surface is
+  mono, so the icon is single-color (`currentColor`) and text still carries the
+  meaning. (Reconciles a former "no icons" rule that contradicted
+  `06_iconography.md` and the shipped `mote.security` segment — CL-SPECDRIFT B2.)
 - ❌ Animated segment swaps. State changes are instant.
 - ❌ Toasts above the status line for messages that belong in it.

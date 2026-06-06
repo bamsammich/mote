@@ -98,11 +98,14 @@
       <span class="newtab-hint">press ⌘L to navigate</span>
       <!--
         newtab.center slot — declared-but-unbound in v0.1. Themes and plugins
-        bind it via theme:bind_slot("newtab.center", element). The slot-empty
-        CSS class applies the canonical empty-slot dot-grid treatment when no
-        element is bound.
+        bind it via theme:bind_slot("newtab.center", element).
+        E12 (CL-SPECDRIFT): the newtab page already carries the full-bleed
+        dot-grid background (on <html>, per ADR-0015). Do NOT add `slot-empty`
+        here too — that doubled the dot-grid and put the empty-slot motif behind
+        bound newtab content (empty-slot.md: the dot grid is only for empty
+        slots). When a theme/plugin binds this slot, it provides its own content.
       -->
-      <div data-slot="newtab.center" class="slot-empty newtab-slot"></div>
+      <div data-slot="newtab.center" class="newtab-slot"></div>
     </div>
   </body>
 </html>

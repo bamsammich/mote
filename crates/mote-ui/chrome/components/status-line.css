@@ -1,5 +1,5 @@
 /*
- * status-line.css — 24px persistent mono strip in bottom-bar (ADR-0016).
+ * status-line.css — 22px persistent mono strip in bottom-bar (ADR-0016).
  *
  * Three-zone layout: left / center / right. Each zone holds `data-sl-el`
  * segments populated by the `set_statusline_elements` applyOp from the shell.
@@ -11,7 +11,7 @@
 .sl {
   display: flex;
   align-items: stretch;
-  height: var(--chrome-statusline); /* 24px */
+  height: var(--chrome-statusline); /* 22px */
   background: var(--surface-1);
   border-top: 1px solid var(--border);
   font: var(--text-mono-sm);
