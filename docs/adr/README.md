@@ -2,7 +2,7 @@
 
 This directory contains Architectural Decision Records (ADRs) for the Mote project, written in [MADR](https://adr.github.io/madr/) format.
 
-ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0017 are **Accepted** (approved by the maintainer 2026-06-02). ADR-0018 is **Accepted** (approved by the maintainer 2026-06-05). ADR-0019 is **Accepted** (approved by the maintainer 2026-06-06).
+ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0017 are **Accepted** (approved by the maintainer 2026-06-02). ADR-0018 is **Accepted** (approved by the maintainer 2026-06-05). ADR-0019 is **Accepted** (approved by the maintainer 2026-06-06). ADR-0012's chord table was **amended 2026-06-06** (CL-KEYMAP: `Ctrl+1–9` → tabs, workspaces → `Ctrl+Alt+1–9`, per ADR-0019's Firefox/Chrome-defaults principle).
 
 ## Index
 

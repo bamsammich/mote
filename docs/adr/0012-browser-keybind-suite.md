@@ -59,19 +59,29 @@ are recorded here.**
 
 ### Chord table (v0.1)
 
+> **Amended 2026-06-06 (CL-KEYMAP, per ADR-0019's "core ships Firefox/Chrome
+> defaults" principle):** `Ctrl+1`–`9` was reassigned from *workspaces* to
+> *tabs* — every mainstream browser maps `Ctrl+1`–`9` to tab-by-index, so the
+> familiar default must do that. Workspace-by-index moved to `Ctrl+Alt+1`–`9`.
+> Added `Ctrl+K` (omnibox-focus alias) and `Ctrl+Shift+Tab` (reverse cycle).
+> These are core defaults; a keybind plugin overrides them (ADR-0019).
+
 | Chord | Action | Scope |
 |---|---|---|
 | `Ctrl+T` | New tab in current workspace, become active | Global |
 | `Ctrl+W` | Close active tab; if only one tab remains, close the window | Global |
 | `Ctrl+Shift+W` | Close window (regardless of tab count) | Global |
 | `Ctrl+Q` | Quit Mote | Global |
-| `Ctrl+L` | Focus the omnibox; select existing text | Global |
+| `Ctrl+L` / `Ctrl+K` | Focus the omnibox; select existing text | Global |
 | `Ctrl+R` | Reload the active tab | Global |
 | `Ctrl+[` | Back (active tab's history) | Global |
 | `Ctrl+]` | Forward (active tab's history) | Global |
-| `Ctrl+1`..`Ctrl+8` | Switch to workspace by index (1–8) | Global |
-| `Ctrl+9` | Switch to the **last** workspace (not the 9th — Chrome convention) | Global |
+| `Ctrl+1`..`Ctrl+8` | Select tab by index (1–8) in the active workspace | Global |
+| `Ctrl+9` | Select the **last** tab (not the 9th — Chrome convention) | Global |
+| `Ctrl+Alt+1`..`Ctrl+Alt+8` | Switch to workspace by index (1–8) | Global |
+| `Ctrl+Alt+9` | Switch to the **last** workspace | Global |
 | `Ctrl+Tab` | Cycle to next tab in current workspace | Global |
+| `Ctrl+Shift+Tab` | Cycle to previous tab in current workspace | Global |
 | `Ctrl+Shift+I` | Toggle integrity panel | Global |
 | `Mod+Space` | Open workspace tab picker | Global |
 | `Esc` | Close the topmost modal panel (integrity, approval, picker, palette) | Captured-modal |
