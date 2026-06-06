@@ -27,6 +27,7 @@ icon listed below must appear as a `<symbol>` in that file.
 | `collapse.sidebar` | `panel-left-close` | `icon-panel-left-close` | Collapse sidebar button (rail bottom) |
 | `statusline.security_https` | `lock` | `icon-lock` | Status line: https indicator (P4) |
 | `statusline.security_http` | `triangle-alert` | `icon-triangle-alert` | Status line: insecure indicator (P4) |
+| `omnibox.search` | `search` | `icon-search` | Omnibox completion: explicit "search ‹engine›" row (CL-SEARCH I2) |
 
 ## Notes
 

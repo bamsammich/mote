@@ -156,6 +156,58 @@
     return cell;
   }
 
+  // CL-SEARCH I2: build the content of the explicit "search ‹engine› for
+  // ‹query›" row into a target row element. Tokenized scaffolding: the
+  // `search … for` framing is dim (.search-scaffold → --fg-2), the engine name
+  // and the quoted query carry --fg via .search-engine / .search-query. Built
+  // with makeSpan (textContent) only — never innerHTML on the engine name or
+  // payload query (ADR-0005). A lucide stroke icon leads the row.
+  //
+  // A lucide stroke magnifier (#icon-search) leads the row.
+  function fillSearchRow(row, query) {
+    row.textContent = "";
+
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "icon search-icon");
+    svg.setAttribute("aria-hidden", "true");
+    var use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttributeNS(
+      "http://www.w3.org/1999/xlink",
+      "xlink:href",
+      "assets/lucide-sprite.svg#icon-search"
+    );
+    use.setAttribute("href", "assets/lucide-sprite.svg#icon-search");
+    svg.appendChild(use);
+    row.appendChild(svg);
+
+    var label = document.createElement("span");
+    label.className = "search-label";
+    label.appendChild(makeSpan("search-scaffold", "search "));
+    label.appendChild(makeSpan("search-engine", _searchEngineName));
+    label.appendChild(makeSpan("search-scaffold", " for "));
+    label.appendChild(makeSpan("search-query", '"' + query + '"'));
+    row.appendChild(label);
+
+    row.setAttribute(
+      "aria-label",
+      "search " + _searchEngineName + " for " + query
+    );
+  }
+
+  // CL-SEARCH I2: re-render the open dropdown's search row label in place (used
+  // when the engine name changes while completions are showing). No-op when no
+  // search row is present. Reads the row's cached data-query so the typed text
+  // is preserved across the relabel.
+  function updateSearchRowLabel() {
+    var dropdown = getCompletions();
+    if (!dropdown) return;
+    var searchRow = dropdown.querySelector(
+      '.omni-completion-row[data-action="search"]'
+    );
+    if (!searchRow) return;
+    fillSearchRow(searchRow, searchRow.getAttribute("data-query") || "");
+  }
+
   // ---- P2: Shared popover helpers --------------------------------------------
   //
   // Both the omnibox context menu and the security popover use the same
@@ -521,6 +573,12 @@
   // re-render the unfocused emphasis layer without another shell round-trip.
   var _omniUrlState = { url: "", display: null, trackers: null, title: "" };
 
+  // CL-SEARCH I2: the configured search-engine display name, pushed by the shell
+  // via the `set_search_engine_name` op on chrome-ready and on engine change.
+  // Defaults to "DuckDuckGo" until the first push. Read by the urlbar_suggestions
+  // renderer to label the explicit "search ‹engine› for ‹text›" row.
+  var _searchEngineName = "DuckDuckGo";
+
   // Build the rest/path segment, underlining tracking params (A9 nice-to-have)
   // when their names appear in the query string. All segments are built with
   // createElement + textContent — NEVER innerHTML (rest/names are page-derived,
@@ -786,13 +844,26 @@
       if (ev.key === "Enter") {
         var sel = selectedIndex(dropdown);
         if (isOpen && sel >= 0 && rows[sel]) {
-          // Navigate to the selected row's URL; close dropdown + blur.
+          // Activate the selected row; close dropdown + blur (shared mechanics).
           ev.preventDefault();
-          var url = rows[sel].getAttribute("data-url");
+          var selRow = rows[sel];
           closeCompletions(dropdown, input, omni);
           input.blur();
-          if (url && window.mote && window.mote.invoke) {
-            window.mote.invoke("navigate", { url: url }).catch(function () {});
+          // CL-SEARCH I2: the explicit search row force-searches its query with
+          // the configured engine (bypasses URL detection). All other rows carry
+          // a real URL and navigate to it.
+          if (selRow.getAttribute("data-action") === "search") {
+            var query = selRow.getAttribute("data-query");
+            if (window.mote && window.mote.invoke) {
+              window.mote
+                .invoke("search_query", { text: query })
+                .catch(function () {});
+            }
+          } else {
+            var url = selRow.getAttribute("data-url");
+            if (url && window.mote && window.mote.invoke) {
+              window.mote.invoke("navigate", { url: url }).catch(function () {});
+            }
           }
         }
         // No selected row: fall through to form submit (no preventDefault).
@@ -831,8 +902,19 @@
         var row = ev.target.closest(".omni-completion-row");
         if (!row) return;
         ev.preventDefault(); // prevent the input from losing focus early
-        var url = row.getAttribute("data-url");
         closeCompletions(getCompletions(), input, omni);
+        // CL-SEARCH I2: same branch as Enter — the search row force-searches its
+        // query with the configured engine; all other rows navigate to data-url.
+        if (row.getAttribute("data-action") === "search") {
+          var query = row.getAttribute("data-query");
+          if (window.mote && window.mote.invoke) {
+            window.mote
+              .invoke("search_query", { text: query })
+              .catch(function () {});
+          }
+          return;
+        }
+        var url = row.getAttribute("data-url");
         if (url && window.mote && window.mote.invoke) {
           window.mote.invoke("navigate", { url: url }).catch(function () {});
         }
@@ -875,6 +957,25 @@
         row.setAttribute("role", "option");
         row.setAttribute("aria-selected", "false");
         row.setAttribute("id", "omnibox-completion-row-" + idx);
+
+        // CL-SEARCH I2: the shell appends a synthetic search record (always last,
+        // at most one) shaped { action: "search", query: "<typed text>" } with no
+        // url. Render it as the explicit "search ‹engine› for ‹query›" row: a
+        // distinct .omni-search-row that carries data-action/data-query instead of
+        // data-url. Activation (Enter + click) branches on data-action below.
+        if (
+          record &&
+          record.action === "search" &&
+          typeof record.query === "string"
+        ) {
+          row.className = "omni-completion-row omni-search-row";
+          row.setAttribute("data-action", "search");
+          row.setAttribute("data-query", record.query);
+          fillSearchRow(row, record.query);
+          dropdown.appendChild(row);
+          return;
+        }
+
         // Store the URL as a data attribute for keyboard/click handlers to read.
         // Only strings from the runtime payload are stored; no markup is parsed.
         if (record && typeof record.url === "string") {
@@ -1314,6 +1415,17 @@
       case "set_load_state":
         currentLoading = !!(payload && payload.loading);
         applyLoadState(currentLoading);
+        break;
+      // CL-SEARCH I2: cache the configured search-engine display name so the
+      // explicit "search ‹engine› for ‹text›" completion row can label itself.
+      // Re-render the open dropdown's search row in place when one is showing so
+      // the label updates immediately on engine change; otherwise it refreshes on
+      // the next urlbar_suggestions push.
+      case "set_search_engine_name":
+        if (payload && typeof payload.name === "string" && payload.name) {
+          _searchEngineName = payload.name;
+          updateSearchRowLabel();
+        }
         break;
       default:
         // Unknown ops are ignored (forward-compatible).

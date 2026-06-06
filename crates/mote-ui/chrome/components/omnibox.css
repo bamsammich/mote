@@ -282,6 +282,50 @@
   color: var(--fg);
 }
 
+/* ---- CL-SEARCH I2: explicit "search ‹engine› for ‹text›" row ---- */
+/* The synthetic search record renders as a distinct .omni-search-row that IS an
+ * .omni-completion-row — it reuses the row height, padding, cursor, and the
+ * .is-sel roving highlight above. Its own grid is just [icon | label] (the
+ * search row carries no url/title/source cells). The label scaffolds the framing
+ * dim (--fg-2) while the engine name and quoted query carry --fg so the user can
+ * read what they'll search and where at a glance. Tokens only. */
+.omni-search-row {
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2);
+}
+
+.omni-search-row .search-icon {
+  color: var(--fg-2);
+  flex-shrink: 0;
+}
+
+.omni-search-row .search-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.omni-search-row .search-scaffold {
+  color: var(--fg-2);
+}
+
+.omni-search-row .search-engine {
+  color: var(--fg);
+}
+
+.omni-search-row .search-query {
+  color: var(--fg);
+}
+
+/* On roving selection the dim scaffolding lifts to --fg-1 along with the row so
+ * the whole label stays legible against the surface-2 highlight (the .is-sel
+ * background is inherited from .omni-completion-row.is-sel above). */
+.omni-search-row.is-sel .search-icon,
+.omni-search-row.is-sel .search-scaffold {
+  color: var(--fg-1);
+}
+
 /* Bookmark toggle is a STATE INDICATOR (carve-out from the iconography
  * "stroke only" rule — see spec/06_iconography.md): the icon fills with accent
  * when the page is bookmarked so the saved/not-saved state is unmistakable at
