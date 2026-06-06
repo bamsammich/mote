@@ -1007,6 +1007,11 @@ fn build_chrome_resources() -> ChromeResources {
             "text/html; charset=utf-8",
         )
         .register(
+            "roving.js",
+            mote_ui::ROVING_JS,
+            "text/javascript; charset=utf-8",
+        )
+        .register(
             "host.js",
             mote_ui::HOST_JS,
             "text/javascript; charset=utf-8",
@@ -6645,37 +6650,43 @@ mod tests {
         );
     }
 
-    /// Every `assets/*` URL the chrome HTML references must be registered in
-    /// `build_chrome_resources`, otherwise CEF 404s on the request and the
-    /// referenced asset renders as nothing (e.g. lucide-sprite missing → every
-    /// chrome icon disappears, with no console error). This regression test
-    /// scans `CHROME_HTML` for the `assets/<name>` substring pattern and
-    /// asserts each is in the registered resource paths. Closes the P1
-    /// `lucide-sprite.svg`-not-registered bug.
+    /// Every local `src="…"` / `href="…"` URL the chrome HTML references must be
+    /// registered in `build_chrome_resources`, otherwise CEF 404s on the request
+    /// and the referenced asset renders as nothing — with no console error.
+    /// Two regressions this guards: `assets/lucide-sprite.svg` missing → every
+    /// chrome icon disappears (P1 bug); a new `<script src>` like `roving.js`
+    /// missing → `window.mote.roving` is undefined and the omnibox arrow-key
+    /// navigation silently dies (CL-KBNAV). The narrow original scanned only
+    /// `assets/*`, so a bare `.js`/`.css` reference slipped through; this scans
+    /// every `src`/`href` attribute, drops external/scheme/fragment refs, and
+    /// asserts each remaining relative path is in the registered set.
     #[test]
     fn chrome_assets_referenced_in_html_are_registered() {
         use std::collections::HashSet;
 
         let html = mote_ui::CHROME_HTML;
         let mut referenced: HashSet<String> = HashSet::new();
-        // Find every `assets/<path>` substring, terminate at the first
-        // character outside the asset-path charset.
-        let bytes = html.as_bytes();
-        let mut i = 0;
-        let needle = b"assets/";
-        while let Some(start) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-            let abs = i + start;
-            let mut end = abs + needle.len();
-            while end < bytes.len() {
-                let c = bytes[end];
-                if c.is_ascii_alphanumeric() || matches!(c, b'/' | b'.' | b'-' | b'_') {
-                    end += 1;
-                } else {
-                    break;
+        for attr in ["src=\"", "href=\""] {
+            let mut rest = html;
+            while let Some(start) = rest.find(attr) {
+                let after = &rest[start + attr.len()..];
+                let Some(end) = after.find('"') else { break };
+                let raw = &after[..end];
+                rest = &after[end + 1..];
+                // Strip any URL fragment (e.g. `lucide-sprite.svg#icon-x`).
+                let path = raw.split('#').next().unwrap_or(raw);
+                // Only relative paths are served by build_chrome_resources; skip
+                // empty, absolute, and scheme-qualified (http/https/mote/data) refs.
+                if path.is_empty()
+                    || path.starts_with('/')
+                    || path.contains("://")
+                    || path.starts_with("mote:")
+                    || path.starts_with("data:")
+                {
+                    continue;
                 }
+                referenced.insert(path.to_string());
             }
-            referenced.insert(html[abs..end].to_string());
-            i = end;
         }
 
         let res = build_chrome_resources();
@@ -6690,7 +6701,7 @@ mod tests {
             missing.is_empty(),
             "chrome.html references assets that are not registered in build_chrome_resources: {missing:?}\n\
              Registered: {registered:?}\n\
-             Wire each referenced asset (e.g. mote_ui::LUCIDE_SPRITE_SVG) via .register(\"<path>\", BYTES, mime)."
+             Wire each referenced asset (e.g. mote_ui::ROVING_JS) via .register(\"<path>\", BYTES, mime)."
         );
     }
 

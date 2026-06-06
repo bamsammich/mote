@@ -4,6 +4,10 @@
 version = "2.1.8"
 backend = "aqua:evilmartians/lefthook"
 
+[[tools.node]]
+version = "25.2.1"
+backend = "core:node"
+
 [[tools.rust]]
 version = "1.95.0"
 backend = "core:rust"

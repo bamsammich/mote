@@ -1,0 +1,26 @@
+mote-shell: window 1280x800 (scale 1.00) up; chrome + 1 tab(s) live
+R1-DIAG: EVT Resized(1280x800)
+R1-DIAG: handle_resize(1280x800) prev=(1280x800) scale=1
+R1-DIAG: EVT ScaleFactorChanged(1.25)
+R1-DIAG: EVT Resized(1859x2098)
+R1-DIAG: handle_resize(1859x2098) prev=(1280x800) scale=1.25
+R1-DIAG: EVT Focused(true)
+R1-DIAG: on_paint 964x756
+R1-DIAG: on_paint 885x745
+R1-DIAG: on_paint 1859x2098
+mote-shell: loaded plugin `bookmarks` (caps: ["ui:bookmarks_provider"], perms: 5)
+mote-shell: loaded plugin `history` (caps: ["ui:history_provider", "ui:urlbar_provider"], perms: 5)
+mote-shell: loaded plugin `workspace-manager` (caps: ["workspace:provider"], perms: 5)
+mote-shell: plugin runtime up; 3/3 plugins loaded, 0 awaiting approval
+mote-shell: first chrome+content frames painted (537ms after window)
+R1-DIAG: on_paint 1464x2043
+R1-DIAG: on_paint 1859x2098
+R1-DIAG: on_paint 1859x2098
+R1-DIAG: EVT Resized(1859x2098)
+R1-DIAG: handle_resize(1859x2098) prev=(1859x2098) scale=1.25
+R1-DIAG: EVT Focused(false)
+R1-DIAG: EVT Ime(Disabled)
+R1-DIAG: on_paint 1859x2098
+R1-DIAG: on_paint 1464x2043
+[715175:715175:0601/194730.010943:ERROR:services/on_device_model/ml/gpu_blocklist.cc:118] Unable to get gpu adapter
+[715175:715187:0601/194730.012421:ERROR:services/on_device_model/ml/gpu_blocklist.cc:118] Unable to get gpu adapter

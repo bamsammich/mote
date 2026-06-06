@@ -42,6 +42,9 @@
     <link rel="stylesheet" href="components/approval-dialog.css" />
     <link rel="stylesheet" href="components/tooltip.css" />
     <!--
+      roving.js: shared list-navigation helper (CL-KBNAV). Pure nav-math plus a
+      DOM attach factory; no cefQuery dependency. Loaded BEFORE host.js so
+      window.mote.roving exists when host.js attaches the omnibox controller.
       host.js: the privileged chrome↔Rust bootstrap. Wraps window.cefQuery into
       window.mote.invoke (structured ops, never eval) and wires the omnibox to
       the `navigate` op. Deferred so the DOM exists before it binds listeners.
@@ -49,6 +52,7 @@
       permission-approval dialog. Loaded AFTER host.js so its applyOp wrapper
       chains the base ops (set_tabs / set_url) through.
     -->
+    <script src="roving.js" defer></script>
     <script src="host.js" defer></script>
     <script src="panels.js" defer></script>
   </head>

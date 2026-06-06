@@ -60,6 +60,14 @@ pub const BASE_CSS: &str = include_str!("../chrome/base.css");
 /// The chrome document: the `[data-slot]` slot-grid scaffold (default layout).
 pub const CHROME_HTML: &str = include_str!("../chrome/chrome.html");
 
+/// Shared roving-focus helper (CL-KBNAV).
+///
+/// Pure selection nav-math plus a dual-mode (`activedescendant` / `roving`) DOM
+/// attach factory. Loaded BEFORE `host.js` so `window.mote.roving` exists when
+/// the omnibox wires its completion dropdown; reused by the chrome's floating
+/// surfaces.
+pub const ROVING_JS: &str = include_str!("../chrome/roving.js");
+
 /// The privileged chrome bootstrap JS: wraps `window.cefQuery` into the
 /// structured `window.mote.invoke` API and wires the omnibox `navigate` op.
 pub const HOST_JS: &str = include_str!("../chrome/host.js");

@@ -52,30 +52,45 @@
     return document.getElementById("omnibox-completions");
   }
 
-  function selectedIndex(dropdown) {
-    var rows = dropdown ? dropdown.querySelectorAll(".omni-completion-row") : [];
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].classList.contains("is-sel")) return i;
-    }
-    return -1;
+  // The completion dropdown's roving controller (CL-KBNAV). Created once against
+  // the live dropdown + input and reused; it owns the Arrow-key selection math
+  // and reproduces the exact activedescendant DOM effects the omnibox needs
+  // (is-sel marker + aria-selected on rows, aria-activedescendant on the input,
+  // scrollIntoView). getItems() re-reads the rows on every call so a re-rendered
+  // suggestion list stays correct. window.mote.roving is provided by roving.js,
+  // which chrome.html loads BEFORE host.js.
+  var _completionRover = null;
+
+  function completionRover(dropdown, input) {
+    if (_completionRover) return _completionRover;
+    if (!window.mote || !window.mote.roving || !dropdown) return null;
+    _completionRover = window.mote.roving.attach({
+      mode: "activedescendant",
+      container: dropdown,
+      focusEl: input,
+      wrap: true,
+      markerClass: "is-sel",
+      getItems: function () {
+        return dropdown.querySelectorAll(".omni-completion-row");
+      },
+    });
+    return _completionRover;
   }
 
-  // Clear the .is-sel marker and ARIA attributes from all rows, then
-  // optionally select the row at `idx`.
+  // Current selected index (-1 when nothing is selected). Thin wrapper over the
+  // roving controller so there is a single source of truth for selection state.
+  function selectedIndex(dropdown) {
+    var input = document.getElementById("omnibox-input");
+    var rover = completionRover(dropdown, input);
+    return rover ? rover.getIndex() : -1;
+  }
+
+  // Clear the .is-sel marker and ARIA attributes from all rows, then optionally
+  // select the row at `idx`. Thin wrapper over the roving controller's setIndex,
+  // which applies the activedescendant DOM effects (see completionRover).
   function setSelection(dropdown, input, idx) {
-    var rows = dropdown ? dropdown.querySelectorAll(".omni-completion-row") : [];
-    for (var i = 0; i < rows.length; i++) {
-      rows[i].classList.remove("is-sel");
-      rows[i].setAttribute("aria-selected", "false");
-    }
-    if (idx >= 0 && idx < rows.length) {
-      rows[idx].classList.add("is-sel");
-      rows[idx].setAttribute("aria-selected", "true");
-      if (input) input.setAttribute("aria-activedescendant", rows[idx].id);
-      rows[idx].scrollIntoView({ block: "nearest" });
-    } else {
-      if (input) input.removeAttribute("aria-activedescendant");
-    }
+    var rover = completionRover(dropdown, input);
+    if (rover) rover.setIndex(idx);
   }
 
   function closeCompletions(dropdown, input, omni) {
@@ -511,19 +526,18 @@
         }
       }
 
-      if (ev.key === "ArrowDown") {
+      // Arrow keys move the wrapping selection. The roving controller owns the
+      // selection math + the activedescendant DOM (is-sel / aria-selected /
+      // aria-activedescendant / scrollIntoView); we keep the omnibox's guard
+      // (no-op when closed or empty) and own the event (handleKey never calls
+      // preventDefault). Only Arrow keys are delegated in phase 1 — Home/End and
+      // j/k stay native text-caret keys here (CL-KBNAV phase 2 scope).
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
         if (!isOpen || count === 0) return;
-        ev.preventDefault();
-        var curDown = selectedIndex(dropdown);
-        setSelection(dropdown, input, curDown < count - 1 ? curDown + 1 : 0);
-        return;
-      }
-
-      if (ev.key === "ArrowUp") {
-        if (!isOpen || count === 0) return;
-        ev.preventDefault();
-        var curUp = selectedIndex(dropdown);
-        setSelection(dropdown, input, curUp > 0 ? curUp - 1 : count - 1);
+        var rover = completionRover(dropdown, input);
+        if (rover && rover.handleKey(ev)) {
+          ev.preventDefault();
+        }
         return;
       }
 
