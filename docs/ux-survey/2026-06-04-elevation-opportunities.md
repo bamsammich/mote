@@ -109,7 +109,22 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   — content-triggered surfaces got no keys); a pre-existing P1 `.ws-chip`
   selector regression that self-closed the workspace popover; and a
   document-vs-element keydown-listener subtlety for keyboard-opened overlays.
-- ☐ CL-URL-XPARENCY · ☐ CL-MARKDOWN · ☐ CL-SEARCH ·
+- **✓ CL-URL-XPARENCY** — landed (`d3bbcce` shell · `2b75774` chrome),
+  **live-verified** on real Mote. Shell `analyze_url` (psl eTLD+1 + the
+  `clearurls` crate for de-tracking + redirect-unwrapping) pushes a structured
+  `set_url` + a stripped hover-URL; chrome renders the unfocused emphasis
+  display layer (A8), the tracker chip + per-param `--danger` underline +
+  "copy clean url" menu (A9), and the shell renders the hover destination
+  preview (B3). Decisions: reuse shell `psl`; **clearurls (LGPL-3.0)** accepted
+  by the maintainer (recorded in `/THIRD-PARTY-LICENSES.md` +
+  `docs/research/cl-url-xparency-tracking-param-source.md`); surface-don't-strip
+  (copy-clean is opt-in, the address bar is never auto-cleaned). Verified live:
+  `example.com` bright vs dimmed scheme/path when blurred, raw editable URL on
+  focus, "2 trackers" chip + utm/gclid underlined, hover shows the de-tracked
+  destination. (copy-clean's *clipboard content* not independently captured —
+  no clipboard CLI on the box; the row is wired to the proven
+  `navigator.clipboard` path with a unit-verified clean value.)
+- ☐ CL-MARKDOWN · ☐ CL-SEARCH ·
   ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
 
 ## Findings by category
@@ -117,8 +132,8 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 ### Navigation & Omnibox
 
 - **A4 — security dot leaks into find/cmd modes** · defect · P0 · S · The `.secure` dot stays visible in `[find]`/`[cmd]`, implying a connection-trust claim about a search string. Hide `.secure` in non-url modes. ★ (honesty)
-- **A8 — domain-emphasis URL formatting** · enh · P1 · M · Render eTLD+1 in `--fg`, scheme/path/query in `--fg-2` when unfocused; full raw string on focus. The spec's `.host`/`.path` spans exist but are never emitted. Differs from Safari by never *eliding* — emphasis via token color, full URL always present. ★ [CL-URL-XPARENCY]
-- **A9 — surface tracking params + "copy clean url"** · enh · P1 · M · Inline count of tracking params + a context-menu "copy clean url"; never auto-strip the displayed/navigated URL. ★ [CL-URL-XPARENCY]
+- **✓ A8 — domain-emphasis URL formatting** · enh · P1 · M · Render eTLD+1 in `--fg`, scheme/path/query in `--fg-2` when unfocused; full raw string on focus. The spec's `.host`/`.path` spans exist but are never emitted. Differs from Safari by never *eliding* — emphasis via token color, full URL always present. ★ [CL-URL-XPARENCY] — ✓ landed (`2b75774`): unfocused display-layer overlay; live-verified emphasis + raw-on-focus swap.
+- **✓ A9 — surface tracking params + "copy clean url"** · enh · P1 · M · Inline count of tracking params + a context-menu "copy clean url"; never auto-strip the displayed/navigated URL. ★ [CL-URL-XPARENCY] — ✓ landed (`2b75774`): "N trackers" chip + per-param `--danger` underline + copy-clean menu row (opt-in, never auto-strips). Live-verified.
 - **A10/I1/I2 — wire the config search engine; search-vs-navigate; "search with \<engine\>" row** · defect/gap · P0 · M · The single most-felt omnibox gap. Engine from Lua config (not a GUI dropdown). ★ [CL-SEARCH]
 - **A11 — completions: no empty/no-match state, no source grouping, no default action row** · enh · P1 · M · Dropdown vanishes on zero results; add a persistent top "search for 'X'" / "open \<url\>" row and a no-match affordance. Stay in the mono/bracket idiom (dim `[source]` separators, not colored icons).
 - **I6 — inline autocomplete (prefix completion)** · gap · P1 · M · Typing `git` should auto-fill `github.com` with the tail selected; ranking has no prefix-beats-substring notion. Table-stakes speed.
@@ -190,7 +205,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **B1 — mode chip frozen at NORMAL** (P0, above). ★
 - **◐ B7 — no loading indicator** · gap · P1 · M · Spec'd "connection segment → inline progress + `loading 64%`"; `is_loading` exists in CEF, unsurfaced. ★ [CL-LOADING] — ◐ deferred to **1b**: the binary state is wired (1a); a real percentage needs CEF `OnLoadingProgressChange` (no fabricated number).
 - **B4 — zoom indicator is passive + transient** · gap · P1 · S · After 1500ms nothing shows current non-100% zoom; remembered-zoom pages give no confirmation. Add a persistent non-100% indicator + tooltip hint "Ctrl+0 to reset" (click-to-reset is blocked by the v2 click API, B5).
-- **B3 — hover-url not stripped/truncated** · gap · P2 · M · ★ Shows full tracked URL verbatim; show origin+path + a tracking-param count. [CL-URL-XPARENCY]
+- **✓ B3 — hover-url not stripped/truncated** · gap · P2 · M · ★ Shows full tracked URL verbatim; show origin+path + a tracking-param count. [CL-URL-XPARENCY] — ✓ landed (`d3bbcce`): hover shows the `clearurls`-cleaned + redirect-unwrapped destination's full host+path (subdomain kept for anti-phishing), query stripped, tracker count appended. Live-verified.
 - **B5 — status elements can't be clickable** · gap · P1 · L · ★ `action`/`disabled` are reserved-v2 stubs; `statusline.publish-clickable` is empty. Activating this makes the status bar as composable as Neovim lualine.
 - **B11 — no inter-plugin priority contract** · gap · P1 · M · ★ A plugin can collide with `mote.mode` at priority 100; add reserved ranges or named anchor slots (more composable than lualine's fixed sections).
 - **B8 — spec'd `theme` + `resources`(RAM) elements unimplemented** · gap · P2 · M/L · ★ RAM-per-tab in the status bar is shown by no mainstream browser — a "no hidden cost" transparency signal.
