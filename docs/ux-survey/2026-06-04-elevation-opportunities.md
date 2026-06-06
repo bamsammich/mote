@@ -96,7 +96,20 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   (the dev screen was locked at verify time). **B7** ("loading 64%") is
   **deferred to 1b** — a real percentage needs CEF `OnLoadingProgressChange`;
   an indeterminate number would be fabricated, which the through-line forbids.
-- ☐ CL-KBNAV · ☐ CL-URL-XPARENCY · ☐ CL-MARKDOWN · ☐ CL-SEARCH ·
+- **✓ CL-KBNAV** — landed in three phases, all **live-verified** on a real
+  Mote (ydotool-driven, screenshot-confirmed): **p1** (`4c4dc51`) extracted a
+  shared `roving.js` helper (pure nav-math + dual-mode attach factory) and
+  refactored the omnibox completion dropdown onto it with 31 node regression
+  assertions wired into the lefthook gate; **p2a** (`60eca12`) the context
+  menu, security popover, and workspace popover (**D2**, **F4**); **p2b**
+  (`0c9036a`) the integrity panel cards (**H13**). j/k + arrows everywhere,
+  Enter/Space activate, Esc closes + returns focus. Live-testing caught four
+  real seams unit tests can't see: `roving.js` not embedded/served (would've
+  broken omnibox arrows); chrome-focus-capture routing (`focus_changed` claim
+  — content-triggered surfaces got no keys); a pre-existing P1 `.ws-chip`
+  selector regression that self-closed the workspace popover; and a
+  document-vs-element keydown-listener subtlety for keyboard-opened overlays.
+- ☐ CL-URL-XPARENCY · ☐ CL-MARKDOWN · ☐ CL-SEARCH ·
   ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
 
 ## Findings by category
@@ -131,7 +144,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 
 - **D1 — editable-field menu missing** (P0, above).
 - **D10 — back/forward never show** (P0, above).
-- **D2 — no keyboard nav in the menu** · defect · P0 · M · ⚠ undermines the keyboard-first claim. [CL-KBNAV] ★
+- **✓ D2 — no keyboard nav in the menu** · defect · P0 · M · ⚠ undermines the keyboard-first claim. [CL-KBNAV] ★ — ✓ landed (p2a, `60eca12`): arrows+j/k over actionable rows, Enter/Space activate, Esc close+return-focus; needed a `focus_changed:"chrome"` claim so content-triggered menus receive keys. Live-verified.
 - **D3 — hardcoded Google search on selection** · defect · P1 · S · ⚠ violates both config-is-code and no-data-without-consent. [CL-SEARCH]
 - **D5 — image menu: no "copy image"/"save image"** · gap · P2 · M · (save ties to the deferred `downloads:*` domain.)
 - **D6 — no "open link in background tab"** · gap · P1 · S · `new_tab` op lacks a `background` param (the popup path already has it).
@@ -166,7 +179,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **F1/F10/F3 — see P0 list** (hardcoded slug table, silent index-switch failure, `⌘⇧W` collision).
 - **F2 — `mote.workspace.define` config surface absent** · gap · P0 · L · ⚠ The DESIGN-spec'd dotfile mechanism to declare workspaces (name/icon/accent/identity/pinned) does nothing — Mote is currently *less* configurable than mainstream here, inverting its top differentiator. ★
 - **F7 — per-workspace personalization (accent/icon/identity/pinned tabs)** · gap · P1 · L · ★ "Workspaces as full contexts, not tab groups" is what separates Mote from Firefox containers / Chrome groups; landing per-workspace **accent** alone is high-impact and config-declarable (which no mainstream browser supports).
-- **F4 — workspace popover not keyboard-navigable** · defect · P1 · S · [CL-KBNAV]
+- **✓ F4 — workspace popover not keyboard-navigable** · defect · P1 · S · [CL-KBNAV] — ✓ landed (p2a, `60eca12`): listbox roving (arrows+j/k), current option focused on open, Enter/Space switches workspace. Also fixed a pre-existing P1 regression where the popover self-closed on its opening click (stale `.workspace-strip` guard vs the renamed `.ws-chip`). Live-verified Default↔Work.
 - **F5 — multi-dot indicator means nothing to the user** · defect · P1 · S · A lone accent dot ("more than one workspace exists") with no label/tooltip; add a tooltip or replace with a count/icon.
 - **F8 — no GUI create/rename/delete (and none via command mode)** · gap · P2 · M · ★ The right model: GUI writes a managed.lua entry → Lua reload picks it up (no conflict with config-truth). Also expose `:workspace` command-mode verbs.
 - **F9 — switch is fire-and-forget** · gap · P1 · S · Chip name updates only on the next shell push; add an instant optimistic name update (no animation needed).
@@ -209,7 +222,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **H10 — "last 24h"/"last 7d" labels don't match the data** · defect · P1 · S · ⚠ Sourced from a ring buffer (capped at 20 denials), not a time-windowed query. A false temporal claim on the flagship surface; query the durable sink or relabel.
 - **H11 — storage audit lost its "what" label** · gap · P2 · S · Live `label: None` drops "2.3 MB *of filter lists*" → just an opaque number.
 - **H12 — dangerous-combination warnings aren't actionable** · enh · P2 · M · ★ Make each warning's named permissions click-to-scroll to the offending rows ("deny one of these"). Combination-aware approval is already Mote-only.
-- **H13 — integrity panel has no in-panel keyboard model** · gap · P2 · M · j/k between cards, Enter to expand. [CL-KBNAV]
+- **✓ H13 — integrity panel has no in-panel keyboard model** · gap · P2 · M · j/k between cards, Enter to expand. [CL-KBNAV] — ✓ landed (p2b, `0c9036a`): roving over `.plugin-card` (j/k+arrows), Enter/Space into the card's first action; Esc shell-owned. Live-verified bookmarks→history→workspace-manager (the keydown driver must be document-level — cards lose DOM focus after the shell's async send_focus).
 - **I10 — delete-from-history / clear-range** · gap · P1 · M · ★ `ui:history_provider` is append-only; `history:delete` is reserved but unimplemented. Local data you can't delete undercuts the privacy story.
 
 ### Plugins & Providers (extensibility + bookmarks/history quality)
