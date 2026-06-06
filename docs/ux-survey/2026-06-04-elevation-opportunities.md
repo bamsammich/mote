@@ -124,7 +124,23 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   destination. (copy-clean's *clipboard content* not independently captured —
   no clipboard CLI on the box; the row is wired to the proven
   `navigator.clipboard` path with a unit-verified clean value.)
-- ☐ CL-MARKDOWN · ☐ CL-SEARCH ·
+- **◐ CL-MARKDOWN** — partial. **A14** landed (`37eaecc`): the omnibox
+  "copy as markdown link" now emits `[title](url)` (the document title is
+  available via `on_title_change`; pushed on `set_url`). **D4** (link →
+  `[linktext](url)`) and **D11** (copy *selection* as markdown) are **deferred**
+  — both need structured DOM data (anchor `innerText`; selection HTML) out of
+  an untrusted content page, which Mote's isolation model doesn't surface (CEF
+  context-menu params give only `target_url` + plain `selected_text`; the host
+  bridge is gated to `mote://chrome` only; `eval_js` on content is one-way).
+  They require a dedicated **render-process DOM-extraction channel** (a
+  `ProcessMessage` carrying link-text / selection-HTML), which crosses the
+  untrusted-content isolation boundary (DISCIPLINES §1) and warrants its own
+  design/security review. Per the maintainer's "rock-solid or defer" call, D11
+  in particular can't be done well without the selection's HTML, so it waits.
+  (Clipboard *content* not capturable on this box — XWayland clipboard
+  unreadable by available tools; `mote://` is a verified secure context so the
+  `navigator.clipboard` write path is the real one.)
+- ☐ CL-SEARCH ·
   ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
 
 ## Findings by category
@@ -166,8 +182,8 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **D7 — no plugin-contributed context-menu items (`ui:context_menu` capability)** · gap · P1 · L · ★★ The single strongest extensibility item: vim-mode ("hint mode"), adblock ("block element"), reader-mode, password-manager all want this. Surfaces in the integrity panel transparently. Needs an ADR. (CLAUDE.md explicitly names this a differentiator.)
 - **D8 — link+selection menus don't merge** · defect · P2 · S · Exclusive priority drops selection items when right-clicking a link inside a selection; both flag bits are already present.
 - **D9 — no separators/grouping in the popover** · gap · P2 · S · Flat list; needs a `separator` row type — prerequisite for distinguishing built-in vs plugin rows (D7).
-- **D4/A14 — copy-as-markdown uses URL as anchor text** · defect · P1 · M · Produces `[url](url)`. Fix via a click-point `closest('a').innerText` round-trip. [CL-MARKDOWN] ★
-- **D11 — copy selection as markdown** (blockquote/inline-code) · enh · P2 · S · ★ no mainstream browser does this; on-brand for the dev/LLM-prompt workflow. [CL-MARKDOWN]
+- **✓ A14 / ◐ D4 — copy-as-markdown uses URL as anchor text** · defect · P1 · M · Produces `[url](url)`. [CL-MARKDOWN] ★ — ✓ **A14** landed (`37eaecc`): omnibox copy-as-markdown uses the document title → `[title](url)`. ◐ **D4** (the *link* case via `closest('a').innerText`) deferred — needs the render-process DOM-extraction channel (untrusted-content isolation boundary); CEF context-menu params don't carry anchor text.
+- **◐ D11 — copy selection as markdown** (blockquote/inline-code) · enh · P2 · S · ★ no mainstream browser does this; on-brand for the dev/LLM-prompt workflow. [CL-MARKDOWN] — ◐ **deferred** (maintainer's "rock-solid or defer" call): needs the selection's *HTML* (same render-process DOM-extraction channel) + a battle-tested HTML→markdown lib. Plain `selected_text` has no structure to preserve, so it can't be done well yet.
 
 ### Tabs & Session
 
