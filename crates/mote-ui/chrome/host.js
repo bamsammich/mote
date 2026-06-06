@@ -368,12 +368,14 @@
     rows.push({
       label: "copy as markdown link",
       action: function () {
-        // Markdown link: [title](url). The title is the omnibox's text
-        // (the page URL). A future wave can read the page title via
-        // window.mote.invoke('get_page_title', {}).
+        // CL-MARKDOWN A14: emit [title](url). The document title arrives via
+        // the set_url push (on_title_change, cached in _omniUrlState.title);
+        // fall back to the URL as the link text only while the title is still
+        // empty (early in load / internal pages).
         var input = document.getElementById("omnibox-input");
-        var url = input && input.value ? input.value : "";
-        var md = "[" + url + "](" + url + ")";
+        var url = input && input.value ? input.value : _omniUrlState.url || "";
+        var text = _omniUrlState.title || url;
+        var md = "[" + text + "](" + url + ")";
         // Write to clipboard via the Clipboard API (available in chrome
         // origin). Falls back to copy_active_url if the API is absent.
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -517,7 +519,7 @@
   //     trackers: {count, clean, names[]}|null }
   // We cache the latest display/trackers/url here so the focus/blur handlers can
   // re-render the unfocused emphasis layer without another shell round-trip.
-  var _omniUrlState = { url: "", display: null, trackers: null };
+  var _omniUrlState = { url: "", display: null, trackers: null, title: "" };
 
   // Build the rest/path segment, underlining tracking params (A9 nice-to-have)
   // when their names appear in the query string. All segments are built with
@@ -1240,6 +1242,8 @@
               payload.trackers && typeof payload.trackers === "object"
                 ? payload.trackers
                 : null,
+            // CL-MARKDOWN A14: document title for "copy as markdown link".
+            title: typeof payload.title === "string" ? payload.title : "",
           };
           var omniInputEl = document.getElementById("omnibox-input");
           var isEditing =

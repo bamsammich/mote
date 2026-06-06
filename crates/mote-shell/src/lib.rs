@@ -2896,9 +2896,17 @@ impl ShellApp {
                 || ",\"trackers\":null".to_owned(),
                 |t| format!(",\"trackers\":{t}"),
             );
+            // CL-MARKDOWN A14: the document title (from on_title_change) so the
+            // chrome's "copy as markdown link" can emit [title](url) instead of
+            // [url](url). Null until the title arrives; the chrome falls back to
+            // the URL as the link text in that window.
+            let title_field = tab.title.as_deref().map_or_else(
+                || ",\"title\":null".to_owned(),
+                |t| format!(",\"title\":{}", js_string(t)),
+            );
             chrome.eval_js(&format!(
                 "window.mote&&window.mote.applyOp&&window.mote.applyOp(\
-                 'set_url',{{\"url\":{url},\"bookmarked\":{bookmarked}{display_field}{trackers_field}}});"
+                 'set_url',{{\"url\":{url},\"bookmarked\":{bookmarked}{display_field}{trackers_field}{title_field}}});"
             ));
         }
         // P2: push nav state (can_go_back, can_go_forward) so the [‹][›]
