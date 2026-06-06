@@ -365,6 +365,12 @@ pub(crate) enum KeybindAction {
     SwitchWorkspaceLast,
     /// Cycle to the next tab (existing `Ctrl+Tab` behavior).
     CycleTab,
+    /// Cycle to the previous tab (`Ctrl+Shift+Tab`).
+    CyclePrevTab,
+    /// Select the tab at 1-based index in the active workspace (`Ctrl+1`–`8`).
+    SelectTabByIndex(u8),
+    /// Select the last tab in the active workspace (`Ctrl+9`).
+    SelectLastTab,
     /// Toggle the integrity panel (existing `Ctrl+Shift+I` behavior).
     ToggleIntegrity,
     /// Open the workspace tab picker (existing `Mod+Space` behavior).
@@ -424,6 +430,7 @@ pub(crate) fn classify_chord(
     }
 
     let shift = modifiers.contains(Modifiers::SHIFT);
+    let alt = modifiers.contains(Modifiers::ALT);
 
     match key {
         Key::Character(s) => {
@@ -444,26 +451,36 @@ pub(crate) fn classify_chord(
                 }
                 // Ctrl+Q: quit Mote.
                 "Q" | "q" if !shift => Some(KeybindAction::Quit),
-                // Ctrl+L: focus omnibox.
-                "L" | "l" if !shift => Some(KeybindAction::FocusOmnibox),
+                // Ctrl+L / Ctrl+K: focus omnibox (Firefox/Chrome-aligned aliases).
+                "L" | "l" | "K" | "k" if !shift => Some(KeybindAction::FocusOmnibox),
                 // Ctrl+R: reload active tab.
                 "R" | "r" if !shift => Some(KeybindAction::ReloadTab),
                 // Ctrl+[: go back.
                 "[" if !shift => Some(KeybindAction::GoBack),
                 // Ctrl+]: go forward.
                 "]" if !shift => Some(KeybindAction::GoForward),
-                // Ctrl+1..Ctrl+8: switch to workspace by 1-based index.
-                "1" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(1)),
-                "2" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(2)),
-                "3" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(3)),
-                "4" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(4)),
-                "5" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(5)),
-                "6" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(6)),
-                "7" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(7)),
-                "8" if !shift => Some(KeybindAction::SwitchWorkspaceByIndex(8)),
-                // Ctrl+9: switch to the LAST workspace (Chrome convention — not
-                // the literal 9th). ADR-0012 §`⌘9` documents the rationale.
-                "9" if !shift => Some(KeybindAction::SwitchWorkspaceLast),
+                // Ctrl+1..Ctrl+8: select tab by 1-based index (Firefox/Chrome-aligned).
+                // Ctrl+Alt+1..Ctrl+Alt+8: switch workspace by index (ADR-0012 amended).
+                "1" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(1)),
+                "2" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(2)),
+                "3" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(3)),
+                "4" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(4)),
+                "5" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(5)),
+                "6" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(6)),
+                "7" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(7)),
+                "8" if !shift && !alt => Some(KeybindAction::SelectTabByIndex(8)),
+                // Ctrl+9: select the last tab (Chrome convention — not the literal 9th).
+                // Ctrl+Alt+9: switch to the last workspace.
+                "9" if !shift && !alt => Some(KeybindAction::SelectLastTab),
+                "1" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(1)),
+                "2" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(2)),
+                "3" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(3)),
+                "4" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(4)),
+                "5" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(5)),
+                "6" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(6)),
+                "7" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(7)),
+                "8" if !shift && alt => Some(KeybindAction::SwitchWorkspaceByIndex(8)),
+                "9" if !shift && alt => Some(KeybindAction::SwitchWorkspaceLast),
                 // P5: find-in-page (Ctrl+F).
                 "F" | "f" if !shift => Some(KeybindAction::FindInPage),
                 // P5: find next (Ctrl+G), find prev (Ctrl+Shift+G).
@@ -480,7 +497,9 @@ pub(crate) fn classify_chord(
                 _ => None,
             }
         }
+        // Ctrl+Tab: cycle forward; Ctrl+Shift+Tab: cycle backward.
         Key::Named(NamedKey::Tab) if !shift => Some(KeybindAction::CycleTab),
+        Key::Named(NamedKey::Tab) if shift => Some(KeybindAction::CyclePrevTab),
         _ => None,
     }
 }
@@ -922,21 +941,43 @@ const KEYBIND_TABLE: &[(&str, &str, &str, &str)] = &[
     ("go forward", "Ctrl+]", "global", "built-in"),
     ("cycle tab", "Ctrl+Tab", "global", "built-in"),
     (
+        "cycle tab (reverse)",
+        "Ctrl+Shift+Tab",
+        "global",
+        "built-in",
+    ),
+    (
         "toggle integrity panel",
         "Ctrl+Shift+I",
         "global",
         "built-in",
     ),
     ("open workspace picker", "Ctrl+Space", "global", "built-in"),
-    ("switch workspace 1", "Ctrl+1", "global", "built-in"),
-    ("switch workspace 2", "Ctrl+2", "global", "built-in"),
-    ("switch workspace 3", "Ctrl+3", "global", "built-in"),
-    ("switch workspace 4", "Ctrl+4", "global", "built-in"),
-    ("switch workspace 5", "Ctrl+5", "global", "built-in"),
-    ("switch workspace 6", "Ctrl+6", "global", "built-in"),
-    ("switch workspace 7", "Ctrl+7", "global", "built-in"),
-    ("switch workspace 8", "Ctrl+8", "global", "built-in"),
-    ("switch to last workspace", "Ctrl+9", "global", "built-in"),
+    // Ctrl+1–8: select tab by index (Firefox/Chrome-aligned); Ctrl+9: last tab.
+    ("select tab 1", "Ctrl+1", "global", "built-in"),
+    ("select tab 2", "Ctrl+2", "global", "built-in"),
+    ("select tab 3", "Ctrl+3", "global", "built-in"),
+    ("select tab 4", "Ctrl+4", "global", "built-in"),
+    ("select tab 5", "Ctrl+5", "global", "built-in"),
+    ("select tab 6", "Ctrl+6", "global", "built-in"),
+    ("select tab 7", "Ctrl+7", "global", "built-in"),
+    ("select tab 8", "Ctrl+8", "global", "built-in"),
+    ("select last tab", "Ctrl+9", "global", "built-in"),
+    // Ctrl+Alt+1–8: switch workspace by index; Ctrl+Alt+9: last workspace.
+    ("switch workspace 1", "Ctrl+Alt+1", "global", "built-in"),
+    ("switch workspace 2", "Ctrl+Alt+2", "global", "built-in"),
+    ("switch workspace 3", "Ctrl+Alt+3", "global", "built-in"),
+    ("switch workspace 4", "Ctrl+Alt+4", "global", "built-in"),
+    ("switch workspace 5", "Ctrl+Alt+5", "global", "built-in"),
+    ("switch workspace 6", "Ctrl+Alt+6", "global", "built-in"),
+    ("switch workspace 7", "Ctrl+Alt+7", "global", "built-in"),
+    ("switch workspace 8", "Ctrl+Alt+8", "global", "built-in"),
+    (
+        "switch to last workspace",
+        "Ctrl+Alt+9",
+        "global",
+        "built-in",
+    ),
     // P5 additions.
     ("find in page", "Ctrl+F", "global", "built-in"),
     ("find next match", "Ctrl+G", "global", "built-in"),
@@ -945,6 +986,8 @@ const KEYBIND_TABLE: &[(&str, &str, &str, &str)] = &[
     ("zoom out", "Ctrl+-", "global", "built-in"),
     ("reset zoom", "Ctrl+0", "global", "built-in"),
     ("reopen closed tab", "Ctrl+Shift+T", "global", "built-in"),
+    // CL-KEYMAP: Ctrl+K as additional focus-omnibox alias (Firefox/Chrome-aligned).
+    ("focus omnibox (alt)", "Ctrl+K", "global", "built-in"),
 ];
 
 /// Serialise [`KEYBIND_TABLE`] as a JSON object the `keybinds_list` op returns.
@@ -4141,6 +4184,18 @@ impl ShellApp {
                 self.cycle_active_tab();
                 true
             }
+            KeybindAction::CyclePrevTab => {
+                self.cycle_active_tab_prev();
+                true
+            }
+            KeybindAction::SelectTabByIndex(idx) => {
+                self.select_tab_by_index(idx);
+                true
+            }
+            KeybindAction::SelectLastTab => {
+                self.select_last_tab();
+                true
+            }
             // P5: find / zoom / reopen
             KeybindAction::FindInPage => {
                 push(&self.commands, ShellCommand::FindInPage);
@@ -4218,6 +4273,35 @@ impl ShellApp {
         let next = (self.active + 1) % self.tabs.len();
         let id = self.tabs[next].id;
         self.select_tab(id);
+    }
+
+    /// Cycle to the previous tab, wrapping from first to last (`Ctrl+Shift+Tab`).
+    fn cycle_active_tab_prev(&mut self) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let prev = self.active.checked_sub(1).unwrap_or(self.tabs.len() - 1);
+        let id = self.tabs[prev].id;
+        self.select_tab(id);
+    }
+
+    /// Select the tab at 1-based `index` in the active workspace (`Ctrl+1`–`8`).
+    ///
+    /// No-op when `index` exceeds the number of open tabs.
+    fn select_tab_by_index(&mut self, index: u8) {
+        let i = usize::from(index).checked_sub(1).unwrap_or(usize::MAX);
+        if let Some(id) = self.tabs.get(i).map(|t| t.id) {
+            self.select_tab(id);
+        }
+    }
+
+    /// Select the last tab in the active workspace (`Ctrl+9`).
+    ///
+    /// No-op when there are no tabs.
+    fn select_last_tab(&mut self) {
+        if let Some(id) = self.tabs.last().map(|t| t.id) {
+            self.select_tab(id);
+        }
     }
 
     // ── P5: zoom helpers ──────────────────────────────────────────────────────
@@ -6791,7 +6875,9 @@ mod tests {
         assert_eq!(action, Some(KeybindAction::GoForward));
     }
 
-    /// `Ctrl+1` through `Ctrl+8` are classified as `SwitchWorkspaceByIndex(N)`.
+    /// `Ctrl+1` through `Ctrl+8` are classified as `SelectTabByIndex(N)`
+    /// (Firefox/Chrome-aligned; workspace switch moved to Ctrl+Alt+1–8 per
+    /// CL-KEYMAP / ADR-0012 amendment).
     /// Off-by-one regression: `Ctrl+1` must be index 1 (not 0), `Ctrl+8` must
     /// be index 8.
     #[test]
@@ -6810,27 +6896,32 @@ mod tests {
             let action = classify_chord(Modifiers::CONTROL, &char_key(digit), 1);
             assert_eq!(
                 action,
-                Some(KeybindAction::SwitchWorkspaceByIndex(*expected_idx)),
-                "Ctrl+{digit} must map to index {expected_idx}, got {action:?}"
+                Some(KeybindAction::SelectTabByIndex(*expected_idx)),
+                "Ctrl+{digit} must map to SelectTabByIndex({expected_idx}), got {action:?}"
             );
         }
     }
 
-    /// `Ctrl+9` is `SwitchWorkspaceLast` — the LAST workspace, NOT workspace 9.
-    /// This is the Chrome convention documented in ADR-0012.
+    /// `Ctrl+9` is `SelectLastTab` — the last tab (Firefox/Chrome convention).
+    /// Workspace-last moved to `Ctrl+Alt+9` (CL-KEYMAP / ADR-0012 amendment).
     #[test]
-    fn r4_ctrl_9_is_switch_workspace_last_not_index_9() {
+    fn r4_ctrl_9_is_select_last_tab() {
         let action = classify_chord(Modifiers::CONTROL, &char_key("9"), 1);
         assert_eq!(
             action,
-            Some(KeybindAction::SwitchWorkspaceLast),
-            "Ctrl+9 must map to SwitchWorkspaceLast (Chrome convention), not index 9"
+            Some(KeybindAction::SelectLastTab),
+            "Ctrl+9 must map to SelectLastTab (Chrome/Firefox convention), got {action:?}"
         );
-        // Explicitly assert it is NOT SwitchWorkspaceByIndex(9).
+        // Explicitly assert it is NOT SwitchWorkspaceByIndex(9) or SwitchWorkspaceLast.
         assert_ne!(
             action,
             Some(KeybindAction::SwitchWorkspaceByIndex(9)),
             "Ctrl+9 must NOT produce SwitchWorkspaceByIndex(9)"
+        );
+        assert_ne!(
+            action,
+            Some(KeybindAction::SwitchWorkspaceLast),
+            "Ctrl+9 must NOT produce SwitchWorkspaceLast (workspace switch moved to Ctrl+Alt+9)"
         );
     }
 
@@ -6989,6 +7080,102 @@ mod tests {
         assert_eq!(
             classify_chord(Modifiers::CONTROL, &tab, 2),
             Some(KeybindAction::CycleTab),
+        );
+    }
+
+    // ── CL-KEYMAP additions ────────────────────────────────────────────────────
+
+    /// E9: `Ctrl+Shift+Tab` is classified as `CyclePrevTab`.
+    #[test]
+    fn cl_keymap_ctrl_shift_tab_is_cycle_prev_tab() {
+        let tab = Key::Named(NamedKey::Tab);
+        let mods = Modifiers::CONTROL | Modifiers::SHIFT;
+        assert_eq!(
+            classify_chord(mods, &tab, 2),
+            Some(KeybindAction::CyclePrevTab),
+        );
+    }
+
+    /// A5: `Ctrl+K` (and `Ctrl+k`) is classified as `FocusOmnibox`.
+    #[test]
+    fn cl_keymap_ctrl_k_is_focus_omnibox() {
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("k"), 1),
+            Some(KeybindAction::FocusOmnibox),
+        );
+        assert_eq!(
+            classify_chord(Modifiers::CONTROL, &char_key("K"), 1),
+            Some(KeybindAction::FocusOmnibox),
+        );
+    }
+
+    /// E4: `Ctrl+1` through `Ctrl+8` now map to `SelectTabByIndex(N)` (not workspaces).
+    #[test]
+    fn cl_keymap_ctrl_1_through_8_select_tab_by_index() {
+        let cases: &[(&str, u8)] = &[
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("4", 4),
+            ("5", 5),
+            ("6", 6),
+            ("7", 7),
+            ("8", 8),
+        ];
+        for (digit, expected_idx) in cases {
+            let action = classify_chord(Modifiers::CONTROL, &char_key(digit), 1);
+            assert_eq!(
+                action,
+                Some(KeybindAction::SelectTabByIndex(*expected_idx)),
+                "Ctrl+{digit} must map to SelectTabByIndex({expected_idx}), got {action:?}"
+            );
+        }
+    }
+
+    /// E4: `Ctrl+9` now maps to `SelectLastTab` (not workspaces).
+    #[test]
+    fn cl_keymap_ctrl_9_selects_last_tab() {
+        let action = classify_chord(Modifiers::CONTROL, &char_key("9"), 1);
+        assert_eq!(
+            action,
+            Some(KeybindAction::SelectLastTab),
+            "Ctrl+9 must map to SelectLastTab, got {action:?}"
+        );
+    }
+
+    /// E4: `Ctrl+Alt+1` through `Ctrl+Alt+8` map to `SwitchWorkspaceByIndex(N)`.
+    #[test]
+    fn cl_keymap_ctrl_alt_1_through_8_switch_workspace() {
+        let mods = Modifiers::CONTROL | Modifiers::ALT;
+        let cases: &[(&str, u8)] = &[
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("4", 4),
+            ("5", 5),
+            ("6", 6),
+            ("7", 7),
+            ("8", 8),
+        ];
+        for (digit, expected_idx) in cases {
+            let action = classify_chord(mods, &char_key(digit), 1);
+            assert_eq!(
+                action,
+                Some(KeybindAction::SwitchWorkspaceByIndex(*expected_idx)),
+                "Ctrl+Alt+{digit} must map to SwitchWorkspaceByIndex({expected_idx}), got {action:?}"
+            );
+        }
+    }
+
+    /// E4: `Ctrl+Alt+9` maps to `SwitchWorkspaceLast`.
+    #[test]
+    fn cl_keymap_ctrl_alt_9_switches_last_workspace() {
+        let mods = Modifiers::CONTROL | Modifiers::ALT;
+        let action = classify_chord(mods, &char_key("9"), 1);
+        assert_eq!(
+            action,
+            Some(KeybindAction::SwitchWorkspaceLast),
+            "Ctrl+Alt+9 must map to SwitchWorkspaceLast, got {action:?}"
         );
     }
 
