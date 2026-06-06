@@ -32,7 +32,7 @@ The lens: **was the enabling engine for this feature supposed to exist yet?** If
 
 UI surfaces for capabilities whose backend is scheduled later (or undecided). The placeholder/dead state was *inevitable*. **Right response: descope/hide the affordance until its phase, or consciously pull that engine forward — do not polish the placeholder.** Tracked, not implemented in this pass.
 
-- **B1 — vim mode chip frozen at `NORMAL`.** Presupposes modal editing; **vim-mode is Phase 6**, so there is no mode to report. → hide the chip until vim-mode. `statusline.rs:229`.
+- **✓ B1 — vim mode chip frozen at `NORMAL`.** Presupposes modal editing; **vim-mode is Phase 6**, so there is no mode to report. → hide the chip until vim-mode. `statusline.rs:229`. — ✓ resolved (`860bd6f`, per ADR-0019): `mote.mode` removed from core built-ins entirely; the vim mode indicator is plugin-provided when the paradigm plugin ships.
 - **A2 — `[cmd]` omnibox mode dispatch.** Presupposes a command-execution engine (rides with vim-mode, **Phase 6**); submit just navigates (`host.js:441`). → suppress the `[cmd]` tag until dispatch exists.
 - **G10 / G4 — settings *writes* + live-state read.** Depend on the config-mutation API (code comment at `lib.rs:1762`: "wired once the config-mutation API is complete") and the unresolved config-truth doctrine. A write-capable GUI ahead of its backend. → make settings a read-only config *mirror* first. (The read-only keybinds section is appropriately staged.)
 - **G1 / G3 — settings viewport-fill + toggle a11y.** Frontend bugs that only live inside the premature write panel; defer until a read-only surface is legitimately in scope.
@@ -151,7 +151,23 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   *Engine sourced from Lua config* is the one piece NOT here — it rides on the
   config read/write path (premature config-mutation API), **deferred to
   CL-CONFIG-TRUTH**; engine defaults to DuckDuckGo + is settings-updatable.
-- ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
+- **✓ CL-SPECDRIFT** — complete, in two parts. **Clean reconciliations**
+  (`1ae2b9e`, maintainer-adjudicated canonical side): **B10** (stale 24px
+  comment → 22px token), **E12** (dropped the doubled newtab dot-grid; sanctioned
+  the page-bg exception in `empty-slot.md`), **B2** (reconciled the
+  self-contradicting "no icons" rule → a single Lucide stroke icon allowed,
+  matching `06_iconography` + the shipped `mote.security`), **A6-Esc** (documented
+  the two-stage Esc). **Architectural** (`ADR-0019` + suppression `860bd6f`):
+  the vim paradigm was interspersed in core — the spec-reconciliation surfaced
+  that **`[cmd]` mode (A3) and the `NORMAL` chip (B1) belong to a swappable
+  editing-paradigm plugin, not core.** ADR-0019 pins that boundary (vim ↔ emacs
+  via capability contract; declarative keymap + bounded command host-fns +
+  content-keystroke withholding — feasibility proven in
+  `docs/research/secure-plugin-command-api-feasibility.md`), and the suppression
+  removed `[cmd]` detection + the `NORMAL` built-in from core. So **A3** dissolves
+  (no core cmd-prefix), **A6** resolves (Esc documented; modal stickiness is
+  plugin-owned), **B1** resolves (chip is plugin-provided).
+- ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH
 
 ## Findings by category
 
@@ -212,7 +228,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 
 - **E5 — newtab is inert** · enh · P1 · L · No quick links, no recent, no omnibox auto-focus. ★ Build a *Neovim-dashboard*-style start page (recent history rows, pinned shortcuts from `managed.lua`, no images, no external fetch) via the existing `newtab.center` slot — config-driven, themable, replaceable. NOT a Chrome visual-tile grid.
 - **E6 — newtab hint hardcodes `⌘L`** · defect · P1 · S · macOS glyph on a Linux-first app (actual bind is Ctrl+L). Push the platform-correct accelerator from the shell.
-- **E12 — newtab dot-grid doubles the slot dot-grid** · defect · P2 · S · ⚠ spec both forbids and mandates a dot-grid background; decide and drop `slot-empty` from `newtab.center`. [CL-SPECDRIFT]
+- **✓ E12 — newtab dot-grid doubles the slot dot-grid** · defect · P2 · S · ⚠ spec both forbids and mandates a dot-grid background; decide and drop `slot-empty` from `newtab.center`. [CL-SPECDRIFT] — ✓ landed (`1ae2b9e`): dropped `slot-empty`; sanctioned the newtab page-bg exception in `empty-slot.md`.
 - **I11 — config-declared bookmarks (bookmarks-as-code)** · enh · P2 · M · ★ Declare a curated, version-controlled bookmark set in dotfiles, merged on load — distinguish from runtime-toggled stars per the managed.lua rule. (Feeds the newtab pins.)
 
 ### Workspaces
@@ -279,15 +295,15 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 
 - **CL-KBNAV** (D2/F4/H13) — extract the omnibox dropdown's roving-focus into a shared helper for every floating surface. ★ P0-ish: the keyboard-first claim currently fails on menus/popovers/panels.
 - **CL-KEYMAP** (A5 `⌘K`, E9 prev-tab, E4/F10 index-switch collision, F3 `⌘⇧W`, `⌘T`-from-content) — one coherent, conflict-free, documented (and ideally rebindable) keymap pass. ★
-- **A6 — Esc/Backspace mode rules diverge from spec** · defect · P1 · S · [CL-SPECDRIFT]
+- **✓ A6 — Esc/Backspace mode rules diverge from spec** · defect · P1 · S · [CL-SPECDRIFT] — ✓ Esc two-stage documented in spec (`1ae2b9e`); the modal Backspace-stickiness is plugin-owned (modes leave core, ADR-0019) and `[cmd]` detection was suppressed (`860bd6f`).
 - **G8 — which-key keybinds discovery** ★ — see Settings.
 - **C7 — smartcase find** ★ — see Find.
 
 ### Visual Polish, Theming & Accessibility
 
-- **B2 — status-line icons vs spec** · defect · P1 · S · ⚠ The spec forbids icons in segments but the API/CSS/`mote.security` element use them (correctly, as Lucide stroke — not emoji). The spec rule is likely stale; decide. [CL-SPECDRIFT]
+- **✓ B2 — status-line icons vs spec** · defect · P1 · S · ⚠ The spec forbids icons in segments but the API/CSS/`mote.security` element use them (correctly, as Lucide stroke — not emoji). The spec rule is likely stale; decide. [CL-SPECDRIFT] — ✓ landed (`1ae2b9e`): reconciled `status-line.md` to allow a single Lucide stroke icon (matching `06_iconography`); emoji/multi-color still forbidden.
 - **B6 — tabcount uses an inline `style="color:var(--fg-2)"`** · defect · P1 · S · Bypasses the token API; themes can't restyle it. Add an `Fg2`/`Dim` token.
-- **B10 — status-line height comments wrong (24px vs 22px token)** · defect · P2 · S · [CL-SPECDRIFT]
+- **✓ B10 — status-line height comments wrong (24px vs 22px token)** · defect · P2 · S · [CL-SPECDRIFT] — ✓ landed (`1ae2b9e`): comments corrected to 22px (the token + spec value).
 - **B9 — status-line `aria-live="polite"` on the whole bar** · defect · P1 · S · Floods screen readers on every hover-url tick; scope `aria-live` to meaningful changes only.
 - **C10 / G3 — aria correctness** (find label; settings toggle role) — see Find / Settings.
 - **E8 — rail stripe clip** — see Tabs.
