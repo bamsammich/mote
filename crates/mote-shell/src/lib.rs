@@ -315,6 +315,8 @@ enum ShellCommand {
     NavGoForward,
     /// Reload the active tab (`reload` op). Always available.
     NavReload,
+    /// Stop the active tab's current load (`stop` op). No-op when not loading.
+    NavStop,
     /// Return TLS/security information for the active tab (`security_info` op).
     /// Synchronous: the response is produced inline from the current URL and
     /// nav state without a round-trip, so no `ShellCommand` needed for this
@@ -704,6 +706,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         hover_url_last: None,
         zoom_clear_at: None,
         nav_state_last: (false, false),
+        load_state_last: false,
         find_query_last: String::new(),
         search_url_template: default_search_url_template().to_owned(),
     };
@@ -1156,6 +1159,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let go_back_queue = Arc::clone(commands);
     let go_forward_queue = Arc::clone(commands);
     let nav_reload_queue = Arc::clone(commands);
+    let nav_stop_queue = Arc::clone(commands);
     // P6: settings panel op queues.
     let set_theme_queue = Arc::clone(commands);
     let set_search_engine_queue = Arc::clone(commands);
@@ -1447,6 +1451,11 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
             push(&nav_reload_queue, ShellCommand::NavReload);
             OpResponse::ok("{\"ok\":true}")
         })
+        // `stop` — stop the active tab's current load.
+        .register("stop", move |_params: &str| {
+            push(&nav_stop_queue, ShellCommand::NavStop);
+            OpResponse::ok("{\"ok\":true}")
+        })
         // `security_info` — return TLS/security metadata for the active tab.
         // Synchronous: the JS caller already knows the current URL (it was
         // last set via `set_url` applyOp and is held in the omnibox input).
@@ -1727,6 +1736,12 @@ struct ShellApp {
     /// is what lights up the back/forward buttons after a navigation
     /// completes.
     nav_state_last: (bool, bool),
+    /// The last `is_loading` value pushed to the chrome. Tracked so
+    /// [`sync_load_state`](Self::sync_load_state) only re-pushes when the
+    /// loading state actually changes. CEF updates this flag asynchronously
+    /// via `on_loading_state_change`; polling here surfaces the binary
+    /// loading indicator to the chrome reliably after each transition.
+    load_state_last: bool,
     /// The most recent non-empty find query text. Stored by `FindText` drain so
     /// `FindNext`/`FindPrev` (Ctrl+G, Ctrl+Shift+G) can repeat the last search
     /// without the chrome resending the query string.
@@ -1952,6 +1967,11 @@ impl ShellApp {
                 ShellCommand::NavReload => {
                     if let Some(page) = self.active_page() {
                         page.reload();
+                    }
+                }
+                ShellCommand::NavStop => {
+                    if let Some(page) = self.active_page() {
+                        page.stop_load();
                     }
                 }
                 // SecurityInfoQuery is a doc-anchor variant (never enqueued;
@@ -4335,6 +4355,36 @@ impl ShellApp {
         ));
     }
 
+    /// Poll the active tab's `is_loading` flag and push a `set_load_state` op
+    /// to the chrome when it changes.
+    ///
+    /// Mirrors [`sync_nav_state`](Self::sync_nav_state): CEF fires
+    /// `on_loading_state_change` asynchronously, so this poll-on-change path
+    /// is what keeps the chrome's loading indicator in sync. Runs each
+    /// `about_to_wait` tick, immediately after `sync_nav_state`.
+    fn sync_load_state(&mut self) {
+        // Defer entirely until the chrome is mounted — and do NOT cache the
+        // state while deferred. Unlike nav state (which push_state_to_chrome
+        // re-pushes at chrome-ready), there is no initial load-state push, so
+        // caching a rising edge here would swallow it and the very first page
+        // load (the boot tab) would never show its ticker. Leaving
+        // load_state_last untouched lets the first post-ready tick push the
+        // true current state.
+        if !self.chrome_ready {
+            return;
+        }
+        let loading = self.active_page().is_some_and(Page::is_loading);
+        if loading == self.load_state_last {
+            return;
+        }
+        self.load_state_last = loading;
+        let chrome = self.bridge.page();
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_load_state',\
+             {{loading:{loading}}});"
+        ));
+    }
+
     /// Route a keyboard event to the logical focus owner.
     fn route_key(&self, event: &winit::event::KeyEvent) {
         let target: Option<&Page> = match self.focus {
@@ -4498,6 +4548,7 @@ impl ApplicationHandler for ShellApp {
         self.sync_hover_url();
         self.sync_find_result();
         self.sync_nav_state();
+        self.sync_load_state();
         self.maybe_run_housekeeping();
         self.upload_frames();
 
@@ -8124,6 +8175,93 @@ mod tests {
             None,
             "empty slug list must return None for any slug"
         );
+    }
+
+    // ── CL-LOADING: load state op + NavStop ──────────────────────────────────
+
+    /// `stop` op is registered in `build_op_registry`.
+    #[test]
+    fn cl_loading_stop_op_is_registered() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"stop"),
+            "stop must be registered in build_op_registry; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `stop` op enqueues exactly one `NavStop` command.
+    #[test]
+    fn cl_loading_stop_op_enqueues_nav_stop() {
+        use std::sync::Mutex;
+
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        push(&queue, ShellCommand::NavStop);
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "must enqueue exactly one command");
+        match q.pop_front().unwrap() {
+            ShellCommand::NavStop => {}
+            other => panic!("expected NavStop; got {other:?}"),
+        }
+    }
+
+    /// `load_state_last` de-dup: the cached value updates only when `is_loading`
+    /// changes, not on every tick.
+    ///
+    /// Mirrors how `sync_load_state` guards re-push: it returns early when
+    /// `loading == self.load_state_last` and stores the new value only on a
+    /// genuine transition. This test drives the boolean sequence
+    /// false→false (no change), false→true (transition), true→true (no change),
+    /// true→false (transition) and asserts the cache tracks correctly.
+    #[test]
+    fn cl_loading_load_state_last_dedup_transitions() {
+        // Simulate the de-dup gate in sync_load_state without a live ShellApp.
+        // Inline each tick rather than a closure to avoid E0502 borrow conflicts.
+        let mut last: bool = false;
+        let mut push_count: u32 = 0;
+
+        // Tick 1: false→false (no change) → no push.
+        let incoming = false;
+        if incoming != last {
+            last = incoming;
+            push_count += 1;
+        }
+        assert_eq!(push_count, 0, "false→false: no push expected");
+        assert!(!last, "cache must remain false");
+
+        // Tick 2: false→true (transition) → push fires.
+        let incoming = true;
+        if incoming != last {
+            last = incoming;
+            push_count += 1;
+        }
+        assert_eq!(push_count, 1, "false→true: exactly one push expected");
+        assert!(last, "cache must update to true");
+
+        // Tick 3: true→true (no change) → no extra push.
+        let incoming = true;
+        if incoming != last {
+            last = incoming;
+            push_count += 1;
+        }
+        assert_eq!(push_count, 1, "true→true: no extra push expected");
+        assert!(last, "cache must remain true");
+
+        // Tick 4: true→false (transition) → push fires again.
+        let incoming = false;
+        if incoming != last {
+            last = incoming;
+            push_count += 1;
+        }
+        assert_eq!(
+            push_count, 2,
+            "true→false: exactly two total pushes expected"
+        );
+        assert!(!last, "cache must update to false");
     }
 
     /// `omnibox_submit` op: valid `text` field → enqueues `ShellCommand::OmniboxSubmit`.

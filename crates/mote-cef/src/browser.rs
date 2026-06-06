@@ -402,6 +402,11 @@ impl Page {
         self.browser.reload();
     }
 
+    /// Stop the current page load.
+    pub fn stop_load(&self) {
+        self.browser.stop_load();
+    }
+
     // -----------------------------------------------------------------------
     // Input injection (the OSR browser host has no OS window, so the host layer
     // must feed it events). Coordinates are page-local; the window→page mapping

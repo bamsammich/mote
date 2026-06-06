@@ -148,6 +148,7 @@
   // on payload content per ADR-0005). A single shared popover element is reused.
 
   var _activePopover = null; // the currently-open popover (or null)
+  var currentLoading = false; // reflects the active tab's loading state (set_load_state)
 
   function closeActivePopover() {
     if (_activePopover && _activePopover.parentNode) {
@@ -764,6 +765,75 @@
 
       strip.appendChild(row);
     });
+
+    // Re-apply the load ticker after every strip rebuild so a set_tabs push
+    // during a page load does not silently erase it.
+    if (currentLoading) {
+      applyLoadTicker(true);
+    }
+  }
+
+  // Insert or remove the load ticker (<span class="load">) on the active tab.
+  // Called by applyLoadState and by renderTabs after a strip rebuild.
+  // Uses createElement + textContent — never innerHTML.
+  function applyLoadTicker(loading) {
+    var activeTab = document.querySelector(".tab.is-active");
+    if (!activeTab) return;
+    var existing = activeTab.querySelector(".load");
+    if (loading) {
+      if (!existing) {
+        var ticker = document.createElement("span");
+        ticker.className = "load";
+        // Three middots: a static indeterminate marker, not an animated spinner.
+        ticker.textContent = "···";
+        ticker.setAttribute("aria-hidden", "true");
+        // Insert before the title so it sits in the favicon region of the row.
+        var titleEl = activeTab.querySelector(".title");
+        if (titleEl) {
+          activeTab.insertBefore(ticker, titleEl);
+        } else {
+          activeTab.appendChild(ticker);
+        }
+      }
+    } else {
+      if (existing) {
+        existing.parentNode.removeChild(existing);
+      }
+    }
+  }
+
+  // Apply the full load state: update the tab ticker and swap the reload button
+  // between reload (idle) and stop (loading).
+  function applyLoadState(loading) {
+    applyLoadTicker(loading);
+
+    var reloadBtn = document.querySelector(".nav-btn[aria-label='reload'], .nav-btn[aria-label='stop']");
+    if (!reloadBtn) return;
+
+    var useEl = reloadBtn.querySelector("use");
+    if (loading) {
+      reloadBtn.setAttribute("aria-label", "stop");
+      reloadBtn.setAttribute("data-tooltip", "stop");
+      if (useEl) {
+        useEl.setAttributeNS(
+          "http://www.w3.org/1999/xlink",
+          "xlink:href",
+          "assets/lucide-sprite.svg#icon-x"
+        );
+        useEl.setAttribute("href", "assets/lucide-sprite.svg#icon-x");
+      }
+    } else {
+      reloadBtn.setAttribute("aria-label", "reload");
+      reloadBtn.setAttribute("data-tooltip", "reload");
+      if (useEl) {
+        useEl.setAttributeNS(
+          "http://www.w3.org/1999/xlink",
+          "xlink:href",
+          "assets/lucide-sprite.svg#icon-rotate-cw"
+        );
+        useEl.setAttribute("href", "assets/lucide-sprite.svg#icon-rotate-cw");
+      }
+    }
   }
 
   function wireNewTab() {
@@ -956,6 +1026,12 @@
             payload.can_go_forward === true
           );
         }
+        break;
+      // CL-LOADING 1a: active tab load state — lights the tab ticker and
+      // toggles the reload button between reload (idle) and stop (loading).
+      case "set_load_state":
+        currentLoading = !!(payload && payload.loading);
+        applyLoadState(currentLoading);
         break;
       default:
         // Unknown ops are ignored (forward-compatible).
@@ -1406,7 +1482,23 @@
 
     wireNavBtn(backBtn,   "go_back",   "back");
     wireNavBtn(fwdBtn,    "go_forward", "forward");
-    wireNavBtn(reloadBtn, "reload",     null);
+
+    // CL-LOADING 1a: reload button dispatches "stop" while loading, "reload"
+    // when idle.  wireNavBtn hard-codes its op, so we wire reload manually.
+    if (reloadBtn) {
+      reloadBtn.removeAttribute("aria-disabled");
+      reloadBtn.setAttribute("data-tooltip", "reload");
+      var reloadKbd = reloadBtn.getAttribute("data-tooltip-kbd");
+      reloadBtn.setAttribute("data-tooltip-kbd", reloadKbd || "⌘R");
+      reloadBtn.addEventListener("click", function () {
+        clearLongPress();
+        if (reloadBtn.getAttribute("aria-disabled") === "true") return;
+        var op = currentLoading ? "stop" : "reload";
+        if (window.mote && window.mote.invoke) {
+          window.mote.invoke(op, {}).catch(function () {});
+        }
+      });
+    }
   }
 
   // Apply nav state (can_go_back / can_go_forward) pushed by the shell via

@@ -104,7 +104,10 @@
 
 .tab .load,
 .tab .audio {
+  flex: none;
+  font: var(--text-mono-sm);
   color: var(--accent);
+  letter-spacing: 0.05em; /* open the three middots slightly */
 }
 
 .tab:hover {
