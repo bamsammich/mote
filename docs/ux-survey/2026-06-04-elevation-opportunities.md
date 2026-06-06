@@ -140,8 +140,18 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   (Clipboard *content* not capturable on this box — XWayland clipboard
   unreadable by available tools; `mote://` is a verified secure context so the
   `navigator.clipboard` write path is the real one.)
-- ☐ CL-SEARCH ·
-  ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
+- **✓ CL-SEARCH** — complete. **I1** (search-vs-navigate resolver, ADR-0018)
+  and **D3** (context-menu search de-hardcoded) landed in earlier waves;
+  **I2** landed now (`7dedafa` shell · `3939751` chrome), **live-verified**: a
+  `search_query` force-search op + an always-present `{action:"search"}`
+  suggestion record → an explicit "search ‹engine› for ‹query›" row with a
+  magnifier (`#icon-search` added to the sprite + `lucide-usage.md`).
+  Confirmed live: typing "rust async traits" (no history match) shows the row;
+  selecting it navigates to `https://duckduckgo.com/?q=rust%20async%20traits`.
+  *Engine sourced from Lua config* is the one piece NOT here — it rides on the
+  config read/write path (premature config-mutation API), **deferred to
+  CL-CONFIG-TRUTH**; engine defaults to DuckDuckGo + is settings-updatable.
+- ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
 
 ## Findings by category
 
@@ -150,7 +160,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **A4 — security dot leaks into find/cmd modes** · defect · P0 · S · The `.secure` dot stays visible in `[find]`/`[cmd]`, implying a connection-trust claim about a search string. Hide `.secure` in non-url modes. ★ (honesty)
 - **✓ A8 — domain-emphasis URL formatting** · enh · P1 · M · Render eTLD+1 in `--fg`, scheme/path/query in `--fg-2` when unfocused; full raw string on focus. The spec's `.host`/`.path` spans exist but are never emitted. Differs from Safari by never *eliding* — emphasis via token color, full URL always present. ★ [CL-URL-XPARENCY] — ✓ landed (`2b75774`): unfocused display-layer overlay; live-verified emphasis + raw-on-focus swap.
 - **✓ A9 — surface tracking params + "copy clean url"** · enh · P1 · M · Inline count of tracking params + a context-menu "copy clean url"; never auto-strip the displayed/navigated URL. ★ [CL-URL-XPARENCY] — ✓ landed (`2b75774`): "N trackers" chip + per-param `--danger` underline + copy-clean menu row (opt-in, never auto-strips). Live-verified.
-- **A10/I1/I2 — wire the config search engine; search-vs-navigate; "search with \<engine\>" row** · defect/gap · P0 · M · The single most-felt omnibox gap. Engine from Lua config (not a GUI dropdown). ★ [CL-SEARCH]
+- **✓ A10/I1/I2 — wire the config search engine; search-vs-navigate; "search with \<engine\>" row** · defect/gap · P0 · M · The single most-felt omnibox gap. Engine from Lua config (not a GUI dropdown). ★ [CL-SEARCH] — ✓ I1 (ADR-0018) + I2 (`3939751`) landed & live-verified; the explicit search row force-searches via the configured engine. ◐ "engine from Lua config" deferred to CL-CONFIG-TRUTH (config read path).
 - **A11 — completions: no empty/no-match state, no source grouping, no default action row** · enh · P1 · M · Dropdown vanishes on zero results; add a persistent top "search for 'X'" / "open \<url\>" row and a no-match affordance. Stay in the mono/bracket idiom (dim `[source]` separators, not colored icons).
 - **I6 — inline autocomplete (prefix completion)** · gap · P1 · M · Typing `git` should auto-fill `github.com` with the tail selected; ranking has no prefix-beats-substring notion. Table-stakes speed.
 - **I4 — bookmark suggestions unranked, starved by history flood** · defect · P1 · M · "All history first, then bookmarks, cap 10" means an exact-title bookmark loses to 10 weak history hits. Needs a unified cross-source score.
@@ -176,7 +186,7 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **D1 — editable-field menu missing** (P0, above).
 - **D10 — back/forward never show** (P0, above).
 - **✓ D2 — no keyboard nav in the menu** · defect · P0 · M · ⚠ undermines the keyboard-first claim. [CL-KBNAV] ★ — ✓ landed (p2a, `60eca12`): arrows+j/k over actionable rows, Enter/Space activate, Esc close+return-focus; needed a `focus_changed:"chrome"` claim so content-triggered menus receive keys. Live-verified.
-- **D3 — hardcoded Google search on selection** · defect · P1 · S · ⚠ violates both config-is-code and no-data-without-consent. [CL-SEARCH]
+- **✓ D3 — hardcoded Google search on selection** · defect · P1 · S · ⚠ violates both config-is-code and no-data-without-consent. [CL-SEARCH] — ✓ landed in the Bucket-B wave: context-menu "search for selection" routes through the configured engine (no hardcoded Google).
 - **D5 — image menu: no "copy image"/"save image"** · gap · P2 · M · (save ties to the deferred `downloads:*` domain.)
 - **D6 — no "open link in background tab"** · gap · P1 · S · `new_tab` op lacks a `background` param (the popup path already has it).
 - **D7 — no plugin-contributed context-menu items (`ui:context_menu` capability)** · gap · P1 · L · ★★ The single strongest extensibility item: vim-mode ("hint mode"), adblock ("block element"), reader-mode, password-manager all want this. Surfaces in the integrity panel transparently. Needs an ADR. (CLAUDE.md explicitly names this a differentiator.)
