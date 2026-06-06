@@ -163,6 +163,8 @@
   // on payload content per ADR-0005). A single shared popover element is reused.
 
   var _activePopover = null; // the currently-open popover (or null)
+  var _activePopoverRover = null; // CL-KBNAV roving controller for the active popover
+  var _activePopoverTrigger = null; // element to return focus to on Esc (or null)
   var currentLoading = false; // reflects the active tab's loading state (set_load_state)
 
   function closeActivePopover() {
@@ -170,13 +172,30 @@
       _activePopover.parentNode.removeChild(_activePopover);
     }
     _activePopover = null;
+    _activePopoverRover = null;
+    _activePopoverTrigger = null;
+    // CL-KBNAV: release chrome focus ownership so key events route back to the
+    // page after the popover closes. Matches the claim made in buildAndShowPopover
+    // when the popover had actionable rows.
+    if (window.mote && window.mote.invoke) {
+      window.mote.invoke("focus_changed", { owner: "page" }).catch(function () {});
+    }
   }
 
   // Build a popover anchored below (x, y) with the given rows. Each row is
   // an object: { label, sublabel?, action? }. Returns the popover element.
   // action is a callback; rows without action are informational (no pointer
   // cursor, slightly dimmer).
-  function buildAndShowPopover(x, y, rows, extraClass) {
+  //
+  // CL-KBNAV: every popover built here is keyboard-navigable via a shared
+  // "roving" controller (window.mote.roving). On show, real DOM focus moves to
+  // the first actionable row; Arrows/j/k move focus between actionable rows
+  // (skipping info rows); Enter/Space activate the focused row (same action the
+  // mousedown handler runs); Esc closes and returns focus to `trigger` when the
+  // call site supplies one (e.g. the security-indicator button). `trigger` is
+  // optional — the content-page right-click menu has no stable trigger, so it
+  // closes and lets focus fall back to the page.
+  function buildAndShowPopover(x, y, rows, extraClass, trigger) {
     closeActivePopover();
 
     var pop = document.createElement("div");
@@ -201,6 +220,14 @@
       }
 
       if (row.action) {
+        // Stash the action on the element so the roving controller's onActivate
+        // (Enter/Space) and the mousedown handler invoke the SAME callback —
+        // no duplicated logic.
+        el._action = row.action;
+        // Roving rows are focusable; the controller rolls tabindex (focused → 0,
+        // rest → -1) once attached. Seed -1 so nothing is in the tab order until
+        // the controller moves focus to the first actionable row.
+        el.setAttribute("tabindex", "-1");
         el.addEventListener("mousedown", function (ev) {
           ev.preventDefault();
           closeActivePopover();
@@ -213,6 +240,53 @@
 
     document.body.appendChild(pop);
     _activePopover = pop;
+    _activePopoverTrigger = trigger || null;
+
+    // CL-KBNAV: attach the shared roving controller over the ACTIONABLE rows.
+    if (window.mote && window.mote.roving) {
+      _activePopoverRover = window.mote.roving.attach({
+        mode: "roving",
+        container: pop,
+        jk: true,
+        wrap: true,
+        getItems: function () {
+          return pop.querySelectorAll(".popover-row.is-actionable");
+        },
+        onActivate: function (item) {
+          // Invoke the row's stored action, then close — same effect as a click.
+          var action = item && item._action;
+          closeActivePopover();
+          if (typeof action === "function") action();
+        },
+      });
+
+      // keydown on the popover: Arrows/j/k navigate; Enter/Space activate.
+      // Esc is handled by the global capture-phase handler (it owns focus
+      // return to the trigger) so it works regardless of which row has focus.
+      pop.addEventListener("keydown", function (ev) {
+        if (!_activePopoverRover) return;
+        if (_activePopoverRover.handleKey(ev)) {
+          ev.preventDefault();
+          return;
+        }
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          _activePopoverRover.activate();
+        }
+      });
+
+      // CL-KBNAV: claim chrome focus ownership so the shell routes key events to
+      // the chrome document. invoke first (queued to the shell), then setIndex(0)
+      // moves DOM focus synchronously — by the time the shell processes the claim
+      // and calls send_focus(true), the focused row is already activeElement.
+      // Skip info-only popovers (no actionable rows): no claim, no key routing.
+      var actionableCount = pop.querySelectorAll(".popover-row.is-actionable").length;
+      if (actionableCount > 0 && window.mote && window.mote.invoke) {
+        window.mote.invoke("focus_changed", { owner: "chrome" }).catch(function () {});
+      }
+      // Move real focus to the first actionable row on show.
+      _activePopoverRover.setIndex(0);
+    }
 
     // Position below click point; flip above if it clips the viewport bottom.
     var vpW = window.innerWidth || document.documentElement.clientWidth;
@@ -238,10 +312,15 @@
     closeActivePopover();
   }, true);
 
-  // Close on Escape.
+  // Close on Escape. CL-KBNAV: capture the trigger BEFORE closeActivePopover()
+  // clears it, then return focus to it when the call site supplied one (e.g.
+  // the security-indicator button). The right-click content menu has no trigger
+  // — focus simply falls back to the page.
   document.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape" && _activePopover) {
+      var trigger = _activePopoverTrigger;
       closeActivePopover();
+      if (trigger && typeof trigger.focus === "function") trigger.focus();
     }
   }, true);
 
@@ -364,7 +443,8 @@
         rect.left,
         rect.bottom + 4,
         info.rows,
-        "security-popover" + (info.secure ? " is-secure" : " is-insecure")
+        "security-popover" + (info.secure ? " is-secure" : " is-insecure"),
+        secureEl // CL-KBNAV: Esc returns focus to the security-indicator button.
       );
     }
 
@@ -1276,14 +1356,78 @@
       return !popover.hidden;
     }
 
+    // CL-KBNAV: intra-popover roving over the option rows. listbox/option
+    // semantics — the controller marks the focused option with aria-selected
+    // and rolls tabindex (focused → 0, rest → -1), moving real DOM focus. j/k +
+    // arrows navigate; wrap. The marker class is "is-sel" (distinct from
+    // "is-current", which denotes the ACTIVE workspace and must survive roving).
+    var wsRover = null;
+    if (window.mote && window.mote.roving) {
+      wsRover = window.mote.roving.attach({
+        mode: "roving",
+        container: popover,
+        jk: true,
+        wrap: true,
+        markerClass: "is-sel",
+        selectedAttr: "aria-selected",
+        getItems: function () {
+          return popover.querySelectorAll(".row[data-id]");
+        },
+        onActivate: function (item) {
+          activateRow(item);
+        },
+      });
+    }
+
     function openPopover() {
       popover.hidden = false;
       strip.setAttribute("aria-expanded", "true");
+      // CL-KBNAV: claim chrome focus ownership so the shell routes key events to
+      // the chrome document while the workspace popover is open. invoke before
+      // setIndex so the claim is queued to the shell first.
+      if (window.mote && window.mote.invoke) {
+        window.mote.invoke("focus_changed", { owner: "chrome" }).catch(function () {});
+      }
+      // Move focus to the current option if present, else the first option.
+      if (wsRover) {
+        var options = popover.querySelectorAll(".row[data-id]");
+        var startIdx = 0;
+        for (var i = 0; i < options.length; i++) {
+          if (options[i].classList.contains("is-current")) {
+            startIdx = i;
+            break;
+          }
+        }
+        wsRover.setIndex(startIdx);
+      }
     }
 
     function closePopover() {
+      // Clear the roving marker/tabindex so a stale aria-selected/is-sel does
+      // not linger on a hidden popover.
+      if (wsRover) wsRover.clear();
       popover.hidden = true;
       strip.setAttribute("aria-expanded", "false");
+      // CL-KBNAV: release chrome focus ownership so key events route back to the
+      // page after the workspace popover closes. Matches the claim in openPopover.
+      if (window.mote && window.mote.invoke) {
+        window.mote.invoke("focus_changed", { owner: "page" }).catch(function () {});
+      }
+    }
+
+    // Invoke set_active_workspace for a given option row, then close. Shared by
+    // the click handler and the roving onActivate (Enter/Space) — one codepath.
+    function activateRow(row) {
+      if (!row) return;
+      var id = row.getAttribute("data-id");
+      if (id && window.mote && window.mote.invoke) {
+        window.mote
+          .invoke("set_active_workspace", { id: id })
+          .catch(function () {});
+      }
+      closePopover();
+      // Strip text updates when the next workspace_list push arrives — no
+      // optimistic update here (the shell is the source of truth).
     }
 
     // Toggle on strip click.
@@ -1311,26 +1455,41 @@
       }
     });
 
+    // CL-KBNAV: intra-popover keydown. Arrows/j/k move focus between options;
+    // Enter/Space activate the focused option; Esc closes and returns focus to
+    // the strip (Esc must work when focus is on an option row inside the
+    // popover, not just on the strip).
+    popover.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape") {
+        closePopover();
+        strip.focus();
+        ev.preventDefault();
+        return;
+      }
+      if (!wsRover) return;
+      if (wsRover.handleKey(ev)) {
+        ev.preventDefault();
+        return;
+      }
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        wsRover.activate();
+      }
+    });
+
     // Close on click-outside (strip or popover clicks are kept).
     document.addEventListener("click", function (ev) {
       if (!isPopoverOpen()) return;
-      if (ev.target.closest(".workspace-strip, .workspace-popover")) return;
+      if (ev.target.closest(".ws-chip, .workspace-popover")) return;
       closePopover();
     });
 
-    // Popover row clicks: invoke set_active_workspace + close.
+    // Popover row clicks: invoke set_active_workspace + close (shared codepath
+    // with the roving Enter/Space activation via activateRow).
     popover.addEventListener("click", function (ev) {
       var row = ev.target.closest(".row[data-id]");
       if (!row) return;
-      var id = row.getAttribute("data-id");
-      if (id && window.mote && window.mote.invoke) {
-        window.mote
-          .invoke("set_active_workspace", { id: id })
-          .catch(function () {});
-      }
-      closePopover();
-      // Strip text updates when the next workspace_list push arrives — no
-      // optimistic update here (the shell is the source of truth).
+      activateRow(row);
     });
 
     // workspace_list applyOp handler chained via prevApplyOp.
@@ -1439,7 +1598,7 @@
         label: direction + " history",
         sublabel: "jump list coming in a later wave",
       },
-    ], "nav-history-popover");
+    ], "nav-history-popover", btn); // CL-KBNAV: Esc returns focus to the nav button.
   }
 
   function wireNavButtons() {

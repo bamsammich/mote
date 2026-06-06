@@ -56,6 +56,14 @@
   background: var(--surface-2);
 }
 
+/* CL-KBNAV: keyboard-focused option. The roving controller marks the focused
+ * row with .is-sel and moves real DOM focus to it; mirror the omnibox's
+ * is-sel surface-2 lift so the focused option is unmistakable. */
+.workspace-popover .row.is-sel {
+  background: var(--surface-2);
+  outline: none;
+}
+
 .workspace-popover .row.is-current {
   color: var(--fg);
 }
