@@ -177,6 +177,10 @@ enum ShellCommand {
     /// [`resolve_omnibox_input`] with the live `search_url_template` to turn
     /// it into a navigable URL before calling `navigate_active`.
     OmniboxSubmit(String),
+    /// Force a search of the given text with the configured engine, bypassing
+    /// URL detection — backs the omnibox's explicit "search ‹engine›" row
+    /// (CL-SEARCH I2).
+    SearchQuery(String),
     /// Open a new tab (and switch to it). Optional URL: when set, the new
     /// tab loads that URL via `create_content_page` (which routes `mote://`
     /// URLs through the global request context per ADR-0015); when `None`,
@@ -709,6 +713,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         load_state_last: false,
         find_query_last: String::new(),
         search_url_template: default_search_url_template().to_owned(),
+        search_engine_name: "DuckDuckGo".to_owned(),
     };
 
     let event_loop = EventLoop::new()?;
@@ -1186,6 +1191,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let reopen_closed_tab_queue = Arc::clone(commands);
     let context_menu_action_queue = Arc::clone(commands);
     let omnibox_submit_queue = Arc::clone(commands);
+    let search_query_queue = Arc::clone(commands);
     OpRegistry::new()
         .register("navigate", move |params: &str| {
             json_string_field(params, "url").map_or_else(
@@ -1209,6 +1215,20 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                     OpResponse::ok("{\"ok\":true}")
                 },
             )
+        })
+        // `search_query` — force a search with the configured engine, bypassing
+        // URL detection. Backs the omnibox's explicit "search ‹engine› for ‹text›"
+        // row (CL-SEARCH I2). Requires a non-empty `text` string field.
+        .register("search_query", move |params: &str| {
+            json_string_field(params, "text")
+                .filter(|s| !s.is_empty())
+                .map_or_else(
+                    || OpResponse::err(400, "search_query requires a non-empty string `text`"),
+                    |text| {
+                        push(&search_query_queue, ShellCommand::SearchQuery(text));
+                        OpResponse::ok("{\"ok\":true}")
+                    },
+                )
         })
         .register("new_tab", move |params: &str| {
             // Optional `url` param: when present, the new tab opens at that
@@ -1753,9 +1773,14 @@ struct ShellApp {
     find_query_last: String,
     /// Active search URL template (default: `DuckDuckGo`).  Updated when the
     /// user changes the search engine via the settings panel (`set_search_engine`
-    /// op → `SetSearchEngine` command).  Used by `OmniboxSubmit` to build the
-    /// search URL for free-text input that does not look like a URL.
+    /// op → `SetSearchEngine` command).  Used by `OmniboxSubmit` and
+    /// `SearchQuery` to build the search URL.
     search_url_template: String,
+    /// Human-readable name of the active search engine (default: `"DuckDuckGo"`).
+    /// Updated alongside `search_url_template` by `SetSearchEngine`.  Pushed to
+    /// the chrome as `set_search_engine_name` so the omnibox can show an explicit
+    /// "search ‹engine› for ‹text›" row (CL-SEARCH I2).
+    search_engine_name: String,
 }
 
 impl std::fmt::Debug for ShellApp {
@@ -1829,6 +1854,10 @@ impl ShellApp {
                         self.navigate_active(&url);
                     }
                 }
+                ShellCommand::SearchQuery(text) => {
+                    let url = make_search(&text, &self.search_url_template.clone());
+                    self.navigate_active(&url);
+                }
                 ShellCommand::NewTab(url) => self.open_tab(url),
                 ShellCommand::CloseTab(id) => self.close_tab(TabId::new(id)),
                 ShellCommand::SelectTab(id) => self.select_tab(TabId::new(id)),
@@ -1872,9 +1901,19 @@ impl ShellApp {
                          name = {name:?}, url_template = {url_template:?}"
                     );
                     // Update the live search engine so the next `OmniboxSubmit`
-                    // uses the new provider immediately (managed.lua write is
-                    // deferred to the Bucket-A config-mutation pass).
+                    // or `SearchQuery` uses the new provider immediately
+                    // (managed.lua write is deferred to the Bucket-A
+                    // config-mutation pass).
                     self.search_url_template.clone_from(&url_template);
+                    self.search_engine_name.clone_from(&name);
+                    if self.chrome_ready {
+                        let name_js = js_string(&name);
+                        self.bridge.page().eval_js(&format!(
+                            "window.mote&&window.mote.applyOp&&\
+                             window.mote.applyOp('set_search_engine_name',\
+                             {{name:{name_js}}});"
+                        ));
+                    }
                 }
                 ShellCommand::SetHwAccel(enabled) => {
                     eprintln!("mote-shell: set_hw_accel → managed.lua: enabled = {enabled}");
@@ -2063,9 +2102,15 @@ impl ShellApp {
                 _ => HostValue::List(vec![]),
             };
 
-        // Convert HostValue → serde_json::Value → JSON string.
-        // Serialisation of a HostValue::List should never fail; defend anyway.
-        let payload_json = match serde_json::to_string(&host_to_json(&suggestions)) {
+        // Convert HostValue → serde_json::Value array, append the synthetic
+        // search record for non-empty text, then serialise to a JSON string.
+        // Serialisation of a well-formed Value::Array never fails; defend anyway.
+        let items = match host_to_json(&suggestions) {
+            serde_json::Value::Array(arr) => arr,
+            _ => vec![],
+        };
+        let items = append_search_record(items, text);
+        let payload_json = match serde_json::to_string(&items) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("mote-shell: urlbar_query serialise failed: {e}; pushing empty list");
@@ -2917,6 +2962,13 @@ impl ShellApp {
         chrome.eval_js(&format!(
             "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_nav_state',\
              {{can_go_back:{can_go_back},can_go_forward:{can_go_forward}}});"
+        ));
+        // CL-SEARCH I2: push the search engine name so the omnibox can render
+        // an explicit "search ‹engine› for ‹text›" row.
+        let engine_name_js = js_string(&self.search_engine_name);
+        chrome.eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&\
+             window.mote.applyOp('set_search_engine_name',{{name:{engine_name_js}}});"
         ));
         // P4 follow-up: built-in status-line elements (mote.tabcount,
         // mote.security) reflect tab/navigation state. Pushing them alongside
@@ -5068,6 +5120,24 @@ fn make_search(query: &str, url_template: &str) -> String {
         default_search_url_template()
     };
     effective.replace(placeholder, &encoded)
+}
+
+/// Append a synthetic search record to `items` when `text` is non-empty.
+///
+/// The appended record is `{"action":"search","query":"<text>"}` where `text`
+/// is stored as a `serde_json::Value::String` (JSON escaping is handled by
+/// `serde_json` on serialisation). The record is always last so provider
+/// suggestions appear above it in the omnibox dropdown. When `text` is empty
+/// the list is returned unchanged.
+///
+/// This is the pure payload-building seam for [`ShellApp::urlbar_query`]
+/// (CL-SEARCH I2).
+fn append_search_record(mut items: Vec<serde_json::Value>, text: &str) -> Vec<serde_json::Value> {
+    if text.is_empty() {
+        return items;
+    }
+    items.push(serde_json::json!({"action": "search", "query": text}));
+    items
 }
 
 /// Return `(host, port_suffix)` by stripping a trailing `:<digits>` port.
@@ -8417,6 +8487,109 @@ mod tests {
             registry.op_names().contains(&"omnibox_submit"),
             "omnibox_submit must be registered; got: {:?}",
             registry.op_names()
+        );
+    }
+
+    // ── CL-SEARCH I2: search_query op + SearchQuery command ──────────────────
+
+    /// `search_query` op is registered (CL-SEARCH I2).
+    #[test]
+    fn i2_search_query_op_is_registered() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = build_op_registry(&queue);
+        assert!(
+            registry.op_names().contains(&"search_query"),
+            "search_query must be registered; got: {:?}",
+            registry.op_names()
+        );
+    }
+
+    /// `search_query` op: valid `text` field → enqueues `ShellCommand::SearchQuery` (CL-SEARCH I2).
+    #[test]
+    fn i2_search_query_op_enqueues_command() {
+        let queue: CommandQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let text = json_string_field(r#"{"text":"github.com"}"#, "text")
+            .filter(|s| !s.is_empty())
+            .expect("text field must parse");
+        push(&queue, ShellCommand::SearchQuery(text));
+
+        let mut q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1, "must enqueue exactly one command");
+        match q.pop_front().unwrap() {
+            ShellCommand::SearchQuery(t) => {
+                assert_eq!(t, "github.com", "command must carry the raw text");
+            }
+            other => panic!("expected SearchQuery; got {other:?}"),
+        }
+    }
+
+    /// `make_search("github.com", default_template)` yields a SEARCH URL, not a
+    /// navigation to github.com — the force-search op bypasses URL detection
+    /// (CL-SEARCH I2).
+    #[test]
+    fn i2_make_search_always_produces_search_url_for_url_like_text() {
+        let tmpl = default_search_url_template();
+        let result = make_search("github.com", tmpl);
+        assert!(
+            result.starts_with("https://duckduckgo.com/"),
+            "make_search must produce a DuckDuckGo search URL even for URL-like text; \
+             got {result:?}"
+        );
+        assert!(
+            result.contains("github.com"),
+            "search URL must contain the encoded query text; got {result:?}"
+        );
+        // Must not navigate straight to github.com.
+        assert_ne!(
+            result, "https://github.com",
+            "force-search must not resolve to https://github.com; got {result:?}"
+        );
+    }
+
+    // ── CL-SEARCH I2 (continued): append_search_record ───────────────────────
+
+    /// Empty provider result + non-empty text → payload ends with the search
+    /// record `{"action":"search","query":"<text>"}` (CL-SEARCH I2).
+    #[test]
+    fn i2_append_search_record_adds_search_row_to_empty_list() {
+        let result = append_search_record(vec![], "hello world");
+        assert_eq!(result.len(), 1, "must produce exactly one element");
+        let rec = &result[0];
+        assert_eq!(rec["action"], "search", "action must be \"search\"");
+        assert_eq!(rec["query"], "hello world", "query must be the raw text");
+    }
+
+    /// Provider list + non-empty text → search record is the LAST element (CL-SEARCH I2).
+    #[test]
+    fn i2_append_search_record_is_last_element() {
+        let existing = vec![serde_json::json!({"url":"https://example.com","title":"Example"})];
+        let result = append_search_record(existing, "example");
+        assert_eq!(result.len(), 2, "must have provider record + search record");
+        let last = result.last().unwrap();
+        assert_eq!(last["action"], "search");
+        assert_eq!(last["query"], "example");
+    }
+
+    /// Query text that requires JSON escaping is escaped correctly (CL-SEARCH I2).
+    #[test]
+    fn i2_append_search_record_escapes_query_text() {
+        let result = append_search_record(vec![], "say \"hello\" & <run>");
+        let last = result.last().unwrap();
+        // serde_json serialises to a Value; confirm the string value is preserved
+        // (serde_json handles the JSON-level escaping on serialisation).
+        assert_eq!(
+            last["query"], r#"say "hello" & <run>"#,
+            "query string value must be preserved verbatim in the Value"
+        );
+    }
+
+    /// Empty text → no search record appended (CL-SEARCH I2).
+    #[test]
+    fn i2_append_search_record_skips_empty_text() {
+        let result = append_search_record(vec![], "");
+        assert!(
+            result.is_empty(),
+            "empty text must not produce a search record; got {result:?}"
         );
     }
 
