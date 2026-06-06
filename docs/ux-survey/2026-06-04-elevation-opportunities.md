@@ -82,6 +82,23 @@ These group findings that share a root cause. Fixing the root lands every listed
 
 ---
 
+## Cluster implementation log
+
+Progress as the clusters are worked one-by-one (order = the row order above).
+`✓` landed + gated · `◐` partially landed · `☐` not started.
+
+- **◐ CL-LOADING** — 1a landed (`4aab43e`): **E2** active-tab `···` ticker +
+  **A12** functional reload↔stop (new `stop` op → `Page::stop_load`). Gate
+  green (fmt/clippy `-D`/tests), 3 new black-box tests, boot-clean
+  smoke-verified (zero errors/panics with the new chrome). Review caught +
+  fixed a `chrome_ready`-ordering bug that would have swallowed the boot
+  tab's first ticker. The transient ticker/glyph *visual* is pending capture
+  (the dev screen was locked at verify time). **B7** ("loading 64%") is
+  **deferred to 1b** — a real percentage needs CEF `OnLoadingProgressChange`;
+  an indeterminate number would be fabricated, which the through-line forbids.
+- ☐ CL-KBNAV · ☐ CL-URL-XPARENCY · ☐ CL-MARKDOWN · ☐ CL-SEARCH ·
+  ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH · ☐ CL-SPECDRIFT
+
 ## Findings by category
 
 ### Navigation & Omnibox
@@ -96,7 +113,7 @@ These group findings that share a root cause. Fixing the root lands every listed
 - **I7 — fuzzy matching + Firefox-style source sigils** (`*`bookmarks `^`history `%`tabs `#`title `$`url) · enh · P2 · L · A query DSL over inspectable local data — a strong dotfiles-native differentiator the qutebrowser crowd expects. ★
 - **I14 — zero-input top-sites/recent on omnibox focus** · gap · P2 · S · Reuses the existing relevance ranking; config-gate it to respect the minimal aesthetic.
 - **A7/E1 — newtab omnibox shows internal URL** · defect · P0 · S · Blank + placeholder + focus on the newtab page instead of `mote://chrome/newtab.html`.
-- **A12 — reload has no stop state** · gap · P2 · M · Static reload→stop *glyph swap* (no spinner) driven by load state. [CL-LOADING]
+- **✓ A12 — reload has no stop state** · gap · P2 · M · Static reload→stop *glyph swap* (no spinner) driven by load state. [CL-LOADING] — ✓ landed (1a, `4aab43e`): functional stop (`stop` op → `Page::stop_load`).
 - **A13 — long-press history popover is a permanent "coming later" stub** · enh · P2 · M · The 500ms timer + anchored popover are built; wire CEF's back/forward entry list. 90% done.
 
 ### Find & In-Page
@@ -126,7 +143,7 @@ These group findings that share a root cause. Fixing the root lands every listed
 
 ### Tabs & Session
 
-- **E2 — tab loading ticker** · gap · P1 · M · The spec'd `.load` `···` accent ticker is dead CSS; `is_loading` is tracked in CEF but never serialized. ★ (terminal-aesthetic, no spinner). [CL-LOADING]
+- **✓ E2 — tab loading ticker** · gap · P1 · M · The spec'd `.load` `···` accent ticker is dead CSS; `is_loading` is tracked in CEF but never serialized. ★ (terminal-aesthetic, no spinner). [CL-LOADING] — ✓ landed (1a, `4aab43e`): active-tab ticker, survives `renderTabs` rebuilds.
 - **E3 — audio/mute indicator** · gap · P1 · M · Spec'd `.audio` `♪` glyph + click-to-mute; CEF audio callback + `tabs_json` field both missing. A tab playing audio is invisible.
 - **E7 — drag-reorder tabs** · gap · P2 · L · Spec'd ("drag: reorder; off-strip = new window") but entirely absent; matters more in a vertical list than a horizontal strip.
 - **E9 — Ctrl+Shift+Tab (reverse cycle) + rebindable prev/next** · gap · P1 · S · Only forward `Ctrl+Tab` exists. [CL-KEYMAP] ★ (rebindable = dotfiles-native)
@@ -158,7 +175,7 @@ These group findings that share a root cause. Fixing the root lands every listed
 ### Status & Feedback
 
 - **B1 — mode chip frozen at NORMAL** (P0, above). ★
-- **B7 — no loading indicator** · gap · P1 · M · Spec'd "connection segment → inline progress + `loading 64%`"; `is_loading` exists in CEF, unsurfaced. ★ [CL-LOADING]
+- **◐ B7 — no loading indicator** · gap · P1 · M · Spec'd "connection segment → inline progress + `loading 64%`"; `is_loading` exists in CEF, unsurfaced. ★ [CL-LOADING] — ◐ deferred to **1b**: the binary state is wired (1a); a real percentage needs CEF `OnLoadingProgressChange` (no fabricated number).
 - **B4 — zoom indicator is passive + transient** · gap · P1 · S · After 1500ms nothing shows current non-100% zoom; remembered-zoom pages give no confirmation. Add a persistent non-100% indicator + tooltip hint "Ctrl+0 to reset" (click-to-reset is blocked by the v2 click API, B5).
 - **B3 — hover-url not stripped/truncated** · gap · P2 · M · ★ Shows full tracked URL verbatim; show origin+path + a tracking-param count. [CL-URL-XPARENCY]
 - **B5 — status elements can't be clickable** · gap · P1 · L · ★ `action`/`disabled` are reserved-v2 stubs; `statusline.publish-clickable` is empty. Activating this makes the status bar as composable as Neovim lualine.
