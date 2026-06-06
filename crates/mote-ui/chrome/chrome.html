@@ -114,19 +114,50 @@
           </span>
           <div class="body">
             <span class="secure" aria-label="connection">⎈</span>
-            <input
-              id="omnibox-input"
-              class="omni-input"
-              type="text"
-              spellcheck="false"
-              autocomplete="off"
-              aria-label="address"
-              placeholder="enter a url"
-              role="combobox"
-              aria-autocomplete="list"
-              aria-controls="omnibox-completions"
-              aria-expanded="false"
-            />
+            <!--
+              CL-URL-XPARENCY A8: unfocused display layer (Safari/Chrome pattern).
+              The omnibox is a plain <input> that cannot style spans inside it, so
+              the editable input and a read-only styled overlay share one slot.
+              The overlay (.omni-url-display) is absolutely positioned on top of
+              the input; host.js renders registrable-domain emphasis into it via
+              createElement+textContent — NEVER innerHTML; the URL parts are
+              page-derived. When unfocused with a display payload the input text
+              goes transparent (.is-display-layer) and the overlay shows; on focus
+              the overlay hides and the raw input shows for editing. The overlay is
+              aria-hidden so the input stays the single accessible address surface.
+            -->
+            <span class="omni-url-slot">
+              <input
+                id="omnibox-input"
+                class="omni-input"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="address"
+                placeholder="enter a url"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-controls="omnibox-completions"
+                aria-expanded="false"
+              />
+              <span
+                id="omnibox-url-display"
+                class="omni-url-display"
+                aria-hidden="true"
+              ></span>
+            </span>
+            <!--
+              CL-URL-XPARENCY A9: tracker-count chip (right region). Hidden until
+              the shell pushes trackers via set_url; text set from trackers.count
+              in host.js. Subtle --danger accent dot, never a loud badge.
+            -->
+            <span class="right">
+              <span
+                id="omnibox-trackers-chip"
+                class="omni-trackers-chip"
+                hidden
+              ></span>
+            </span>
           </div>
         </div>
         <div

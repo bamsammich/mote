@@ -327,7 +327,7 @@
   // ---- P2: Omnibox right-click context menu ----------------------------------
 
   function showOmniboxContextMenu(x, y) {
-    buildAndShowPopover(x, y, [
+    var rows = [
       {
         label: "copy url",
         action: function () {
@@ -336,19 +336,24 @@
           }
         },
       },
-      {
-        label: "copy as markdown link",
+    ];
+
+    // CL-URL-XPARENCY A9: "copy clean url" — opt-in only. Surfaced just after the
+    // "copy url" row when the shell reported trackers; copies trackers.clean (the
+    // tracker-stripped URL) via the same Clipboard API the markdown row uses. The
+    // navigated address is NEVER auto-stripped (surface-don't-strip).
+    var trackers = _omniUrlState.trackers;
+    if (
+      trackers &&
+      typeof trackers.clean === "string" &&
+      trackers.clean.length > 0
+    ) {
+      var cleanUrl = trackers.clean;
+      rows.push({
+        label: "copy clean url",
         action: function () {
-          // Markdown link: [title](url). The title is the omnibox's text
-          // (the page URL). A future wave can read the page title via
-          // window.mote.invoke('get_page_title', {}).
-          var input = document.getElementById("omnibox-input");
-          var url = (input && input.value) ? input.value : "";
-          var md = "[" + url + "](" + url + ")";
-          // Write to clipboard via the Clipboard API (available in chrome
-          // origin). Falls back to copy_active_url if the API is absent.
           if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(md).catch(function () {
+            navigator.clipboard.writeText(cleanUrl).catch(function () {
               if (window.mote && window.mote.invoke) {
                 window.mote.invoke("copy_active_url", {}).catch(function () {});
               }
@@ -357,8 +362,33 @@
             window.mote.invoke("copy_active_url", {}).catch(function () {});
           }
         },
+      });
+    }
+
+    rows.push({
+      label: "copy as markdown link",
+      action: function () {
+        // Markdown link: [title](url). The title is the omnibox's text
+        // (the page URL). A future wave can read the page title via
+        // window.mote.invoke('get_page_title', {}).
+        var input = document.getElementById("omnibox-input");
+        var url = input && input.value ? input.value : "";
+        var md = "[" + url + "](" + url + ")";
+        // Write to clipboard via the Clipboard API (available in chrome
+        // origin). Falls back to copy_active_url if the API is absent.
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(md).catch(function () {
+            if (window.mote && window.mote.invoke) {
+              window.mote.invoke("copy_active_url", {}).catch(function () {});
+            }
+          });
+        } else if (window.mote && window.mote.invoke) {
+          window.mote.invoke("copy_active_url", {}).catch(function () {});
+        }
       },
-    ], "omnibox-context-menu");
+    });
+
+    buildAndShowPopover(x, y, rows, "omnibox-context-menu");
   }
 
   // ---- P2: Security indicator popover ----------------------------------------
@@ -480,6 +510,128 @@
     }
   }
 
+  // ---- CL-URL-XPARENCY: omnibox URL display layer + tracker chip -------------
+  //
+  // The shell pushes a STRUCTURED set_url payload:
+  //   { url, bookmarked, display: {scheme,subdomain,registrable,rest}|null,
+  //     trackers: {count, clean, names[]}|null }
+  // We cache the latest display/trackers/url here so the focus/blur handlers can
+  // re-render the unfocused emphasis layer without another shell round-trip.
+  var _omniUrlState = { url: "", display: null, trackers: null };
+
+  // Build the rest/path segment, underlining tracking params (A9 nice-to-have)
+  // when their names appear in the query string. All segments are built with
+  // createElement + textContent — NEVER innerHTML (rest/names are page-derived,
+  // ADR-0005). Returns a DocumentFragment to append into the display span.
+  function buildRestFragment(rest, names) {
+    var frag = document.createDocumentFragment();
+    var text = typeof rest === "string" ? rest : "";
+    if (!text) return frag;
+
+    // Without a usable name list, emit the rest as a single plain .path span.
+    var validNames = Array.isArray(names)
+      ? names.filter(function (n) {
+          return typeof n === "string" && n.length > 0;
+        })
+      : [];
+    if (validNames.length === 0) {
+      frag.appendChild(makeSpan("path", text));
+      return frag;
+    }
+
+    // Walk the query/fragment splitting on & ? # so each param token can be
+    // matched against the tracker names by its key (before '='). Non-param
+    // tokens (scheme-less path head) stay plain. The delimiters are preserved as
+    // their own plain spans so the rendered text is byte-identical to `rest`.
+    var nameSet = {};
+    validNames.forEach(function (n) {
+      nameSet[n] = true;
+    });
+    var tokens = text.split(/([?#&])/);
+    tokens.forEach(function (tok) {
+      if (tok === "" ) return;
+      if (tok === "?" || tok === "#" || tok === "&") {
+        frag.appendChild(makeSpan("path", tok));
+        return;
+      }
+      var key = tok.split("=")[0];
+      if (nameSet[key]) {
+        frag.appendChild(makeSpan("path track-param", tok));
+      } else {
+        frag.appendChild(makeSpan("path", tok));
+      }
+    });
+    return frag;
+  }
+
+  // Render the emphasized URL into #omnibox-url-display from cached state, and
+  // toggle the overlay vs. the raw input depending on focus. When `focused` is
+  // true (user editing) the raw input shows and the overlay hides — the existing
+  // behavior. When unfocused AND a structured `display` is present, the overlay
+  // shows the emphasized parse and the input text is suppressed. Internal URLs
+  // (display === null) or newtab fall back to the raw/blank input with no overlay.
+  function renderOmniDisplay(focused) {
+    var input = document.getElementById("omnibox-input");
+    var disp = document.getElementById("omnibox-url-display");
+    if (!input || !disp) return;
+
+    var state = _omniUrlState;
+    var useLayer =
+      !focused &&
+      state.display &&
+      typeof state.display === "object" &&
+      !isNewtabUrl(state.url);
+
+    if (!useLayer) {
+      disp.classList.remove("is-shown");
+      disp.textContent = "";
+      input.classList.remove("is-display-layer");
+      return;
+    }
+
+    // Rebuild the overlay spans from the structured parts (textContent only).
+    disp.textContent = "";
+    var d = state.display;
+    if (typeof d.scheme === "string" && d.scheme) {
+      disp.appendChild(makeSpan("host-dim", d.scheme));
+    }
+    if (typeof d.subdomain === "string" && d.subdomain) {
+      disp.appendChild(makeSpan("host-dim", d.subdomain));
+    }
+    if (typeof d.registrable === "string" && d.registrable) {
+      disp.appendChild(makeSpan("host", d.registrable));
+    }
+    var names = state.trackers && Array.isArray(state.trackers.names)
+      ? state.trackers.names
+      : null;
+    disp.appendChild(buildRestFragment(d.rest, names));
+
+    disp.classList.add("is-shown");
+    input.classList.add("is-display-layer");
+  }
+
+  // Update the tracker-count chip from cached state. Shown only when trackers is
+  // present with count > 0; styled as a subtle danger dot + lowercase count.
+  function renderTrackersChip() {
+    var chip = document.getElementById("omnibox-trackers-chip");
+    if (!chip) return;
+    var t = _omniUrlState.trackers;
+    var count = t && typeof t.count === "number" ? t.count : 0;
+    if (!t || count <= 0) {
+      chip.hidden = true;
+      chip.textContent = "";
+      chip.removeAttribute("aria-label");
+      return;
+    }
+    // "· N trackers" — lowercase, no exclamation, dot carries the danger accent.
+    chip.textContent = "";
+    chip.appendChild(makeSpan("dot", ""));
+    var label = count + (count === 1 ? " tracker" : " trackers");
+    chip.appendChild(makeSpan("count", "· " + label));
+    chip.setAttribute("aria-label", label + " in this url");
+    chip.hidden = false;
+  }
+
   // ---- P2: Omnibox mode prefix -----------------------------------------------
   //
   // Three modes: [url] (default), [cmd] (leading '>'), [find] (leading '/').
@@ -536,6 +688,10 @@
     // chrome (omnibox) vs the focused page (plan §1.3).
     input.addEventListener("focus", function () {
       if (omni) omni.classList.add("is-focused");
+      // CL-URL-XPARENCY A8: hide the emphasis overlay and reveal the raw editable
+      // URL while the user is editing. Shares this existing listener so it never
+      // competes with the CL-KBNAV focus_changed claim below.
+      renderOmniDisplay(true);
       // Select-all on focus — standard browser address-bar behavior so a click
       // followed by typing replaces the URL rather than inserting into it.
       input.select();
@@ -548,6 +704,10 @@
     // (standard combobox pattern — 150ms is enough for a click to fire).
     input.addEventListener("blur", function () {
       if (omni) omni.classList.remove("is-focused");
+      // CL-URL-XPARENCY A8: swap back to the emphasized display overlay on blur
+      // (no-op for internal/newtab URLs). Same listener as the focus_changed
+      // page-claim so the two stay in lock-step.
+      renderOmniDisplay(false);
       // Revert to [url] mode on blur so the display is clean when unfocused.
       applyOmniboxMode(omni, modeNameEl, "url");
       if (window.mote && window.mote.invoke) {
@@ -1062,6 +1222,30 @@
           }
           // P2: update the security indicator on navigation.
           updateSecurityIndicator(payload.url);
+        }
+        // CL-URL-XPARENCY A8/A9: cache the structured display + trackers so the
+        // focus/blur handlers can re-render the emphasis overlay without another
+        // push, then render now. `display`/`trackers` are null for internal or
+        // tracker-free URLs (the render helpers no-op accordingly). The overlay
+        // honors current focus state so a push while the user is editing does not
+        // yank the editable view out from under them.
+        if (payload) {
+          _omniUrlState = {
+            url: typeof payload.url === "string" ? payload.url : "",
+            display:
+              payload.display && typeof payload.display === "object"
+                ? payload.display
+                : null,
+            trackers:
+              payload.trackers && typeof payload.trackers === "object"
+                ? payload.trackers
+                : null,
+          };
+          var omniInputEl = document.getElementById("omnibox-input");
+          var isEditing =
+            !!omniInputEl && document.activeElement === omniInputEl;
+          renderOmniDisplay(isEditing);
+          renderTrackersChip();
         }
         // Update bookmark-toggle visual state when present.
         //

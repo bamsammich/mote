@@ -87,6 +87,46 @@
   align-items: center;
   gap: 8px;
   color: var(--fg-2);
+  flex-shrink: 0;
+}
+
+/* ---- CL-URL-XPARENCY A9: tracker-count chip ---- */
+/* Subtle, NOT a loud badge: a small --danger status dot + lowercase mono-sm
+ * count ("· 3 trackers"). No keycap border, no fill — the dot carries the
+ * accent. Hidden via the [hidden] attribute when the shell pushes no trackers. */
+.omni .omni-trackers-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font: var(--text-mono-sm);
+  color: var(--fg-2);
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+}
+
+.omni .omni-trackers-chip[hidden] {
+  display: none;
+}
+
+.omni .omni-trackers-chip .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-dot);
+  background: var(--danger);
+  flex-shrink: 0;
+}
+
+/* ---- CL-URL-XPARENCY A8: editable input + read-only display overlay ---- */
+/* .omni-url-slot is the shared slot the editable input and the styled overlay
+ * occupy. The overlay (.omni-url-display) is absolutely positioned on top of the
+ * input so the two never reflow each other. The slot grows like the input did. */
+.omni .omni-url-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
 }
 
 .omni .omni-input {
@@ -98,6 +138,43 @@
   font: var(--text-mono);
   color: var(--fg);
   caret-color: transparent; /* the block cursor is drawn explicitly */
+}
+
+/* When the display layer is active (unfocused + structured display present) the
+ * raw input text is suppressed so only the emphasized overlay shows. The input
+ * stays in flow and remains the click/focus target (a click on the overlay
+ * region lands on the input beneath it, restoring the editable view). */
+.omni .omni-input.is-display-layer {
+  color: transparent;
+}
+
+/* Read-only emphasis overlay. Pinned over the input box; same mono font + line
+ * box so the styled URL lines up with where the raw text would sit. Overflows
+ * via ellipsis exactly like the input (rule: never elide the text content). */
+.omni .omni-url-display {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%); /* vertical-center the single line over the input */
+  font: var(--text-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis; /* block context keeps ellipsis working on overflow */
+  pointer-events: none;
+  user-select: none;
+}
+
+.omni .omni-url-display.is-shown {
+  display: block;
+}
+
+/* Tracking params underlined within the rest/path segment (A9 nice-to-have):
+ * a dotted --danger underline marks the offending params without shouting. */
+.omni .omni-url-display .track-param {
+  text-decoration: underline dotted var(--danger);
+  text-underline-offset: 2px;
 }
 
 .omni .omni-input::placeholder {
