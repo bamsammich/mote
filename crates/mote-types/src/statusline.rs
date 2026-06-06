@@ -2,9 +2,10 @@
 //!
 //! [`StatusLineElement`] is the v1 schema for an element that a plugin (or the
 //! chrome bootstrap) registers in the status-line. Both plugin-declared elements
-//! (`M.statusline = { … }`) and the three built-in elements (`mote.mode`,
-//! `mote.security`, `mote.tabcount`) share this exact schema so the rendering
-//! code has no special-case branches.
+//! (`M.statusline = { … }`) and the two core built-in elements
+//! (`mote.security`, `mote.tabcount`) share this exact schema so the rendering
+//! code has no special-case branches. (`mote.mode` — vim NORMAL/INSERT — is
+//! provided by the editing-paradigm plugin, not core; see ADR-0019.)
 //!
 //! The `action` and `disabled` fields are **reserved for v2** and are not defined
 //! here; the v1 load pipeline rejects them with a warning log and continues
@@ -218,20 +219,10 @@ impl StatusLineElement {
         }
     }
 
-    /// Construct the `mote.mode` built-in element.
-    #[must_use]
-    pub fn builtin_mode() -> Self {
-        Self {
-            id: "mote.mode".to_owned(),
-            zone: StatusZone::Left,
-            priority: 100,
-            kind: StatusKind::Text,
-            text: Some("NORMAL".to_owned()),
-            icon: None,
-            color: StatusColor::Accent,
-            tooltip: Some("vim mode".to_owned()),
-        }
-    }
+    // NOTE: there is intentionally no `builtin_mode()`. The `mote.mode` (vim
+    // NORMAL/INSERT) status element is provided by the editing-paradigm plugin,
+    // not core (ADR-0019). A core-hardcoded `NORMAL` chip was the CL-SPECDRIFT
+    // B1 drift and has been removed.
 
     /// Construct the `mote.security` built-in element for HTTPS.
     #[must_use]

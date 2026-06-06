@@ -2980,11 +2980,15 @@ impl ShellApp {
     /// Push the current status-line element set into the chrome document via the
     /// `set_statusline_elements` applyOp (ADR-0016).
     ///
-    /// Merges the three built-in chrome elements (`mote.mode`, `mote.security`,
+    /// Merges the two built-in chrome elements (`mote.security`,
     /// `mote.tabcount`) with any plugin-declared elements registered in the
     /// runtime. Built-ins are prepended so their well-known ids are always
     /// present; plugin elements follow. The chrome's `wireStatuslineOp` handler
     /// groups by zone and sorts by priority.
+    ///
+    /// The `mote.mode` (vim NORMAL/INSERT) element is NOT a core built-in — the
+    /// editing-paradigm plugin provides it (ADR-0019); core shipping a hardcoded
+    /// `NORMAL` chip was the CL-SPECDRIFT B1 drift.
     ///
     /// The security element reflects the active tab's URL scheme:
     /// `https://` → secure lock / accent; everything else → triangle-alert / warn.
@@ -3011,7 +3015,6 @@ impl ShellApp {
 
         // Build the full element list: built-ins first, then plugin-declared.
         let mut elements: Vec<mote_types::StatusLineElement> = vec![
-            mote_types::StatusLineElement::builtin_mode(),
             security_el,
             mote_types::StatusLineElement::builtin_tabcount(self.tabs.len()),
         ];
@@ -4936,24 +4939,25 @@ fn windows_key_code(key: &Key) -> i32 {
     }
 }
 
-/// Classify the omnibox text into one of the three mode strings the chrome JS
-/// reads from: `"url"` (default), `"cmd"` (leading `>`), `"find"` (leading `/`).
+/// Classify the omnibox text into one of the core mode strings the chrome JS
+/// reads from: `"url"` (default) or `"find"` (leading `/`).
 ///
-/// This mirrors the JS implementation in `host.js` `wireOmniboxMode()` so the
-/// contract can be tested in Rust. The leading-character triggers are:
-///   `>`  → `[cmd]` mode (command palette)
-///   `/`  → `[find]` mode (find-in-page; functional wiring deferred to P5)
+/// This mirrors the JS implementation in `host.js` so the contract can be tested
+/// in Rust. The only leading-character trigger in core is:
+///   `/`  → `[find]` mode (find-in-page; a core capability)
 ///   else → `[url]` mode (default)
 ///
-/// `[ask]` mode is deferred to the AI phase and intentionally not handled here.
+/// The `[cmd]` command-line and modal editing are owned by the editing-paradigm
+/// plugin (ADR-0019), not core — there is no core cmd-prefix detection. `[ask]`
+/// is likewise deferred to the AI phase. The `/` binding is a documented v0.1
+/// default the paradigm plugin overrides once the keymap API lands.
 ///
 /// This function is defined only for tests — the production mode logic lives in
-/// `host.js`'s `wireOmniboxMode()`. Keeping the Rust mirror lets us unit-test the
-/// classification contract without spinning up the JS runtime.
+/// `host.js`. Keeping the Rust mirror lets us unit-test the classification
+/// contract without spinning up the JS runtime.
 #[cfg(test)]
 pub(crate) fn omnibox_mode_from_text(text: &str) -> &'static str {
     match text.chars().next() {
-        Some('>') => "cmd",
         Some('/') => "find",
         _ => "url",
     }
@@ -7636,11 +7640,12 @@ mod tests {
     // of the omnibox text. These tests encode the contract; the JS implementation
     // in host.js calls the same logic at input time.
 
-    /// Leading `>` → `[cmd]` mode.
+    /// `[cmd]` is NOT a core mode (ADR-0019: owned by the editing-paradigm
+    /// plugin). A leading `>` is just url-mode text in core — no cmd detection.
     #[test]
-    fn p2_omnibox_mode_gt_is_cmd() {
-        assert_eq!(omnibox_mode_from_text(">"), "cmd");
-        assert_eq!(omnibox_mode_from_text("> something"), "cmd");
+    fn adr0019_cmd_prefix_is_not_a_core_mode() {
+        assert_eq!(omnibox_mode_from_text(">"), "url");
+        assert_eq!(omnibox_mode_from_text("> something"), "url");
     }
 
     /// Leading `/` → `[find]` mode.

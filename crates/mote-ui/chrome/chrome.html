@@ -432,15 +432,16 @@
       <!--
         Three-zone status line (ADR-0016). Left, center, and right zones each
         hold `data-sl-el` segments populated by `set_statusline_elements`
-        applyOp from the shell. Built-in elements (mote.mode, mote.security,
+        applyOp from the shell. Built-in elements (mote.security,
         mote.tabcount) are seeded here as static defaults; the shell push
-        replaces them once the runtime is up. Zone separators (`·`) are
+        replaces them once the runtime is up. (mote.mode — vim NORMAL/INSERT —
+        is plugin-provided, not core; ADR-0019.) Zone separators (`·`) are
         rendered in CSS via ::before on `.sl-sep`.
       -->
       <div class="sl" role="status" aria-live="polite">
-        <!-- Left zone: mote.mode (priority 100) then mote.security (priority 50) -->
+        <!-- Left zone: mote.security. (mote.mode — vim NORMAL/INSERT — is NOT a
+             core element; the editing-paradigm plugin provides it, ADR-0019.) -->
         <div class="sl-zone sl-zone--left" data-sl-zone="left">
-          <div class="sl-el mode" data-sl-el="mote.mode" aria-label="vim mode: NORMAL">NORMAL</div>
           <div class="sl-el sl-icon-text" data-sl-el="mote.security" aria-label="connection secure">
             <svg class="sl-icon" aria-hidden="true" width="12" height="12">
               <use href="assets/lucide-sprite.svg#icon-lock"/>

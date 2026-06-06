@@ -694,16 +694,16 @@
 
   // ---- P2: Omnibox mode prefix -----------------------------------------------
   //
-  // Three modes: [url] (default), [cmd] (leading '>'), [find] (leading '/').
-  // [ask] is deferred to the AI phase — intentionally not wired.
-  // Mode is signalled by CSS class on .omni and by updating the .name text node.
-  //
-  // Classification mirrors omnibox_mode_from_text() in mote-shell/src/lib.rs.
+  // Core v0.1 modes: [url] (default), [find] (leading '/'). The [cmd]
+  // command-line + modal editing are owned by the editing-paradigm plugin
+  // (ADR-0019), NOT core — so core does no cmd-prefix detection. ([ask] is
+  // likewise deferred to the AI phase.) find-in-page is a core capability; the
+  // '/' binding is a documented v0.1 default the paradigm plugin overrides once
+  // the keymap API lands. Mode is signalled by CSS class on .omni + the .name
+  // text node. Mirrors omnibox_mode_from_text() in mote-shell/src/lib.rs.
   function omniboxModeFromText(text) {
     if (!text || text.length === 0) return "url";
-    var first = text.charAt(0);
-    if (first === ">") return "cmd";
-    if (first === "/") return "find";
+    if (text.charAt(0) === "/") return "find";
     return "url";
   }
 
@@ -2253,8 +2253,9 @@
       payload = { elements: elements };
 
       // Split elements: plugin-registered vs dynamic built-ins.
-      // Static built-ins (mote.mode, mote.security, mote.tabcount) are seeded
-      // in the HTML and are not touched here.
+      // Static built-ins (mote.security, mote.tabcount) are seeded in the HTML
+      // and are not touched here. (mote.mode is plugin-provided, not core —
+      // ADR-0019.)
       var byZone = { left: [], center: [], right: [] };
       var dynamicBuiltins = [];
       payload.elements.forEach(function (el) {
