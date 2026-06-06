@@ -64,6 +64,13 @@ log = "0.4"
 # determination (ADR-0018). `psl::suffix(host).is_known()` distinguishes a
 # real ICANN/private suffix from the implicit wildcard catch-all.
 psl = "2.1"
+# RFC 3986-compliant URL parser used for structural URL decomposition (host,
+# path, query pairs) in the URL analysis layer.
+url = "2.5"
+# Crowdsourced tracking-parameter removal (LGPL-3.0). Used by the URL analysis
+# layer to strip trackers and unwrap redirect wrappers. `UrlCleaner` is
+# constructed once at startup. See NOTICE for the licensing note.
+clearurls = "0.0.4"
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.

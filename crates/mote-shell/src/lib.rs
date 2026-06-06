@@ -2861,8 +2861,44 @@ impl ShellApp {
             let url_str = tab.url.clone();
             let url = js_string(&url_str);
             let bookmarked = self.is_url_bookmarked(&url_str);
+            let analysis = analyze_url(&url_str);
+            let display_json = analysis.as_ref().map(|a| {
+                format!(
+                    "{{\"scheme\":{},\"subdomain\":{},\"registrable\":{},\"rest\":{}}}",
+                    js_string(&a.scheme),
+                    js_string(&a.subdomain),
+                    js_string(&a.registrable),
+                    js_string(&a.rest),
+                )
+            });
+            let trackers_json = analysis.as_ref().and_then(|a| {
+                if a.tracker_names.is_empty() {
+                    None
+                } else {
+                    let count = a.tracker_names.len();
+                    let clean = js_string(&a.clean_url);
+                    let names: String = a
+                        .tracker_names
+                        .iter()
+                        .map(|n| js_string(n))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    Some(format!(
+                        "{{\"count\":{count},\"clean\":{clean},\"names\":[{names}]}}"
+                    ))
+                }
+            });
+            let display_field = display_json.as_deref().map_or_else(
+                || ",\"display\":null".to_owned(),
+                |d| format!(",\"display\":{d}"),
+            );
+            let trackers_field = trackers_json.as_deref().map_or_else(
+                || ",\"trackers\":null".to_owned(),
+                |t| format!(",\"trackers\":{t}"),
+            );
             chrome.eval_js(&format!(
-                "window.mote&&window.mote.applyOp&&window.mote.applyOp('set_url',{{url:{url},bookmarked:{bookmarked}}});"
+                "window.mote&&window.mote.applyOp&&window.mote.applyOp(\
+                 'set_url',{{\"url\":{url},\"bookmarked\":{bookmarked}{display_field}{trackers_field}}});"
             ));
         }
         // P2: push nav state (can_go_back, can_go_forward) so the [‹][›]
@@ -2920,16 +2956,18 @@ impl ShellApp {
             mote_types::StatusLineElement::builtin_tabcount(self.tabs.len()),
         ];
 
-        // P5: hover-URL preview (center zone, priority 100 so it appears
-        // prominently; initially empty / hidden by a zero-length text check
-        // in the chrome renderer). Show only while the URL is non-empty.
+        // P5 / CL-URL-XPARENCY B3: hover-URL preview (center zone, priority
+        // 100). Show origin+path with query stripped and tracker count appended
+        // when >0. Falls back to the raw string for internal (non-HTTP) URLs.
+        // Per-token styling of the registrable domain is a later chrome concern.
         if let Some(ref url) = self.hover_url_last {
+            let display_text = build_hover_display(url);
             elements.push(mote_types::StatusLineElement::new(
                 "mote.hoverurl".to_owned(),
                 mote_types::StatusZone::Center,
                 100,
                 mote_types::StatusKind::Text,
-                Some(url.clone()),
+                Some(display_text),
                 None,
                 mote_types::StatusColor::Mute,
                 None,
@@ -5162,6 +5200,242 @@ fn has_scheme(t: &str) -> bool {
         }
     }
     false
+}
+
+// ── URL analysis (CL-URL-XPARENCY) ───────────────────────────────────────────
+//
+// `analyze_url` parses an HTTP(S) URL and produces a structured breakdown used
+// by the chrome to (A8) emphasise the registrable domain, (A9) count trackers
+// and offer a clean URL, and (B3) render a stripped hover-URL. Non-HTTP(S)
+// URLs (mote://, about:, data:, …) return `None`; the chrome falls back to the
+// raw string for those.
+//
+// The `clearurls::UrlCleaner` is built once at first call and reused for every
+// subsequent analysis. Construction (~50 ms) compiles ~300 regexes from the
+// embedded JSON rule set; re-running it per URL would be prohibitive.
+
+/// The structural breakdown of an HTTP(S) URL produced by [`analyze_url`].
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct UrlAnalysis {
+    /// Scheme including separator, e.g. `"https://"`. Always `"https://"` or
+    /// `"http://"` (only those schemes reach `analyze_url`).
+    pub(crate) scheme: String,
+    /// Host labels that precede the registrable domain, with a trailing dot.
+    /// `"www."` for `www.theverge.com`; `""` when the host *is* the registrable
+    /// domain (e.g. `theverge.com` directly, or an IP / `localhost`).
+    pub(crate) subdomain: String,
+    /// The eTLD+1 via `psl`, i.e. the emphasised part (`"theverge.com"`).
+    /// For IP literals, `localhost`, and non-PSL hosts the entire host
+    /// (including port) is returned here.
+    pub(crate) registrable: String,
+    /// Everything after the host: path, query-string, fragment.
+    /// E.g. `"/2024/x/story?utm_source=nl&utm_medium=email"`.
+    pub(crate) rest: String,
+    /// The URL after clearurls has stripped tracking parameters and/or
+    /// unwrapped a redirect wrapper. Equal to the original URL when no rules
+    /// matched.
+    pub(crate) clean_url: String,
+    /// Query-parameter names that were present in the raw URL but are absent
+    /// from `clean_url` (i.e. the tracking parameters). `len()` is the tracker
+    /// count.
+    pub(crate) tracker_names: Vec<String>,
+}
+
+/// Lazily-initialised `UrlCleaner` reused for every `analyze_url` call.
+///
+/// Construction is expensive (~50 ms, compiles ~300 regexes). The `OnceLock`
+/// ensures we pay the cost exactly once per process.
+fn url_cleaner() -> Option<&'static clearurls::UrlCleaner> {
+    use std::sync::OnceLock;
+    static CLEANER: OnceLock<Option<clearurls::UrlCleaner>> = OnceLock::new();
+    CLEANER
+        .get_or_init(|| {
+            clearurls::UrlCleaner::from_embedded_rules()
+                .map_err(|e| eprintln!("mote-shell: clearurls init failed: {e}"))
+                .ok()
+        })
+        .as_ref()
+}
+
+/// Parse `raw` into a [`UrlAnalysis`].
+///
+/// Returns `None` for any URL that is not `http://` or `https://`, for
+/// unparsable input, and for clearurls errors (degrading gracefully by falling
+/// back to `None` so the chrome renders the raw string).
+pub(crate) fn analyze_url(raw: &str) -> Option<UrlAnalysis> {
+    use std::collections::HashSet;
+    use url::Url;
+
+    // Only analyse HTTP(S) URLs. mote://, about:, data:, empty, etc. → None.
+    let scheme_str = if raw.starts_with("https://") {
+        "https://"
+    } else if raw.starts_with("http://") {
+        "http://"
+    } else {
+        return None;
+    };
+
+    let parsed = Url::parse(raw).ok()?;
+
+    // ── host split: subdomain + registrable ──────────────────────────────
+    // `parsed.host_str()` never includes the port. We reconstruct the
+    // host-with-optional-port string for `registrable` when psl has no suffix
+    // (IPs, localhost, non-PSL TLDs).
+    let host = parsed.host_str()?;
+    let host_with_port = parsed
+        .port()
+        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+
+    let (subdomain, registrable) = split_registrable(host, &host_with_port);
+
+    // ── rest: path + query + fragment ────────────────────────────────────
+    let rest = {
+        let mut r = parsed.path().to_owned();
+        if let Some(q) = parsed.query() {
+            r.push('?');
+            r.push_str(q);
+        }
+        if let Some(f) = parsed.fragment() {
+            r.push('#');
+            r.push_str(f);
+        }
+        r
+    };
+
+    // ── clearurls cleaning ────────────────────────────────────────────────
+    // On cleaner init failure we degrade gracefully: clean_url = raw, no
+    // trackers reported.
+    let clean_url = url_cleaner()
+        .and_then(|c| {
+            c.clear_single_url_str(raw)
+                .map_err(|e| eprintln!("mote-shell: clearurls clean failed: {e}"))
+                .ok()
+        })
+        .map_or_else(|| raw.to_owned(), std::borrow::Cow::into_owned);
+
+    // ── tracker diff: param names in raw but absent from clean_url ────────
+    let raw_params: HashSet<String> = parsed.query_pairs().map(|(k, _)| k.into_owned()).collect();
+
+    let clean_params: HashSet<String> = Url::parse(&clean_url)
+        .ok()
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, _)| k.into_owned())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut tracker_names: Vec<String> = raw_params.difference(&clean_params).cloned().collect();
+    tracker_names.sort();
+
+    Some(UrlAnalysis {
+        scheme: scheme_str.to_owned(),
+        subdomain,
+        registrable,
+        rest,
+        clean_url,
+        tracker_names,
+    })
+}
+
+/// Split `host` (no port) into `(subdomain, registrable)` using the PSL.
+///
+/// Returns `("", host_with_port)` when:
+/// - the host is an IP literal or localhost (no PSL suffix),
+/// - the PSL does not know the suffix,
+/// - or the suffix covers the entire hostname (bare TLD edge case).
+fn split_registrable(host: &str, host_with_port: &str) -> (String, String) {
+    use std::net::IpAddr;
+    use std::str::FromStr as _;
+
+    // IP literals and localhost → no subdomain; registrable = full host+port.
+    let addr_candidate = if host.starts_with('[') && host.ends_with(']') {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    };
+    if IpAddr::from_str(addr_candidate).is_ok()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+    {
+        return (String::new(), host_with_port.to_owned());
+    }
+
+    // PSL lookup. `psl::suffix` returns the *suffix* (e.g. `"com"` for
+    // `"theverge.com"`). `psl::domain` returns the *registrable domain*
+    // (eTLD+1, e.g. `"theverge.com"`).
+    let host_bytes = host.as_bytes();
+    if let Some(domain) = psl::domain(host_bytes) {
+        let domain_str = std::str::from_utf8(domain.as_bytes()).unwrap_or(host);
+        if host.len() > domain_str.len() {
+            // There are labels before the registrable domain.
+            let sub_end = host.len() - domain_str.len();
+            // sub_end already includes the trailing dot that separates
+            // subdomain from registrable, so subdomain = host[..sub_end].
+            let subdomain = host[..sub_end].to_owned();
+            return (subdomain, domain_str.to_owned());
+        }
+        // No subdomain; the host *is* the registrable domain.
+        return (String::new(), domain_str.to_owned());
+    }
+
+    // No PSL entry → return full host+port as registrable.
+    (String::new(), host_with_port.to_owned())
+}
+
+/// Build the B3 stripped hover-URL text for the status-line.
+///
+/// For HTTP(S) URLs: `"<registrable><path-only> · N trackers"` when there are
+/// trackers, or `"<registrable><path-only>"` when there are none. Query string
+/// and fragment are removed from the displayed form (B3 spec: query stripped).
+/// For non-HTTP(S) URLs (mote://, about:, …): the raw string is returned
+/// unchanged (no analysis available).
+///
+/// The result is truncated at 120 code-points so it fits on a single status
+/// line without overflowing.
+fn build_hover_display(url: &str) -> String {
+    use url::Url;
+
+    const MAX_LEN: usize = 120;
+
+    let text = if let Some(a) = analyze_url(url) {
+        // B3: derive the preview from `clean_url`, which clearurls has already
+        // de-tracked and — crucially — redirect-unwrapped. This means the hover
+        // shows *where the link actually goes*, not the wrapper URL.
+        //
+        // Show the full host (including subdomain — `login.paypal.com` vs
+        // `paypal.com.evil.ru` must look different) plus path, query stripped
+        // (clearurls already removed trackers; we drop any remainder too).
+        let preview = Url::parse(&a.clean_url)
+            .ok()
+            .and_then(|u| {
+                let host = u.host_str()?.to_owned();
+                let path = u.path().to_owned();
+                Some(format!("{host}{path}"))
+            })
+            .unwrap_or_else(|| a.clean_url.clone());
+
+        let count = a.tracker_names.len();
+        if count > 0 {
+            format!(
+                "{preview} · {} tracker{}",
+                count,
+                if count == 1 { "" } else { "s" }
+            )
+        } else {
+            preview
+        }
+    } else {
+        url.to_owned()
+    };
+
+    // Truncate at MAX_LEN code-points (not bytes) to avoid multi-byte splits.
+    if text.chars().count() > MAX_LEN {
+        text.chars().take(MAX_LEN).collect()
+    } else {
+        text
+    }
 }
 
 /// Extract a top-level string field `"field": "value"` from a JSON object.
@@ -8273,6 +8547,135 @@ mod tests {
             "true→false: exactly two total pushes expected"
         );
         assert!(!last, "cache must update to false");
+    }
+
+    // ── analyze_url (CL-URL-XPARENCY) ────────────────────────────────────────
+
+    /// A tracked URL must be split into scheme/subdomain/registrable/rest
+    /// and the three UTM/gclid params must be identified as trackers.
+    #[test]
+    fn url_analysis_tracked_url_splits_and_finds_trackers() {
+        let raw = "https://www.theverge.com/2024/x/story?utm_source=nl&utm_medium=email&gclid=abc";
+        let a = analyze_url(raw).expect("tracked http URL must parse");
+        assert_eq!(a.scheme, "https://");
+        assert_eq!(a.subdomain, "www.");
+        assert_eq!(a.registrable, "theverge.com");
+        // rest includes path + raw query string (everything after the host).
+        assert_eq!(
+            a.rest,
+            "/2024/x/story?utm_source=nl&utm_medium=email&gclid=abc"
+        );
+        // The clean URL must have all three tracking params removed.
+        assert!(!a.clean_url.contains("utm_source"));
+        assert!(!a.clean_url.contains("utm_medium"));
+        assert!(!a.clean_url.contains("gclid"));
+        // tracker_names must name all three (order-insensitive).
+        // tracker_names is already sorted by analyze_url.
+        assert_eq!(a.tracker_names, vec!["gclid", "utm_medium", "utm_source"]);
+    }
+
+    /// A clean URL (no known tracking params) must produce an empty tracker list
+    /// and an unchanged (modulo clearurls normalization) `clean_url`.
+    #[test]
+    fn url_analysis_clean_url_no_trackers() {
+        let raw = "https://www.rust-lang.org/learn?edition=2024";
+        let a = analyze_url(raw).expect("clean http URL must parse");
+        assert!(
+            a.tracker_names.is_empty(),
+            "clean URL must have no trackers; got {:?}",
+            a.tracker_names
+        );
+        // The retained query param must still be present in clean_url.
+        assert!(
+            a.clean_url.contains("edition=2024"),
+            "non-tracking param must be kept in clean_url"
+        );
+    }
+
+    /// localhost and IP-literal hosts must not panic and must use the full
+    /// host as the registrable domain (psl has no suffix for these).
+    #[test]
+    fn url_analysis_localhost_and_ip() {
+        let loc = analyze_url("https://localhost:3000/x").expect("localhost must parse");
+        assert_eq!(loc.registrable, "localhost:3000");
+        assert_eq!(loc.subdomain, "");
+
+        let ip = analyze_url("http://192.168.1.1/path").expect("IP must parse");
+        assert_eq!(ip.registrable, "192.168.1.1");
+        assert_eq!(ip.subdomain, "");
+    }
+
+    /// Internal mote:// and about: URLs must return None — no analysis.
+    #[test]
+    fn url_analysis_internal_urls_return_none() {
+        assert!(
+            analyze_url("mote://chrome/newtab.html").is_none(),
+            "mote:// must return None"
+        );
+        assert!(
+            analyze_url("about:blank").is_none(),
+            "about: must return None"
+        );
+        assert!(analyze_url("").is_none(), "empty string must return None");
+    }
+
+    /// clearurls unwraps Google `url?q=` redirect wrappers: `clean_url` should
+    /// be the destination, not the wrapper.
+    #[test]
+    fn url_analysis_redirect_wrapper_is_unwrapped() {
+        let raw = "https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fpage&sa=D";
+        let a = analyze_url(raw).expect("google redirect URL must parse");
+        assert!(
+            a.clean_url.contains("example.com"),
+            "clean_url must be the unwrapped destination; got {}",
+            a.clean_url
+        );
+        assert!(
+            !a.clean_url.contains("google.com"),
+            "clean_url must not be the wrapper; got {}",
+            a.clean_url
+        );
+    }
+
+    /// `build_hover_display` for a redirect wrapper must show the **unwrapped
+    /// destination's** full host (including subdomain) + path, NOT the wrapper's
+    /// path. Tracker count is appended when > 0.
+    #[test]
+    fn hover_display_redirect_wrapper_shows_destination() {
+        // A typical email-click redirect wrapper: raw URL is on the wrapper
+        // domain; clearurls unwraps it to the real destination.
+        // We use the Google /url?q= form which clearurls is confirmed to unwrap.
+        let wrapper = "https://www.google.com/url?q=https%3A%2F%2Fwww.theverge.com%2Fbig-story%3Futm_source%3Dnl&sa=D";
+        let display = build_hover_display(wrapper);
+
+        // Must show the destination host (full, including subdomain) + path.
+        assert!(
+            display.starts_with("www.theverge.com"),
+            "hover must lead with destination full host; got: {display}"
+        );
+        assert!(
+            display.contains("/big-story"),
+            "hover must contain destination path; got: {display}"
+        );
+        // Must NOT expose the wrapper path.
+        assert!(
+            !display.contains("/url"),
+            "hover must NOT show wrapper path; got: {display}"
+        );
+        assert!(
+            !display.contains("google.com"),
+            "hover must NOT show wrapper host; got: {display}"
+        );
+        // utm_source is a tracker — count must be appended.
+        assert!(
+            display.contains("tracker"),
+            "hover must append tracker count; got: {display}"
+        );
+        // Query must be stripped from the preview.
+        assert!(
+            !display.contains("utm_source"),
+            "hover must not contain raw query params; got: {display}"
+        );
     }
 
     /// `omnibox_submit` op: valid `text` field → enqueues `ShellCommand::OmniboxSubmit`.
