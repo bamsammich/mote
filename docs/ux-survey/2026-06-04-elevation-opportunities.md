@@ -167,7 +167,21 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   removed `[cmd]` detection + the `NORMAL` built-in from core. So **A3** dissolves
   (no core cmd-prefix), **A6** resolves (Esc documented; modal stickiness is
   plugin-owned), **B1** resolves (chip is plugin-provided).
-- ☐ CL-KEYMAP · ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH
+- **✓ CL-KEYMAP** — complete (`4677278` code · `b939e4b` ADR-0012 amendment),
+  held to ADR-0019 (core Firefox/Chrome-aligned defaults; plugin-override is the
+  Phase-6 layer; no vim/modal bindings here). The suite was already
+  comprehensive **and shell-intercepted** (`intercept_keybind` runs before
+  `route_key`), so the "⌘T/⌘L from content focus" backlog worry was already
+  handled — my CL-KBNAV "⌘L is chrome-side" note was a misdiagnosis (that was
+  the *arrows*, which route to the focus owner). Added: **A5** (`Ctrl+K` →
+  focus omnibox), **E9** (`Ctrl+Shift+Tab` → reverse cycle). **E4** (the
+  decision): flipped `Ctrl+1–9` → **tab-by-index** (every mainstream browser
+  does this), workspaces → `Ctrl+Alt+1–9`. F3/F1/F10 landed in the Bucket-B
+  wave. Live-verified: `Ctrl+Alt+2` → workspace "Work", `Ctrl+Alt+1` → "Default"
+  (ALT modifier correctly detected at runtime). Known gap (out of scope,
+  pre-existing): the char-chord suite is `CONTROL`-gated, so ⌘-on-Mac needs a
+  separate platform-aware modifier change (affects the whole suite uniformly).
+- ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH
 
 ## Findings by category
 
@@ -216,8 +230,8 @@ Progress as the clusters are worked one-by-one (order = the row order above).
 - **✓ E2 — tab loading ticker** · gap · P1 · M · The spec'd `.load` `···` accent ticker is dead CSS; `is_loading` is tracked in CEF but never serialized. ★ (terminal-aesthetic, no spinner). [CL-LOADING] — ✓ landed (1a, `4aab43e`): active-tab ticker, survives `renderTabs` rebuilds.
 - **E3 — audio/mute indicator** · gap · P1 · M · Spec'd `.audio` `♪` glyph + click-to-mute; CEF audio callback + `tabs_json` field both missing. A tab playing audio is invisible.
 - **E7 — drag-reorder tabs** · gap · P2 · L · Spec'd ("drag: reorder; off-strip = new window") but entirely absent; matters more in a vertical list than a horizontal strip.
-- **E9 — Ctrl+Shift+Tab (reverse cycle) + rebindable prev/next** · gap · P1 · S · Only forward `Ctrl+Tab` exists. [CL-KEYMAP] ★ (rebindable = dotfiles-native)
-- **E4 — direct tab-by-index switching** · gap · P1 · M · ⚠ Ctrl+1–9 is taken by workspaces; resolve the allocation (e.g. Ctrl+Alt+N for tabs) explicitly. [CL-KEYMAP]
+- **✓ E9 — Ctrl+Shift+Tab (reverse cycle) + rebindable prev/next** · gap · P1 · S · Only forward `Ctrl+Tab` exists. [CL-KEYMAP] ★ (rebindable = dotfiles-native) — ✓ landed (`4677278`): `Ctrl+Shift+Tab` → `CyclePrevTab`. (Rebindability is the Phase-6 keybind-plugin layer, ADR-0019.)
+- **✓ E4 — direct tab-by-index switching** · gap · P1 · M · ⚠ Ctrl+1–9 is taken by workspaces; resolve the allocation (e.g. Ctrl+Alt+N for tabs) explicitly. [CL-KEYMAP] — ✓ landed (`4677278` + ADR-0012 amendment `b939e4b`): `Ctrl+1–9` → tab-by-index (Firefox/Chrome-aligned per ADR-0019); workspaces → `Ctrl+Alt+1–9`. Live-verified.
 - **E11 — recently-closed-tab surface** · gap · P2 · M · `ClosedTabStack` exists + Ctrl+Shift+T pops it, but no way to reopen the *2nd*-last or see the stack. ★ A collapsed "N closed ›" row at the bottom of the `[tabs]` panel (same mono row style) — distinct from the chronological `[history]` panel.
 - **E10 — tab-count chip shows while non-tabs panel active** · defect · P2 · S · The `[tabs]` count persists under the `[bookmarks]`/`[history]` header, implying "3 bookmarks." Gate it to the tabs panel.
 - **E8 — rail active-stripe clips outside the activitybar** · defect · P2 · S · `left:-4px` stripe can collide with the structural border under subpixel rounding; `overflow:hidden` or inset.
