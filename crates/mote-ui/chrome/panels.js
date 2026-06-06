@@ -632,18 +632,61 @@
     return root;
   }
 
+  // CL-KBNAV: roving controller over the integrity panel's plugin cards.
+  // Attached on each render, cleared on hide. Module-level so hideIntegrityPanel
+  // can detach it even though it was created inside renderIntegrityPanel.
+  var _integrityRover = null;
+
   function renderIntegrityPanel(data) {
     var root = ensureIntegrityRoot();
     clear(root);
+    // Detach any stale rover over the just-cleared DOM before re-mounting.
+    _integrityRover = null;
     root.appendChild(buildPanelDom(data));
     root.hidden = false;
+
+    // CL-KBNAV: claim chrome focus so the shell routes key events here, then
+    // attach the roving controller and focus the first card. Claim first so
+    // the shell processes it before send_focus(true) — CEF then delivers keys
+    // to the chrome document where the focused card is already activeElement.
+    if (window.mote && window.mote.invoke) {
+      window.mote.invoke("focus_changed", { owner: "chrome" }).catch(function () {});
+    }
+    if (window.mote && window.mote.roving) {
+      _integrityRover = window.mote.roving.attach({
+        mode: "roving",
+        jk: true,
+        wrap: true,
+        markerClass: "is-sel",
+        selectedAttr: "aria-selected",
+        getItems: function () {
+          var r = document.getElementById("mote-integrity-root");
+          return r ? r.querySelectorAll(".plugin-card") : [];
+        },
+        onActivate: function (card) {
+          // "Enter to expand" — move focus into the first actionable control of
+          // the focused card (revoke / action button). If the card has no
+          // buttons, the activation is a no-op.
+          var btn = card && card.querySelector("button");
+          if (btn && typeof btn.focus === "function") btn.focus();
+        },
+      });
+      // Move real DOM focus to the first card.
+      _integrityRover.setIndex(0);
+    }
   }
 
   function hideIntegrityPanel() {
     var root = document.getElementById("mote-integrity-root");
+    // Detach the rover before clearing so getItems() can't walk removed nodes.
+    _integrityRover = null;
     if (root) {
       root.hidden = true;
       clear(root);
+    }
+    // CL-KBNAV: release chrome focus ownership so key events route to the page.
+    if (window.mote && window.mote.invoke) {
+      window.mote.invoke("focus_changed", { owner: "page" }).catch(function () {});
     }
   }
 
@@ -1087,6 +1130,27 @@
   window.mote.hideIntegrityPanel = hideIntegrityPanel;
   window.mote.showApprovalDialog = showApprovalDialog;
   window.mote.hideApprovalDialog = hideApprovalDialog;
+
+  // CL-KBNAV: drive the integrity panel's roving controller. roving.attach()
+  // does not install its own keydown listener (the caller owns the event).
+  // A single document-level listener — guarded by _integrityRover so it is
+  // inert when the panel is closed — is used instead of one scoped to the
+  // panel element: after the shell's async send_focus(true) the focused card
+  // may no longer be document.activeElement, so a keydown could fire on
+  // <body> and never reach a panel-scoped listener. handleKey is marker-based
+  // (it reads the is-sel row, not document focus), so a top-level listener
+  // navigates correctly regardless of where focus actually landed.
+  document.addEventListener("keydown", function (ev) {
+    if (!_integrityRover) return;
+    if (_integrityRover.handleKey(ev)) {
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      _integrityRover.activate();
+    }
+  });
 
   // Compose with host.js's applyOp: host.js installs its own switch first;
   // we wrap it so this module's ops fall through to the existing handler.

@@ -113,6 +113,18 @@
   border-color: var(--danger);
 }
 
+/* CL-KBNAV: keyboard-focused card. The roving controller marks the focused
+ * card with .is-sel and sets tabindex=0 + real DOM focus. Surface-2 lift
+ * mirrors the omnibox/workspace is-sel idiom; accent left-edge makes the
+ * focused card unmistakable when multiple cards are visible. Suppress the
+ * browser default outline — our own highlight is the visible indicator. */
+.plugin-card.is-sel {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+  border-left-width: 2px;
+  outline: none;
+}
+
 /* ---- Plugin card: header row ---- */
 
 .plugin-card-head {
