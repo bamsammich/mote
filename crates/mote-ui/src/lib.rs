@@ -41,8 +41,9 @@ pub use element::{Element, ElementKind, ElementRef, RefSelector};
 pub use host::{Node, UiHost};
 pub use icon_registry::{IconRegistry, LucideIcon, SetIconError};
 pub use integrity::{
-    ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
-    NarrowMode, NarrowablePermission, PermissionRow, PluginAction, PluginKind, PluginRow,
+    ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityDetailPayload,
+    IntegrityListPayload, IntegrityListRow, IntegrityPanel, IntegrityStatus, NarrowMode,
+    NarrowablePermission, OpSummary, PermissionRow, PluginAction, PluginKind, PluginRow,
     SecretAccessRow, StorageRow,
 };
 pub use layout::Layout;

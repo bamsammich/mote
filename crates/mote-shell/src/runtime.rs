@@ -42,7 +42,8 @@ use mote_secrets::SecretResolver;
 use mote_storage::{IdentityScope, Store};
 use mote_types::{IdentityId, PluginName, SchemaVersion};
 use mote_ui::{
-    ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityPanel, IntegrityStatus,
+    ApprovalRequest, AuditDecision, AuditRow, DenialRow, IntegrityDetailPayload,
+    IntegrityListPayload, IntegrityListRow, IntegrityPanel, IntegrityStatus, OpSummary,
     PermissionRow, PluginAction, PluginKind, PluginRow, SecretAccessRow, StorageRow,
 };
 
@@ -709,25 +710,52 @@ impl PluginHost {
 
         let query = self.audit.query();
 
-        // Network/activity summary: collapse recent Allow events into per-plugin
-        // counts.  Only allowed calls are counted here; denials remain in the
-        // `denials` section below.  Asserting Allowed over a mixed total would
-        // be a false claim on a transparency surface.
-        let mut counts: Vec<(String, usize)> = query
-            .allowed_counts_per_plugin()
-            .into_iter()
-            .map(|(p, c)| (p.as_str().to_owned(), c))
-            .collect();
-        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let network_audit = counts
-            .into_iter()
-            .map(|(actor, count)| AuditRow {
-                actor,
-                count: count as u64,
-                decision: AuditDecision::Allowed,
-                detail: None,
-            })
-            .collect();
+        // Network/activity summary (H1): produce one allowed-row AND one
+        // blocked-row per plugin so the panel reflects the REAL allow/deny mix.
+        // A plugin with only denials gets no allowed row; one with only allows
+        // gets no denied row. Both decision types appear when both are present.
+        // Rows are sorted by count descending within each decision bucket, then
+        // by plugin name for stability.
+        let allowed = query.allowed_counts_per_plugin();
+        let denied = query.denied_counts_per_plugin();
+
+        // Collect the union of plugin names across both maps.
+        let mut plugin_names: std::collections::BTreeSet<PluginName> =
+            std::collections::BTreeSet::new();
+        for name in allowed.keys().chain(denied.keys()) {
+            plugin_names.insert(name.clone());
+        }
+
+        let mut audit_rows: Vec<AuditRow> = Vec::new();
+        for name in plugin_names {
+            let actor = name.as_str().to_owned();
+            if let Some(&count) = allowed.get(&name) {
+                audit_rows.push(AuditRow {
+                    actor: actor.clone(),
+                    count: count as u64,
+                    decision: AuditDecision::Allowed,
+                    detail: None,
+                });
+            }
+            if let Some(&count) = denied.get(&name) {
+                audit_rows.push(AuditRow {
+                    actor,
+                    count: count as u64,
+                    decision: AuditDecision::Blocked,
+                    detail: None,
+                });
+            }
+        }
+        // Sort blocked rows before allowed within the same plugin (most visible
+        // first), then by count descending overall, then alphabetically.
+        audit_rows.sort_by(|a, b| {
+            let decision_ord = matches!(b.decision, AuditDecision::Blocked)
+                .cmp(&matches!(a.decision, AuditDecision::Blocked));
+            decision_ord
+                .then_with(|| b.count.cmp(&a.count))
+                .then_with(|| a.actor.cmp(&b.actor))
+        });
+        let network_audit = audit_rows;
 
         let denials = query
             .recent_denials(20)
@@ -759,6 +787,85 @@ impl PluginHost {
             storage,
             denials,
         }
+    }
+
+    /// Builds the detail payload for a single named plugin (H16).
+    ///
+    /// Looks up the plugin in `self.loaded` (and `pending_approvals`) by name,
+    /// reads its lock entry (checksum, pinned commit, source) from the manager,
+    /// and returns the structured payload the chrome renders as the
+    /// `render_integrity_detail` applyOp.
+    ///
+    /// Returns `None` when the named plugin is not found or the lock cannot be
+    /// read (non-fatal; the caller logs and skips the push).
+    pub(crate) fn integrity_detail_payload(&self, name: &str) -> Option<IntegrityDetailPayload> {
+        // Find the plugin in loaded or pending.
+        let rp = self
+            .loaded
+            .iter()
+            .find(|rp| rp.name.as_str() == name)
+            .or_else(|| {
+                self.pending_approvals
+                    .iter()
+                    .map(|(rp, _)| rp)
+                    .find(|rp| rp.name.as_str() == name)
+            })?;
+
+        let integrity = ui_integrity(rp.provenance, &rp.integrity);
+
+        // Pull checksum / commit from the lock entry when present.
+        let lock = self.manager.lock();
+        let plugin_name = &rp.name;
+        let (lock_source, pinned_commit, checksum) =
+            lock.as_ref().map_or((None, None, None), |l| {
+                l.plugins
+                    .get(plugin_name)
+                    .map_or((None, None, None), |entry| {
+                        (
+                            Some(entry.source.to_string()),
+                            entry.commit.clone(),
+                            Some(entry.checksum.to_string()),
+                        )
+                    })
+            });
+
+        let actual_checksum = if let MgrIntegrity::Mismatch { actual, .. } = &rp.integrity {
+            Some(actual.to_string())
+        } else {
+            None
+        };
+
+        Some(IntegrityDetailPayload {
+            name: rp.name.as_str().to_owned(),
+            integrity,
+            lock_source,
+            pinned_commit,
+            checksum,
+            actual_checksum,
+        })
+    }
+
+    /// Builds the integrity-list payload for the settings page (H14).
+    ///
+    /// Reuses the loaded/pending plugin data already computed by `build_panel`
+    /// without duplicating logic: maps each plugin to an [`IntegrityListRow`]
+    /// with its name, version, integrity status, and source label.
+    pub(crate) fn integrity_list_payload(&self) -> IntegrityListPayload {
+        let plugins: Vec<IntegrityListRow> = self
+            .loaded
+            .iter()
+            .chain(self.pending_approvals.iter().map(|(rp, _)| rp))
+            .map(|rp| {
+                let kind = provenance_to_kind(rp.provenance, &rp.dir, rp.lock_source.as_deref());
+                IntegrityListRow {
+                    name: rp.name.as_str().to_owned(),
+                    version: rp.manifest.version.clone(),
+                    integrity: ui_integrity(rp.provenance, &rp.integrity),
+                    source_label: kind.source_label(),
+                }
+            })
+            .collect();
+        IntegrityListPayload { plugins }
     }
 
     /// Builds the panel row for a loaded plugin from its live runtime state.
@@ -817,7 +924,7 @@ impl PluginHost {
             })
             .unwrap_or_default();
 
-        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        let kind = provenance_to_kind(rp.provenance, &rp.dir, rp.lock_source.as_deref());
         PluginRow {
             name: rp.name.as_str().to_owned(),
             version: rp.manifest.version.clone(),
@@ -826,6 +933,7 @@ impl PluginHost {
             permissions,
             secrets,
             last_used: self.last_used(&rp.name),
+            recent_ops: self.recent_ops(&rp.name),
             integrity: ui_integrity(rp.provenance, &rp.integrity),
             actions: actions_for_kind(&kind),
             kind,
@@ -839,6 +947,27 @@ impl PluginHost {
             .recent_for_plugin(name, usize::MAX)
             .last()
             .map(|ev| relative_time(ev.timestamp))
+    }
+
+    /// The most recent N ≤ 6 audited calls for this plugin, newest-first, as
+    /// [`OpSummary`] entries for the integrity panel's activity timeline (H4).
+    ///
+    /// `recent_for_plugin` returns events oldest-first; we reverse to get
+    /// newest-first for display. The cap of 6 keeps the timeline compact.
+    fn recent_ops(&self, name: &PluginName) -> Vec<OpSummary> {
+        const MAX_OPS: usize = 6;
+        let events = self.audit.query().recent_for_plugin(name, usize::MAX);
+        events
+            .into_iter()
+            .rev()
+            .take(MAX_OPS)
+            .map(|ev| OpSummary {
+                operation: ev.operation,
+                decision: ev.decision.to_string(),
+                latency: ev.latency_us.map(format_latency_us),
+                when: relative_time(ev.timestamp),
+            })
+            .collect()
     }
 
     /// Total bytes a plugin's storage namespace occupies (summing value sizes
@@ -861,15 +990,23 @@ impl PluginHost {
 /// directory; for git-backed plugins it is the cache commit dir
 /// (`<cache>/<name>/<commit>`), so its final component is the resolved commit.
 ///
-/// Fidelity gap: [`ResolvedPlugin`] does not carry the raw `github:`/`git+`
-/// source string, so `DeclaredGit.source` falls back to the directory path. The
-/// commit is recovered from the cache-dir name. `DevMode` and `ImplicitLocal`
-/// are both produced by [`PluginManager::resolved_set`] (Task 6): `DevMode` via
-/// the dev-mode override (name in `dev_mode.plugins` or dir under a
-/// `dev_mode.directories` entry), `ImplicitLocal` via the
-/// `<config>/plugins/<name>` real-dir scan. Each maps to its respective mote-ui
-/// kind.
-fn provenance_to_kind(provenance: Provenance, dir: &std::path::Path) -> PluginKind {
+/// `lock_source` is the raw source string from `plugins.lock` (e.g.
+/// `"github:owner/repo"`), populated by [`ResolvedPlugin::lock_source`] from
+/// the lock file. When present for a `DeclaredGit` plugin, it is used as the
+/// `source` field in [`PluginKind::DeclaredGit`] instead of the cache-dir path
+/// so the integrity panel shows real provenance. When `None` (bundled, dev,
+/// local, or any plugin without a lock entry), behavior is unchanged.
+///
+/// `DevMode` and `ImplicitLocal` are produced by
+/// [`PluginManager::resolved_set`] (Task 6): `DevMode` via the dev-mode
+/// override (name in `dev_mode.plugins` or dir under a `dev_mode.directories`
+/// entry), `ImplicitLocal` via the `<config>/plugins/<name>` real-dir scan.
+/// Each maps to its respective mote-ui kind.
+fn provenance_to_kind(
+    provenance: Provenance,
+    dir: &std::path::Path,
+    lock_source: Option<&str>,
+) -> PluginKind {
     let path = dir.display().to_string();
     match provenance {
         Provenance::Bundled => PluginKind::Bundled,
@@ -880,10 +1017,10 @@ fn provenance_to_kind(provenance: Provenance, dir: &std::path::Path) -> PluginKi
                 .and_then(|c| c.to_str())
                 .unwrap_or_default()
                 .to_owned();
-            PluginKind::DeclaredGit {
-                source: path,
-                commit,
-            }
+            // G7: use the real lock source string when available; fall back to
+            // the cache-dir path only when there is no lock entry.
+            let source = lock_source.unwrap_or(&path).to_owned();
+            PluginKind::DeclaredGit { source, commit }
         }
         Provenance::ImplicitLocal => PluginKind::ImplicitLocal { path },
         Provenance::DevMode => PluginKind::DevMode { path },
@@ -952,7 +1089,7 @@ fn actions_for_kind(kind: &PluginKind) -> Vec<PluginAction> {
 /// existing state (verification has not run because the plugin is not yet
 /// approved/loaded). A dedicated variant is a frontend change for a later task.
 fn pending_row(rp: &ResolvedPlugin) -> PluginRow {
-    let kind = provenance_to_kind(rp.provenance, &rp.dir);
+    let kind = provenance_to_kind(rp.provenance, &rp.dir, rp.lock_source.as_deref());
     let permissions = rp
         .manifest
         .permissions
@@ -972,6 +1109,7 @@ fn pending_row(rp: &ResolvedPlugin) -> PluginRow {
         permissions,
         secrets: Vec::new(),
         last_used: None,
+        recent_ops: Vec::new(),
         integrity: IntegrityStatus::Unknown,
         kind,
         actions: Vec::new(),
@@ -1215,6 +1353,29 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Formats a latency in microseconds as a display-friendly string.
+///
+/// - Sub-millisecond values render as `"N µs"`.
+/// - Values ≥ 1 000 µs render as `"N.N ms"`.
+/// - Values ≥ 1 000 000 µs render as `"N.N s"`.
+///
+/// The `cast_precision_loss` allow is justified: latency values are bounded by
+/// realistic plugin budgets (tens of milliseconds at most), well within the
+/// 2^52 mantissa of f64, so the division is exact for display.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "latency values are bounded well within f64 precision for display"
+)]
+fn format_latency_us(us: u64) -> String {
+    if us < 1_000 {
+        format!("{us} µs")
+    } else if us < 1_000_000 {
+        format!("{:.1} ms", us as f64 / 1_000.0)
+    } else {
+        format!("{:.1} s", us as f64 / 1_000_000.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,27 +1404,77 @@ mod tests {
             manifest,
             integrity,
             init_source: src,
+            lock_source: None,
         }
     }
 
     #[test]
     fn provenance_maps_to_plugin_kind() {
         assert!(matches!(
-            provenance_to_kind(Provenance::Bundled, std::path::Path::new("/x")),
+            provenance_to_kind(Provenance::Bundled, std::path::Path::new("/x"), None),
             PluginKind::Bundled
         ));
         assert!(matches!(
-            provenance_to_kind(Provenance::Path, std::path::Path::new("/x")),
+            provenance_to_kind(Provenance::Path, std::path::Path::new("/x"), None),
             PluginKind::PathLocal { .. }
         ));
         // Git dir's final component is the resolved commit.
         match provenance_to_kind(
             Provenance::DeclaredGit,
             std::path::Path::new("/cache/adblock/abc123"),
+            None,
         ) {
             PluginKind::DeclaredGit { commit, .. } => assert_eq!(commit, "abc123"),
             other => panic!("expected DeclaredGit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn provenance_to_kind_git_with_lock_source_uses_real_source() {
+        // G7: when lock_source is Some, the DeclaredGit source field carries the
+        // real "github:owner/repo" string, not the cache-dir path.
+        let kind = provenance_to_kind(
+            Provenance::DeclaredGit,
+            std::path::Path::new("/cache/adblock/abc123def456"),
+            Some("github:mote-browser/adblock"),
+        );
+        match kind {
+            PluginKind::DeclaredGit { source, commit } => {
+                assert_eq!(source, "github:mote-browser/adblock");
+                assert_eq!(commit, "abc123def456");
+            }
+            other => panic!("expected DeclaredGit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provenance_to_kind_git_without_lock_source_falls_back_to_dir() {
+        // G7: when lock_source is None (no lock entry yet), the source field
+        // falls back to the cache-dir path string — unchanged from prior behavior.
+        let kind = provenance_to_kind(
+            Provenance::DeclaredGit,
+            std::path::Path::new("/cache/adblock/abc123"),
+            None,
+        );
+        match kind {
+            PluginKind::DeclaredGit { source, .. } => {
+                assert_eq!(source, "/cache/adblock/abc123");
+            }
+            other => panic!("expected DeclaredGit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provenance_to_kind_bundled_ignores_lock_source() {
+        // G7: bundled plugins always produce PluginKind::Bundled, lock_source ignored.
+        assert!(matches!(
+            provenance_to_kind(
+                Provenance::Bundled,
+                std::path::Path::new("/x"),
+                Some("should-be-ignored"),
+            ),
+            PluginKind::Bundled
+        ));
     }
 
     #[test]
@@ -1343,7 +1554,7 @@ mod tests {
         // Using bookmarks as a representative bundled plugin (urlbar was removed
         // in Phase 5a; history owns ui:urlbar_provider from this point on).
         let rp = resolved("bookmarks", Provenance::Bundled, MgrIntegrity::Bundled);
-        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        let kind = provenance_to_kind(rp.provenance, &rp.dir, rp.lock_source.as_deref());
         assert!(matches!(kind, PluginKind::Bundled));
         assert_eq!(mgr_integrity_to_ui(&rp.integrity), IntegrityStatus::Bundled);
         assert_eq!(
@@ -1359,7 +1570,7 @@ mod tests {
         // and the dev/path action set (reload / revoke / adjust-scope).
         let rp = resolved("my-dev-plugin", Provenance::DevMode, MgrIntegrity::Unknown);
 
-        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        let kind = provenance_to_kind(rp.provenance, &rp.dir, rp.lock_source.as_deref());
         assert!(
             matches!(kind, PluginKind::DevMode { .. }),
             "DevMode provenance -> PluginKind::DevMode"
@@ -1396,7 +1607,7 @@ mod tests {
             Provenance::ImplicitLocal,
             MgrIntegrity::Unknown,
         );
-        let kind = provenance_to_kind(rp.provenance, &rp.dir);
+        let kind = provenance_to_kind(rp.provenance, &rp.dir, rp.lock_source.as_deref());
         assert!(
             matches!(kind, PluginKind::ImplicitLocal { .. }),
             "ImplicitLocal provenance -> PluginKind::ImplicitLocal"
@@ -1478,6 +1689,7 @@ mod tests {
                 }],
                 secrets: vec![],
                 last_used: None,
+                recent_ops: vec![],
                 integrity: IntegrityStatus::Bundled,
                 kind: PluginKind::Bundled,
                 actions: vec![],
@@ -3501,6 +3713,279 @@ return M
                 .all(|t| t.url.starts_with("https://work.test/")),
             "all work-workspace tabs must be from work.test; got {:?}",
             work_tabs.iter().map(|t| &t.url).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CL-XPARENCY-DATA: H1, H4, H16, H14 — Rust-side data-correctness tests
+    // -----------------------------------------------------------------------
+
+    /// H1: `build_panel` surfaces a denied event as a `Blocked` audit row, not
+    /// an `Allowed` row. Seeds one deny event for the bundled `history` plugin
+    /// via the audit producer, flushes via `audit.shutdown()`, then asserts
+    /// that `network_audit` contains a `Blocked` row for `history` and does NOT
+    /// contain an `Allowed` row for `history`.
+    #[test]
+    fn build_panel_denied_event_produces_blocked_audit_row() {
+        use mote_audit::{AuditEvent, Decision};
+
+        let (mut host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        let producer = host.audit.producer();
+        let name = PluginName::new("history").unwrap();
+        producer.record(AuditEvent::new(name, "net:fetch", Decision::Deny));
+
+        // Flush in-flight events to the ring buffer.
+        host.audit.shutdown().unwrap();
+
+        let panel = host.build_panel();
+
+        let blocked: Vec<&AuditRow> = panel
+            .network_audit
+            .iter()
+            .filter(|r| r.actor == "history" && matches!(r.decision, AuditDecision::Blocked))
+            .collect();
+        assert_eq!(
+            blocked.len(),
+            1,
+            "denied event must produce exactly one Blocked row for `history`; \
+             got network_audit = {:#?}",
+            panel.network_audit
+        );
+        assert_eq!(
+            blocked[0].count, 1,
+            "blocked row count must be 1; got {}",
+            blocked[0].count
+        );
+
+        let allowed_history: Vec<&AuditRow> = panel
+            .network_audit
+            .iter()
+            .filter(|r| r.actor == "history" && matches!(r.decision, AuditDecision::Allowed))
+            .collect();
+        assert!(
+            allowed_history.is_empty(),
+            "a deny-only plugin must NOT produce an Allowed row; \
+             got {allowed_history:#?}"
+        );
+    }
+
+    /// H1 (mix): both allowed and denied events for the same plugin produce
+    /// two rows — one Allowed and one Blocked — each with the correct count.
+    #[test]
+    fn build_panel_mixed_events_produce_both_allowed_and_blocked_rows() {
+        use mote_audit::{AuditEvent, Decision};
+
+        let (mut host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        let producer = host.audit.producer();
+        let name = PluginName::new("history").unwrap();
+        producer.record(AuditEvent::new(name.clone(), "op:a", Decision::Allow));
+        producer.record(AuditEvent::new(name.clone(), "op:b", Decision::Allow));
+        producer.record(AuditEvent::new(name, "op:c", Decision::Deny));
+
+        host.audit.shutdown().unwrap();
+
+        let panel = host.build_panel();
+
+        let allowed: Vec<&AuditRow> = panel
+            .network_audit
+            .iter()
+            .filter(|r| r.actor == "history" && matches!(r.decision, AuditDecision::Allowed))
+            .collect();
+        let blocked: Vec<&AuditRow> = panel
+            .network_audit
+            .iter()
+            .filter(|r| r.actor == "history" && matches!(r.decision, AuditDecision::Blocked))
+            .collect();
+
+        assert_eq!(
+            allowed.len(),
+            1,
+            "mixed events must yield exactly one Allowed row; got {allowed:#?}"
+        );
+        assert_eq!(
+            allowed[0].count, 2,
+            "Allowed count must be 2; got {}",
+            allowed[0].count
+        );
+        assert_eq!(
+            blocked.len(),
+            1,
+            "mixed events must yield exactly one Blocked row; got {blocked:#?}"
+        );
+        assert_eq!(
+            blocked[0].count, 1,
+            "Blocked count must be 1; got {}",
+            blocked[0].count
+        );
+    }
+
+    /// H4: `loaded_row` (via `build_panel`) populates `recent_ops` newest-first,
+    /// capped at 6, from a seeded audit ring.
+    ///
+    /// Seeds 8 events for `history` with distinct operation names (op-1 …
+    /// op-8, oldest-first). After flush, `build_panel` must yield a `history`
+    /// plugin row where:
+    ///   - `recent_ops.len() == 6` (cap)
+    ///   - `recent_ops[0].operation == "op-8"` (newest first)
+    ///   - `recent_ops[5].operation == "op-3"` (oldest retained)
+    ///   - `recent_ops[0].decision` reflects the seeded decision string
+    #[test]
+    fn loaded_row_recent_ops_newest_first_capped_at_six() {
+        use mote_audit::{AuditEvent, Decision};
+
+        let (mut host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        let producer = host.audit.producer();
+        let name = PluginName::new("history").unwrap();
+
+        // Seed 8 events oldest-first, alternating Allow/Deny.
+        for i in 1u8..=8 {
+            let decision = if i % 2 == 0 {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            };
+            producer.record(AuditEvent::new(name.clone(), format!("op-{i}"), decision));
+        }
+
+        host.audit.shutdown().unwrap();
+
+        let panel = host.build_panel();
+
+        let history_row = panel
+            .plugins
+            .iter()
+            .find(|p| p.name == "history")
+            .expect("history plugin row must be present after loading");
+
+        let ops = &history_row.recent_ops;
+        assert_eq!(
+            ops.len(),
+            6,
+            "recent_ops must be capped at 6; got {} ops: {ops:#?}",
+            ops.len()
+        );
+
+        // Newest event (op-8) must be first.
+        assert_eq!(
+            ops[0].operation, "op-8",
+            "first recent_op must be the newest (op-8); got {:?}",
+            ops[0].operation
+        );
+        // op-8 is even → Allow.
+        assert!(
+            ops[0].decision.to_lowercase().contains("allow"),
+            "op-8 decision must contain 'allow'; got {:?}",
+            ops[0].decision
+        );
+
+        // Oldest retained event is op-3 (8 events, keep 6 newest: op-3..op-8).
+        assert_eq!(
+            ops[5].operation, "op-3",
+            "last recent_op (index 5) must be op-3; got {:?}",
+            ops[5].operation
+        );
+    }
+
+    /// H16: `integrity_detail_payload` builds the expected payload for a loaded plugin.
+    ///
+    /// Seeds a loaded bundled plugin, calls the payload builder, and asserts the
+    /// name, integrity status, and that `lock_source`/`checksum`/`actual_checksum`
+    /// fields have the expected shape (None for a bundled plugin with no lock entry).
+    #[test]
+    fn integrity_detail_payload_for_bundled_plugin() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        // `history` is bundled — provenance=Bundled, no lock entry.
+        let payload = host
+            .integrity_detail_payload("history")
+            .expect("integrity_detail_payload must return Some for a loaded plugin");
+
+        assert_eq!(payload.name, "history");
+        assert_eq!(
+            payload.integrity,
+            IntegrityStatus::Bundled,
+            "bundled plugin must have Bundled integrity status"
+        );
+        // Bundled plugins have no lock entry.
+        assert!(
+            payload.lock_source.is_none(),
+            "bundled plugin must have no lock_source; got {:?}",
+            payload.lock_source
+        );
+        assert!(
+            payload.pinned_commit.is_none(),
+            "bundled plugin must have no pinned_commit; got {:?}",
+            payload.pinned_commit
+        );
+        assert!(
+            payload.actual_checksum.is_none(),
+            "bundled plugin with Bundled integrity must have no actual_checksum; got {:?}",
+            payload.actual_checksum
+        );
+    }
+
+    /// H16: `integrity_detail_payload` returns None for a plugin name that is not loaded.
+    #[test]
+    fn integrity_detail_payload_returns_none_for_unknown_plugin() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        let result = host.integrity_detail_payload("no-such-plugin-xyz");
+        assert!(
+            result.is_none(),
+            "must return None for an unknown plugin name"
+        );
+    }
+
+    /// H14: `integrity_list_payload` returns one row per loaded plugin, with
+    /// correct name, integrity status, and a non-empty `source_label`.
+    #[test]
+    fn integrity_list_payload_covers_all_loaded_plugins() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+
+        let loaded_names: std::collections::HashSet<&str> =
+            host.loaded.iter().map(|r| r.name.as_str()).collect();
+
+        let payload = host.integrity_list_payload();
+
+        // Every loaded plugin must appear exactly once.
+        let list_names: std::collections::HashSet<&str> =
+            payload.plugins.iter().map(|r| r.name.as_str()).collect();
+
+        for name in &loaded_names {
+            assert!(
+                list_names.contains(name),
+                "integrity_list_payload must include loaded plugin `{name}`; \
+                 got list = {list_names:?}"
+            );
+        }
+
+        // Each row must have a non-empty source_label and version.
+        for row in &payload.plugins {
+            assert!(
+                !row.source_label.is_empty(),
+                "plugin `{}` must have a non-empty source_label",
+                row.name
+            );
+            assert!(
+                !row.version.is_empty(),
+                "plugin `{}` must have a non-empty version",
+                row.name
+            );
+        }
+
+        // Bundled plugins (e.g. `history`) must show Bundled integrity.
+        let history_row = payload
+            .plugins
+            .iter()
+            .find(|r| r.name == "history")
+            .expect("`history` must appear in the integrity list");
+        assert_eq!(
+            history_row.integrity,
+            IntegrityStatus::Bundled,
+            "bundled plugin `history` must have Bundled integrity in the list"
         );
     }
 }

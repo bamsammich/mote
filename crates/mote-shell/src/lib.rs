@@ -271,9 +271,12 @@ enum ShellCommand {
     /// (`integrity_reverify_all` op). Pushes updated integrity panel data.
     IntegrityReverifyAll,
     /// Request drill-down detail for a specific plugin's integrity record
-    /// (`integrity_plugin_detail` op). In v0.1 this logs the data; a future
-    /// wave adds a dedicated detail view.
+    /// (`integrity_plugin_detail` op). Builds the detail payload and pushes
+    /// `applyOp('render_integrity_detail', payload)` to the chrome.
     IntegrityPluginDetail(String),
+    /// Request the live integrity list for the settings page
+    /// (`integrity_list` op). Pushes `applyOp('render_integrity_list', payload)`.
+    IntegrityList,
     // P5: find / zoom / reopen ops ────────────────────────────────────────────
     /// Open find-in-page mode: push `applyOp('focus_find', null)` to the chrome
     /// omnibox so it enters `[find]` mode. The chrome JS then sends
@@ -1223,6 +1226,7 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
     let plugin_install_picker_queue = Arc::clone(commands);
     let integrity_reverify_queue = Arc::clone(commands);
     let integrity_detail_queue = Arc::clone(commands);
+    let integrity_list_queue = Arc::clone(commands);
     // P5: find / zoom / reopen / context-menu op queues.
     let find_in_page_queue = Arc::clone(commands);
     let find_next_op_queue = Arc::clone(commands);
@@ -1497,6 +1501,11 @@ fn build_op_registry(commands: &CommandQueue) -> OpRegistry {
                 params,
                 ShellCommand::IntegrityPluginDetail,
             )
+        })
+        // `integrity_list` — push live integrity rows to the settings page.
+        .register("integrity_list", move |_params: &str| {
+            push(&integrity_list_queue, ShellCommand::IntegrityList);
+            OpResponse::ok("{\"ok\":true}")
         })
         // ── P2: address-bar navigation ops ──────────────────────────────────
         //
@@ -1980,7 +1989,10 @@ impl ShellApp {
                     eprintln!("mote-shell: integrity_reverify_all — re-verify all plugins");
                 }
                 ShellCommand::IntegrityPluginDetail(name) => {
-                    eprintln!("mote-shell: integrity_plugin_detail: plugin = {name:?}");
+                    self.push_integrity_detail_to_chrome(&name);
+                }
+                ShellCommand::IntegrityList => {
+                    self.push_integrity_list_to_chrome();
                 }
                 // P5: find / zoom / reopen commands ─────────────────────────
                 ShellCommand::FindInPage => {
@@ -3131,6 +3143,57 @@ impl ShellApp {
             "window.mote&&window.mote.applyOp&&window.mote.applyOp('render_integrity_panel',{payload});"
         ));
         true
+    }
+
+    /// Push the integrity detail payload for `name` to the chrome document
+    /// via `applyOp('render_integrity_detail', payload)` (H16).
+    ///
+    /// The payload is built from the named plugin's live lock entry and
+    /// integrity state. A missing plugin or serialization failure is logged
+    /// and the push is silently skipped.
+    fn push_integrity_detail_to_chrome(&self, name: &str) {
+        if !self.chrome_ready {
+            return;
+        }
+        let Some(detail) = self.host.integrity_detail_payload(name) else {
+            eprintln!("mote-shell: integrity_plugin_detail: plugin {name:?} not found");
+            return;
+        };
+        let payload = match serde_json::to_string(&detail) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: serialize integrity detail failed: {e}");
+                return;
+            }
+        };
+        self.bridge.page().eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&\
+             window.mote.applyOp('render_integrity_detail',{payload});"
+        ));
+    }
+
+    /// Push the live integrity list to the chrome document via
+    /// `applyOp('render_integrity_list', payload)` (H14).
+    ///
+    /// Reuses the panel-building data path via
+    /// [`PluginHost::integrity_list_payload`]. A serialization failure is
+    /// logged and the push is silently skipped.
+    fn push_integrity_list_to_chrome(&self) {
+        if !self.chrome_ready {
+            return;
+        }
+        let list = self.host.integrity_list_payload();
+        let payload = match serde_json::to_string(&list) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mote-shell: serialize integrity list failed: {e}");
+                return;
+            }
+        };
+        self.bridge.page().eval_js(&format!(
+            "window.mote&&window.mote.applyOp&&\
+             window.mote.applyOp('render_integrity_list',{payload});"
+        ));
     }
 
     /// Hide the integrity panel inside the chrome document.

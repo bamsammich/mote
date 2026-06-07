@@ -199,6 +199,25 @@ pub struct SecretAccessRow {
     pub last_read: Option<String>,
 }
 
+/// A single item in a plugin's per-operation activity timeline.
+///
+/// Each entry represents one audited call the plugin made. The timeline is
+/// capped at a small number of entries (N ≤ 6) newest-first so the integrity
+/// panel can show a compact "recent ops" list without becoming a full log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpSummary {
+    /// The operation in `domain:action[:resource]` format (e.g.
+    /// `"net:intercept_request"`, `"http:fetch:https://api.example.com/*"`).
+    pub operation: String,
+    /// The outcome of the call (`allow`, `deny`, or `defer`).
+    pub decision: String,
+    /// Call latency in a display-friendly form (e.g. `"42 µs"`, `"1.3 ms"`),
+    /// or `None` when no latency was recorded for this event.
+    pub latency: Option<String>,
+    /// Human-relative timestamp (e.g. `"3s ago"`, `"just now"`).
+    pub when: String,
+}
+
 /// A single plugin entry in the integrity panel.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginRow {
@@ -216,6 +235,10 @@ pub struct PluginRow {
     pub secrets: Vec<SecretAccessRow>,
     /// Last time the plugin exercised a permission (human-readable).
     pub last_used: Option<String>,
+    /// Per-operation activity timeline: the most recent audited calls, newest
+    /// first, capped at N ≤ 6 entries. Empty when the plugin has no audit
+    /// history in the current ring-buffer window.
+    pub recent_ops: Vec<OpSummary>,
     /// Integrity status of the plugin's files vs. the lock-file checksum.
     pub integrity: IntegrityStatus,
     /// Where the plugin came from (source provenance).
@@ -312,6 +335,63 @@ pub struct DenialRow {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// H16: plugin detail payload
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The payload pushed to the chrome as `applyOp('render_integrity_detail', …)`.
+///
+/// Built by the `integrity_plugin_detail` shell-op handler from the named
+/// plugin's lock entry (checksum, pinned commit, source) plus its computed
+/// [`IntegrityStatus`]. The chrome-side render handler (a separate dispatch)
+/// reads these fields verbatim; field names are part of the chrome API contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IntegrityDetailPayload {
+    /// Plugin name as declared in the manifest.
+    pub name: String,
+    /// The integrity verification state for this plugin.
+    pub integrity: IntegrityStatus,
+    /// The lock-file source string (e.g. `"github:owner/repo"`), or `None`
+    /// when no lock entry exists (bundled, dev-mode, newly added).
+    pub lock_source: Option<String>,
+    /// The pinned commit SHA from the lock entry, or `None` for non-git sources.
+    pub pinned_commit: Option<String>,
+    /// The BLAKE3 directory checksum recorded in the lock file, in
+    /// `"blake3:<hex>"` format, or `None` when no lock entry is present.
+    pub checksum: Option<String>,
+    /// For `IntegrityStatus::Mismatch`: the checksum actually found on disk.
+    /// `None` for any other status.
+    pub actual_checksum: Option<String>,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// H14: integrity list payload
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The payload pushed to the chrome as `applyOp('render_integrity_list', …)`.
+///
+/// Built by the `integrity_list` shell-op handler and sent to the settings
+/// page's integrity table. Contains the per-plugin integrity status rows that
+/// `build_panel()` already computes, reusing the same data path.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IntegrityListPayload {
+    /// Per-plugin integrity rows, one per loaded or awaiting-approval plugin.
+    pub plugins: Vec<IntegrityListRow>,
+}
+
+/// A single row in the settings-page integrity list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IntegrityListRow {
+    /// Plugin name as declared in the manifest.
+    pub name: String,
+    /// Plugin version string.
+    pub version: String,
+    /// The integrity verification state.
+    pub integrity: IntegrityStatus,
+    /// Source provenance label (from [`PluginKind::source_label`]).
+    pub source_label: String,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Full integrity panel view-model
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -382,6 +462,7 @@ impl IntegrityPanel {
                     ],
                     secrets: vec![],
                     last_used: Some("2 minutes ago".into()),
+                    recent_ops: vec![],
                     integrity: IntegrityStatus::Verified,
                     kind: PluginKind::DeclaredGit {
                         source: "github:1password/mote-plugin".into(),
@@ -428,6 +509,7 @@ impl IntegrityPanel {
                     ],
                     secrets: vec![],
                     last_used: Some("now".into()),
+                    recent_ops: vec![],
                     integrity: IntegrityStatus::Verified,
                     kind: PluginKind::DeclaredGit {
                         source: "github:mote-browser/vim-mode".into(),
@@ -467,6 +549,7 @@ impl IntegrityPanel {
                     ],
                     secrets: vec![],
                     last_used: Some("just now".into()),
+                    recent_ops: vec![],
                     integrity: IntegrityStatus::DevMode,
                     kind: PluginKind::DevMode {
                         path: "~/code/experiment".into(),
@@ -770,6 +853,7 @@ mod tests {
             permissions: vec![],
             secrets: vec![],
             last_used: None,
+            recent_ops: vec![],
             integrity: IntegrityStatus::DevMode,
             kind: PluginKind::DevMode {
                 path: "~/code/x".into(),
@@ -812,6 +896,7 @@ mod tests {
             ],
             secrets: vec![],
             last_used: None,
+            recent_ops: vec![],
             integrity: IntegrityStatus::Verified,
             kind: PluginKind::Bundled,
             actions: vec![],
@@ -995,5 +1080,61 @@ mod tests {
         assert!(PluginAction::Revoke.is_destructive());
         assert!(!PluginAction::Update.is_destructive());
         assert!(!PluginAction::AdjustScope.is_destructive());
+    }
+
+    #[test]
+    fn op_summary_serializes_all_fields() {
+        let op = OpSummary {
+            operation: "net:intercept_request".into(),
+            decision: "deny".into(),
+            latency: Some("42 µs".into()),
+            when: "3s ago".into(),
+        };
+        let json = serde_json::to_string(&op).expect("must serialize");
+        assert!(json.contains("\"operation\":\"net:intercept_request\""));
+        assert!(json.contains("\"decision\":\"deny\""));
+        assert!(json.contains("\"latency\""));
+        assert!(json.contains("\"when\":\"3s ago\""));
+    }
+
+    #[test]
+    fn op_summary_round_trips_through_json() {
+        let op = OpSummary {
+            operation: "http:fetch:https://api.example.com/*".into(),
+            decision: "allow".into(),
+            latency: None,
+            when: "just now".into(),
+        };
+        let json = serde_json::to_string(&op).expect("must serialize");
+        let back: OpSummary = serde_json::from_str(&json).expect("must deserialize");
+        assert_eq!(back, op);
+    }
+
+    #[test]
+    fn plugin_row_recent_ops_field_serializes() {
+        let row = PluginRow {
+            name: "adblock".into(),
+            version: "1.0.0".into(),
+            fulfills: vec![],
+            consumes: vec![],
+            permissions: vec![],
+            secrets: vec![],
+            last_used: Some("just now".into()),
+            recent_ops: vec![OpSummary {
+                operation: "net:intercept_request".into(),
+                decision: "deny".into(),
+                latency: Some("12 µs".into()),
+                when: "just now".into(),
+            }],
+            integrity: IntegrityStatus::Verified,
+            kind: PluginKind::Bundled,
+            actions: vec![],
+        };
+        let json = serde_json::to_string(&row).expect("must serialize");
+        assert!(
+            json.contains("recent_ops"),
+            "recent_ops field must be present"
+        );
+        assert!(json.contains("net:intercept_request"));
     }
 }

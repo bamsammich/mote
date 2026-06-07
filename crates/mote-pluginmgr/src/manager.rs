@@ -397,6 +397,14 @@ impl PluginManager {
         Ok(LockFile::from_toml(&text)?)
     }
 
+    /// Public accessor for the lock file used by the integrity detail builder
+    /// (H16): reads `plugins.lock` and returns `None` on any error rather than
+    /// propagating it (the caller falls back to unknown/absent lock data).
+    #[must_use]
+    pub fn lock(&self) -> Option<LockFile> {
+        self.load_lock().ok()
+    }
+
     /// Atomically writes `lock` to `plugins.lock`.
     fn write_lock(&self, lock: &LockFile) -> Result<(), ManagerError> {
         let p = self.lock_path();
@@ -893,6 +901,12 @@ impl PluginManager {
         dev_mode: &DevModeConfig,
         dev_dirs: &[PathBuf],
     ) -> (Vec<ResolvedPlugin>, Vec<mote_lua::Manifest>) {
+        // Load the lock once up-front to read real source strings (G7): a git
+        // plugin's `LockEntry.source` carries the raw `github:owner/repo` string
+        // that `ResolvedPlugin.dir` loses (the dir is a cache path).
+        // Failure is non-fatal — fall back to `None` for every plugin.
+        let lock = self.load_lock().unwrap_or_default();
+
         let mut resolved: Vec<ResolvedPlugin> = Vec::with_capacity(entries.len());
         let mut manifests: Vec<mote_lua::Manifest> = Vec::with_capacity(entries.len());
         for (name, provenance) in entries {
@@ -936,6 +950,19 @@ impl PluginManager {
                     .cloned()
                     .unwrap_or(IntegrityStatus::Unknown)
             };
+            // G7: read the raw source string from the lock entry.
+            // Bundled plugins have no meaningful source string to surface
+            // (`bundled` is already encoded in their PluginKind). For every
+            // other provenance, the lock entry's Source carries the canonical
+            // `github:owner/repo` or `path:…` string that is displayed in the
+            // integrity panel.
+            let lock_source = if matches!(provenance, Provenance::Bundled) {
+                None
+            } else {
+                lock.plugins
+                    .get(&name)
+                    .map(|entry| entry.source.to_string())
+            };
             manifests.push(manifest.clone());
             resolved.push(ResolvedPlugin {
                 name,
@@ -944,6 +971,7 @@ impl PluginManager {
                 manifest,
                 integrity,
                 init_source,
+                lock_source,
             });
         }
         (resolved, manifests)

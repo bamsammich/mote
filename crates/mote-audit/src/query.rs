@@ -142,6 +142,31 @@ impl QueryHandle {
         map
     }
 
+    /// Returns the number of [`Decision::Deny`] events per plugin across the
+    /// current ring buffer contents.
+    ///
+    /// Only events with `decision == Deny` are counted; allowed events are
+    /// excluded. Plugins with no denials will not appear in the returned map.
+    ///
+    /// Note: counts reflect only what is in the ring buffer right now.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal ring buffer mutex is poisoned.
+    #[must_use]
+    pub fn denied_counts_per_plugin(&self) -> HashMap<PluginName, usize> {
+        let events = self
+            .ring
+            .lock()
+            .expect("ring buffer mutex poisoned")
+            .recent(usize::MAX);
+        let mut map = HashMap::new();
+        for ev in events.into_iter().filter(|e| e.decision == Decision::Deny) {
+            *map.entry(ev.plugin).or_insert(0) += 1;
+        }
+        map
+    }
+
     /// Reads **all** durably flushed events from the `mote-storage` namespace
     /// in sequence order.
     ///
@@ -292,6 +317,27 @@ mod tests {
         // history: 1 allowed
         assert_eq!(counts[&plugin("history")], 1);
         // vim-mode: only denials — must be absent from the map
+        assert!(!counts.contains_key(&plugin("vim-mode")));
+    }
+
+    #[test]
+    fn denied_counts_per_plugin_counts_only_denied() {
+        let (q, _) = make_query(
+            20,
+            vec![
+                ev("adblock", "op", Decision::Deny),
+                ev("adblock", "op", Decision::Deny),
+                ev("adblock", "op", Decision::Allow),
+                ev("vim-mode", "op", Decision::Allow),
+                ev("history", "op", Decision::Deny),
+            ],
+        );
+        let counts = q.denied_counts_per_plugin();
+        // adblock: 2 denied (1 allow excluded)
+        assert_eq!(counts[&plugin("adblock")], 2);
+        // history: 1 denied
+        assert_eq!(counts[&plugin("history")], 1);
+        // vim-mode: only allows — must be absent from the map
         assert!(!counts.contains_key(&plugin("vim-mode")));
     }
 }

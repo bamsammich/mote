@@ -40,4 +40,9 @@ pub struct ResolvedPlugin {
     pub integrity: IntegrityStatus,
     /// The full contents of `<dir>/init.lua` — the source the runtime loads.
     pub init_source: String,
+    /// The raw source string from `plugins.lock` (e.g. `"github:owner/repo"`
+    /// or `"path:~/code/plugin"`). `None` for bundled plugins or any plugin
+    /// with no lock entry (freshly added but not yet synced). Used by the
+    /// integrity panel to show real provenance rather than a cache-dir path.
+    pub lock_source: Option<String>,
 }
