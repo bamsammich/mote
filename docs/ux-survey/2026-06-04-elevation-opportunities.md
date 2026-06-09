@@ -181,7 +181,34 @@ Progress as the clusters are worked one-by-one (order = the row order above).
   (ALT modifier correctly detected at runtime). Known gap (out of scope,
   pre-existing): the char-chord suite is `CONTROL`-gated, so ⌘-on-Mac needs a
   separate platform-aware modifier change (affects the whole suite uniformly).
-- ☐ CL-XPARENCY-DATA · ☐ CL-CONFIG-TRUTH
+- **◐ CL-XPARENCY-DATA** — Wave 1 landed (`9cbd1d2` Rust foundation · `c5a35a8`
+  chrome wiring), gate-green (clippy `-D`, full Rust suite + node chrome-js
+  tests). Wave 1 makes the flagship surfaces show real data: **H1** audit rows
+  reflect the true allow/deny mix (`build_panel` merges `recent_denials`,
+  blocked-first), **H4** a per-plugin recent-ops activity timeline (live
+  `recent_for_plugin`, newest-first ≤6), **H14** the settings integrity table
+  populated from a live `integrity_list` op, **H16** the `[verified]` badge
+  drill-down backed by the real lock entry (checksum/commit/source + a
+  conspicuous mismatch banner), **G7** real `github:owner/repo` provenance
+  (threaded `LockEntry.source` into `ResolvedPlugin`). Transport decision: the
+  settings page is at the privileged `mote://chrome` origin so it **has the
+  host-bridge** (origin-gated, not `PageRole`-gated) — it invokes ops directly
+  and the shell pushes to `active_page()` via `window.__moteIntegrity{List,Detail}`
+  (the proven `__motePicker` pattern); an initial subagent BroadcastChannel relay
+  built on a false "no bridge" premise was caught and replaced. **Live-verified:**
+  H4 timeline + G7 provenance in the Ctrl+Shift+I overlay; H1 allow-decisions
+  render (deny path unit-tested — no live denials). H14/H16 rendering is
+  contract-tested but its **live path is blocked by a separately-found settings
+  section-nav bug** (clicking section tabs doesn't navigate — logged to the polish
+  backlog); to be closed by the incoming chrome test framework's first component
+  test. Live-testing also reproduced the **window-resize proportion bug** (content
+  surface doesn't re-layout on resize) — logged. **Wave 2 deferred behind ADRs**
+  (adr-review-gated): H1 `actor="browser"` audit row (audit-actor-model ADR),
+  H2-part-2 origin→plugin permission inversion (new query-surface ADR), H3
+  explain/block consent op (session-vs-`managed.lua` persistence decision).
+  **H2-part-1** (real cert/TLS/cookie inspection) stays deferred — needs an
+  unwired CEF SSL-status callback; fabricating it would lie on the surface.
+- ☐ CL-CONFIG-TRUTH
 
 ## Findings by category
 
