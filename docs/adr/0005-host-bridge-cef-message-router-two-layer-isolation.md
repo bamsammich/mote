@@ -64,6 +64,7 @@ The spike confirmed content browsers receive neither `window.mote` nor `window.c
 - DISCIPLINES.md §1 — CEF upgrade discipline (`mote-cef` is the only crate touching `cef::`)
 - `docs/research/host-bridge-spike.md` — the validating spike
 - `docs/plans/02-browser-shell.md` §1.4, §3 — host bridge in the shell architecture
+- [ADR-0021 — Test-mode CEF DevTools-Protocol surface](0021-test-mode-cef-devtools-protocol-surface.md) — **intentionally** opens an out-of-band CDP channel that bypasses the isolation guarantee above, confined to dev/test by tested invariants (off-by-default, loopback-only). The one sanctioned relaxation of this ADR's boundary; never enabled in a shipped default run.
 
 ## Amendment (2026-05-26): origin/scheme-based gating via a privileged `mote://` scheme
 

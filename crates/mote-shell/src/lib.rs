@@ -605,6 +605,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = EngineConfig {
         no_sandbox: true,
         cache_path: cache_path.clone(),
+        // ADR-0021: CDP for the E2E test lane. Off unless MOTE_REMOTE_DEBUG_PORT
+        // is set; loopback-bound by CEF. Default run opens no listener.
+        remote_debugging_port: std::env::var("MOTE_REMOTE_DEBUG_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
         ..EngineConfig::default()
     };
     let engine = Engine::init(&config)?;

@@ -1,6 +1,6 @@
 # ADR-0021 — Test-mode CEF DevTools-Protocol Surface: Off-by-Default, Loopback-Only, Env-Gated CDP for the E2E Test Lane
 
-- **Status:** Proposed (2026-06-08) — **Accepted pending CDP-spike validation**
+- **Status:** Accepted (approved by the maintainer 2026-06-08) — CDP spike validated
 - **Date:** 2026-06-08
 
 ---
@@ -88,7 +88,13 @@ intentions):
 - Consistent with the `EngineConfig.no_sandbox` debug-only precedent and
   DESIGN.md's loopback-default posture.
 
-**Proposed → Accepted gate:** this ADR stays *Proposed* until the CDP spike
-confirms Playwright `connectOverCDP` attaches to CEF-148 in OSR mode and can
-`evaluate`/screenshot. If the spike fails, option **(c)** (screenshot + `/proc`
-fallback) is adopted and this ADR is revised or withdrawn.
+**Spike outcome (2026-06-08 — Accepted).** The CDP spike confirmed the premise
+end-to-end on this stack: with `MOTE_REMOTE_DEBUG_PORT=9222`, mote boots clean
+headless under Xvfb (3/3 plugins, first paint ~710ms); `127.0.0.1:9222/json/version`
+returns CEF Chrome/148, **Protocol 1.3**, with a `webSocketDebuggerUrl` **bound to
+`127.0.0.1`** (loopback invariant = CEF's default); `/json` enumerates both the
+content and the `mote://chrome` page targets; and a `Runtime.evaluate` over the
+chrome page's websocket executed JS (`{href, hasBridge:true}`). Playwright
+`connectOverCDP` attaches to these. The fallback option **(c)** is therefore not
+needed. See [`docs/running-mote-headless.md`](../running-mote-headless.md) for the
+operational runbook (including the `WAYLAND_DISPLAY`-scrub gotcha).

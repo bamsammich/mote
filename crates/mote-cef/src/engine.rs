@@ -38,6 +38,11 @@ pub struct EngineConfig {
     /// Drive CEF's work via [`Engine::pump`] / [`Engine::run`] rather than CEF's
     /// own internal message loop. Required for the OSR compositor model.
     pub external_message_pump: bool,
+    /// CDP (Chrome `DevTools` Protocol) remote-debugging port for the E2E test
+    /// lane (ADR-0021). `0` disables it (the default — a shipped run opens no
+    /// listener). When non-zero, CEF/Chromium binds the endpoint to loopback
+    /// (`127.0.0.1`). Dev/test-only; never enabled in a default run.
+    pub remote_debugging_port: u16,
 }
 
 impl Default for EngineConfig {
@@ -48,6 +53,7 @@ impl Default for EngineConfig {
                 .join(".mote-cef-cache"),
             no_sandbox: false,
             external_message_pump: true,
+            remote_debugging_port: 0,
         }
     }
 }
@@ -86,6 +92,7 @@ impl Engine {
             external_message_pump: i32::from(config.external_message_pump),
             no_sandbox: i32::from(config.no_sandbox),
             root_cache_path: CefString::from(&*config.cache_path.to_string_lossy()),
+            remote_debugging_port: i32::from(config.remote_debugging_port),
             ..Default::default()
         };
 
@@ -170,5 +177,19 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.shutdown_inner();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EngineConfig;
+
+    /// ADR-0021 invariant: the CDP remote-debugging port is **off by default**
+    /// (port `0` ⇒ CEF opens no listener). A shipped/default run must never
+    /// expose the DevTools-Protocol endpoint; only an explicit
+    /// `MOTE_REMOTE_DEBUG_PORT` enables it (wired in `mote_shell::run`).
+    #[test]
+    fn cdp_remote_debugging_port_off_by_default() {
+        assert_eq!(EngineConfig::default().remote_debugging_port, 0);
     }
 }
