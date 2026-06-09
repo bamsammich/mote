@@ -196,6 +196,299 @@
 
   // ---- Integrity section -----------------------------------------------------
 
+  // ---- H14/H16: live integrity surfaces -------------------------------------
+  //
+  // The settings page is served at the privileged mote://chrome origin and so
+  // carries the host-bridge (window.mote.invoke) — PageRole::Overlay governs
+  // the nav guard, not the origin-gated bridge. So we call the integrity ops
+  // directly; the shell pushes results straight back to this page (the active
+  // content tab) via the named callbacks below, the same pattern the tab picker
+  // uses (window.__motePicker).
+
+  function requestIntegrityList() {
+    invoke("integrity_list", {}).catch(function () {});
+  }
+
+  function requestIntegrityDetail(pluginName) {
+    invoke("integrity_plugin_detail", { plugin: pluginName }).catch(function () {});
+  }
+
+  // Shell push targets — the shell's eval_js calls window.__moteIntegrityList /
+  // __moteIntegrityDetail on this page (handleIntegrity* are hoisted below).
+  window.__moteIntegrityList = function (payload) {
+    handleIntegrityList(payload);
+  };
+  window.__moteIntegrityDetail = function (payload) {
+    handleIntegrityDetail(payload);
+  };
+
+  // ---- H14: rebuild tbody from live render_integrity_list payload -----
+
+  // Map IntegrityStatus variant → badge CSS class and label text.
+  // Mirrors the statusBadgeVariant/statusLabel helpers in panels.js.
+  function integrityBadgeVariant(status) {
+    switch (status) {
+      case "Verified": return "success";
+      case "Mismatch": return "danger";
+      case "DevMode": return "accent";
+      case "Bundled": return "info";
+      default: return "";
+    }
+  }
+
+  function integrityStatusLabel(status) {
+    switch (status) {
+      case "Verified": return "verified";
+      case "Mismatch": return "mismatch";
+      case "DevMode": return "dev mode";
+      case "Bundled": return "bundled";
+      default: return "unknown";
+    }
+  }
+
+  // Lower-case status value written to data-status so the existing
+  // filterIntegrityTable() selector (`rowStatus === status`) matches the
+  // <select> option values ("verified", "mismatch", "bundled", "dev-mode",
+  // "unknown").
+  function statusDataAttr(status) {
+    switch (status) {
+      case "Verified": return "verified";
+      case "Mismatch": return "mismatch";
+      case "DevMode": return "dev-mode";
+      case "Bundled": return "bundled";
+      default: return "unknown";
+    }
+  }
+
+  function handleIntegrityList(payload) {
+    if (!payload || !Array.isArray(payload.plugins)) return;
+    var table = document.querySelector(".integrity-table");
+    if (!table) return;
+    var tbody = table.querySelector("tbody");
+    if (!tbody) return;
+
+    // Rebuild tbody — all plugin-derived strings go through textContent.
+    tbody.textContent = "";
+    for (var i = 0; i < payload.plugins.length; i++) {
+      var p = payload.plugins[i] || {};
+      tbody.appendChild(buildIntegrityRow(p));
+    }
+
+    // Re-wire sort headers (their click targets tr[data-plugin] rows; clearing
+    // the tbody removes prior event listeners attached to old rows — the header
+    // listeners are already wired at section-init time and remain valid since
+    // they query tr[data-plugin] fresh on each invocation).
+    //
+    // Re-wire the detail click on newly created rows.
+    wireIntegrityRowClicks();
+  }
+
+  function buildIntegrityRow(p) {
+    var name = String(p.name || "");
+    var version = String(p.version || "");
+    var status = String(p.integrity || "");
+    var sourceLabel = String(p.source_label || "");
+
+    var tr = document.createElement("tr");
+    tr.setAttribute("data-plugin", name);
+    tr.setAttribute("data-status", statusDataAttr(status));
+    tr.setAttribute("data-verified", "");
+
+    // plugin name + version
+    var tdName = document.createElement("td");
+    tdName.textContent = name + (version ? "  " + version : "");
+    tr.appendChild(tdName);
+
+    // integrity badge
+    var tdStatus = document.createElement("td");
+    var badge = document.createElement("span");
+    badge.className = "badge " + integrityBadgeVariant(status);
+    badge.textContent = integrityStatusLabel(status);
+    tdStatus.appendChild(badge);
+    // source label alongside badge
+    if (sourceLabel) {
+      var src = document.createElement("span");
+      src.style.cssText = "margin-left:8px;color:var(--fg-3);font:var(--text-mono-sm)";
+      src.textContent = sourceLabel;
+      tdStatus.appendChild(src);
+    }
+    tr.appendChild(tdStatus);
+
+    // last verified placeholder — the list payload carries no timestamp;
+    // show an honest "—" rather than a fabricated value.
+    var tdVerified = document.createElement("td");
+    tdVerified.style.color = "var(--fg-2)";
+    tdVerified.textContent = "—"; // "—"
+    tr.appendChild(tdVerified);
+
+    return tr;
+  }
+
+  // ---- H16: drill-down detail panel ----------------------------------------
+
+  // Show / hide the detail expansion below the selected row.
+  function showIntegrityDetail(plugin) {
+    requestIntegrityDetail(plugin);
+    // Visually mark the selected row while waiting for the response.
+    document.querySelectorAll(".integrity-table tbody tr[data-plugin]").forEach(function (r) {
+      r.classList.toggle("is-detail-open", r.getAttribute("data-plugin") === plugin);
+    });
+  }
+
+  function handleIntegrityDetail(payload) {
+    if (!payload || typeof payload !== "object") return;
+    var panel = ensureDetailPanel();
+    renderDetailPanel(panel, payload);
+  }
+
+  function ensureDetailPanel() {
+    var existing = document.getElementById("integrity-detail-panel");
+    if (existing) return existing;
+    var panel = document.createElement("div");
+    panel.id = "integrity-detail-panel";
+    panel.className = "integrity-detail-panel";
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", "plugin integrity detail");
+    // Insert after the table.
+    var table = document.querySelector(".integrity-table");
+    if (table && table.parentNode) {
+      table.parentNode.insertBefore(panel, table.nextSibling);
+    }
+    return panel;
+  }
+
+  function renderDetailPanel(panel, d) {
+    // Wipe and rebuild — all plugin-derived values go through textContent.
+    panel.textContent = "";
+
+    var name = String(d.name || "");
+    var integrity = String(d.integrity || "");
+    var isMismatch = integrity === "Mismatch";
+
+    // Header: [plugin-name] + badge
+    var header = document.createElement("div");
+    header.className = "detail-header";
+
+    var headerLockup = document.createElement("span");
+    headerLockup.className = "detail-name";
+    var lb = document.createElement("span");
+    lb.className = "br";
+    lb.textContent = "[";
+    var nm = document.createElement("span");
+    nm.textContent = name;
+    var rb = document.createElement("span");
+    rb.className = "br";
+    rb.textContent = "]";
+    headerLockup.appendChild(lb);
+    headerLockup.appendChild(nm);
+    headerLockup.appendChild(rb);
+    header.appendChild(headerLockup);
+
+    var badge = document.createElement("span");
+    badge.className = "badge " + integrityBadgeVariant(integrity);
+    badge.textContent = integrityStatusLabel(integrity);
+    header.appendChild(badge);
+
+    // Close button
+    var closeBtn = document.createElement("button");
+    closeBtn.className = "btn btn-ghost detail-close";
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "close detail");
+    closeBtn.textContent = "close";
+    closeBtn.addEventListener("click", function () {
+      panel.textContent = "";
+      panel.classList.remove("is-visible");
+      document.querySelectorAll(".integrity-table tbody tr.is-detail-open").forEach(function (r) {
+        r.classList.remove("is-detail-open");
+      });
+    });
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+
+    // CRITICAL — mismatch: show both expected and actual checksum prominently.
+    if (isMismatch) {
+      var mismatchBanner = document.createElement("div");
+      mismatchBanner.className = "detail-mismatch-banner";
+      var mismatchTitle = document.createElement("div");
+      mismatchTitle.className = "detail-mismatch-title";
+      mismatchTitle.textContent = "checksum mismatch — plugin files do not match the lock entry";
+      mismatchBanner.appendChild(mismatchTitle);
+
+      if (d.checksum != null) {
+        var expRow = document.createElement("div");
+        expRow.className = "detail-checksum-row";
+        var expLabel = document.createElement("span");
+        expLabel.className = "detail-checksum-label";
+        expLabel.textContent = "expected";
+        var expVal = document.createElement("span");
+        expVal.className = "detail-checksum-value";
+        expVal.textContent = String(d.checksum);
+        expRow.appendChild(expLabel);
+        expRow.appendChild(expVal);
+        mismatchBanner.appendChild(expRow);
+      }
+
+      if (d.actual_checksum != null) {
+        var actRow = document.createElement("div");
+        actRow.className = "detail-checksum-row detail-checksum-actual";
+        var actLabel = document.createElement("span");
+        actLabel.className = "detail-checksum-label";
+        actLabel.textContent = "actual";
+        var actVal = document.createElement("span");
+        actVal.className = "detail-checksum-value";
+        actVal.textContent = String(d.actual_checksum);
+        actRow.appendChild(actLabel);
+        actRow.appendChild(actVal);
+        mismatchBanner.appendChild(actRow);
+      }
+
+      panel.appendChild(mismatchBanner);
+    }
+
+    // Fields table: lock_source, pinned_commit, checksum (non-mismatch).
+    var fields = document.createElement("dl");
+    fields.className = "detail-fields";
+
+    function addField(label, value, opts) {
+      var dt = document.createElement("dt");
+      dt.className = "detail-field-label";
+      dt.textContent = label;
+      var dd = document.createElement("dd");
+      dd.className = "detail-field-value" + (opts && opts.extraClass ? " " + opts.extraClass : "");
+      dd.textContent = value != null ? String(value) : "—";
+      if (value == null && opts && opts.nullLabel) {
+        dd.textContent = opts.nullLabel;
+        dd.style.color = "var(--fg-3)";
+      }
+      fields.appendChild(dt);
+      fields.appendChild(dd);
+    }
+
+    addField("lock source", d.lock_source, { nullLabel: "bundled — no lock entry" });
+    addField("pinned commit", d.pinned_commit, { nullLabel: "—" });
+
+    // Only show the single checksum field when NOT a mismatch (mismatch shows
+    // both above in the danger banner).
+    if (!isMismatch) {
+      addField("checksum", d.checksum, { nullLabel: "—" });
+    }
+
+    panel.appendChild(fields);
+    panel.classList.add("is-visible");
+  }
+
+  function wireIntegrityRowClicks() {
+    document.querySelectorAll(".integrity-table tbody tr[data-plugin]").forEach(function (row) {
+      // Remove old listeners by cloning the node — the simplest safe approach.
+      var fresh = row.cloneNode(true);
+      row.parentNode.replaceChild(fresh, row);
+      fresh.addEventListener("click", function () {
+        var plugin = fresh.getAttribute("data-plugin");
+        if (plugin) showIntegrityDetail(plugin);
+      });
+    });
+  }
+
   function wireIntegritySection() {
     // Reverify all button.
     var reverifyBtn = document.getElementById("reverify-all-btn");
@@ -228,13 +521,12 @@
       });
     });
 
-    // Row drill-down click → detail op (no-op in v0.1; shell logs).
-    document.querySelectorAll(".integrity-table tbody tr[data-plugin]").forEach(function (row) {
-      row.addEventListener("click", function () {
-        var plugin = row.getAttribute("data-plugin");
-        if (plugin) invoke("integrity_plugin_detail", { plugin: plugin }).catch(function () {});
-      });
-    });
+    // Wire drill-down on the static seed rows (live rows are wired in
+    // wireIntegrityRowClicks after handleIntegrityList rebuilds the tbody).
+    wireIntegrityRowClicks();
+
+    // H14: request the live integrity list from the chrome document.
+    requestIntegrityList();
   }
 
   function filterIntegrityTable() {

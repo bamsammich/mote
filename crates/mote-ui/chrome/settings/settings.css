@@ -311,6 +311,125 @@
   border-bottom: none;
 }
 
+/* ---- H14: live-row selected state (detail open) ---- */
+
+.integrity-table tbody tr.is-detail-open td {
+  background: var(--surface-1);
+  border-left: 2px solid var(--accent);
+}
+
+/* ---- H16: integrity detail expansion panel ---- */
+
+.integrity-detail-panel {
+  display: none;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  padding: var(--space-4);
+  margin-top: var(--space-3);
+  /* Floating surface rule: shadow on elevated surfaces. */
+  box-shadow: var(--shadow-1);
+}
+
+.integrity-detail-panel.is-visible {
+  display: flex;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.detail-name {
+  font: var(--text-h3);
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.detail-name .br {
+  color: var(--accent);
+}
+
+.detail-close {
+  margin-left: auto;
+  height: 24px;
+  padding: 0 8px;
+  font: var(--text-micro);
+  font-weight: 500;
+}
+
+/* CRITICAL: mismatch banner — danger treatment for the highest-severity event. */
+.detail-mismatch-banner {
+  background: rgba(200, 74, 44, 0.08);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-2);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+[data-theme="vellum"] .detail-mismatch-banner {
+  background: rgba(168, 58, 31, 0.07);
+}
+
+.detail-mismatch-title {
+  font: var(--text-mono-sm);
+  font-weight: 600;
+  color: var(--danger);
+  text-transform: lowercase;
+}
+
+.detail-checksum-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font: var(--text-mono-sm);
+}
+
+.detail-checksum-label {
+  color: var(--fg-3);
+  min-width: 64px;
+  flex: none;
+}
+
+.detail-checksum-value {
+  color: var(--fg-1);
+  word-break: break-all;
+  flex: 1;
+}
+
+/* Actual checksum in mismatch: highlighted */
+.detail-checksum-actual .detail-checksum-value {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Fields: definition list */
+.detail-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  font: var(--text-mono-sm);
+}
+
+.detail-field-label {
+  color: var(--fg-3);
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.detail-field-value {
+  color: var(--fg-1);
+  word-break: break-all;
+}
+
 /* ---- Keybinds table ---- */
 
 .keybinds-section-head {

@@ -339,8 +339,13 @@
       card.appendChild(secWrap);
     }
 
-    // last-used line
-    if (p.last_used) {
+    // H4: recent-ops activity timeline — newest-first, ≤6 entries.
+    // When non-empty this replaces the last_used summary line; when empty the
+    // last_used fallback is shown instead (preserving v0.1 behaviour).
+    if (Array.isArray(p.recent_ops) && p.recent_ops.length > 0) {
+      card.appendChild(buildRecentOpsTimeline(p.recent_ops));
+    } else if (p.last_used) {
+      // Fallback: plain last-used timestamp when no per-op history is available.
       var lu = el("div", { class: "plugin-last-used" });
       lu.appendChild(el("span", { class: "last-used-label", text: "last used " }));
       lu.appendChild(el("span", { class: "last-used-value", text: String(p.last_used) }));
@@ -415,6 +420,73 @@
         .invoke("plugin_revoke_secret", { plugin: String(plugin), name: String(name) })
         .catch(function () {});
     };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // H4: per-plugin activity timeline — recent_ops from PluginRow
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Map OpSummary.decision string to a CSS modifier class.
+   * "deny" uses the danger treatment (same token as AuditDecision.blocked so
+   * the visual language is consistent). "defer" gets no color tint — it is
+   * informational. "allow" is muted (fg-2).
+   *
+   * Exported as window.mote._opDecisionClass for the node test suite.
+   */
+  function opDecisionClass(decision) {
+    switch (String(decision || "").toLowerCase()) {
+      case "deny": return "deny";
+      case "allow": return "allow";
+      case "defer": return "defer";
+      default: return "";
+    }
+  }
+
+  function buildRecentOpsTimeline(ops) {
+    var wrap = el("div", {
+      class: "recent-ops",
+      attrs: { "aria-label": "recent activity" },
+    });
+    wrap.appendChild(el("div", { class: "recent-ops-label", text: "recent activity" }));
+    var list = el("ul", {
+      class: "recent-ops-list",
+      attrs: { role: "list", "aria-label": "recent operations" },
+    });
+    for (var i = 0; i < ops.length; i++) {
+      var op = ops[i] || {};
+      var decClass = opDecisionClass(op.decision);
+      var row = el("li", {
+        class: "op-row" + (decClass ? " op-decision-" + decClass : ""),
+        attrs: { role: "listitem" },
+      });
+      row.appendChild(el("span", {
+        class: "op-dot",
+        attrs: { "aria-hidden": "true" },
+        text: "•",
+      }));
+      row.appendChild(el("span", {
+        class: "op-name",
+        text: String(op.operation || ""),
+      }));
+      row.appendChild(el("span", {
+        class: "op-decision op-decision-" + decClass,
+        text: String(op.decision || ""),
+      }));
+      if (op.latency != null) {
+        row.appendChild(el("span", {
+          class: "op-latency",
+          text: String(op.latency),
+        }));
+      }
+      row.appendChild(el("span", {
+        class: "op-when",
+        text: String(op.when || ""),
+      }));
+      list.appendChild(row);
+    }
+    wrap.appendChild(list);
+    return wrap;
   }
 
   function buildAuditSummary(rows) {
@@ -1154,6 +1226,12 @@
 
   // Compose with host.js's applyOp: host.js installs its own switch first;
   // we wrap it so this module's ops fall through to the existing handler.
+  //
+  // Note: the settings-page integrity surfaces (H14/H16) are NOT handled here.
+  // The settings page is served at the privileged mote://chrome origin and so
+  // carries its own host-bridge; the shell pushes render results straight to it
+  // (window.__moteIntegrityList / __moteIntegrityDetail on the active content
+  // page) — no chrome-document relay is involved.
   var prevApplyOp = typeof window.mote.applyOp === "function" ? window.mote.applyOp : null;
   window.mote.applyOp = function (op, payload) {
     switch (op) {
@@ -1173,4 +1251,7 @@
         if (prevApplyOp) prevApplyOp(op, payload);
     }
   };
+
+  // Expose for node test suite (pure-logic helpers only — no DOM dependency).
+  window.mote.opDecisionClass = opDecisionClass;
 })();

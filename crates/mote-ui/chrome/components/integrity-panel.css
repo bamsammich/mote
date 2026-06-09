@@ -365,6 +365,107 @@
   color: var(--fg-2);
 }
 
+/* ---- H4: per-plugin activity timeline (recent_ops) ---- */
+
+.recent-ops {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recent-ops-label {
+  font: var(--text-mono-sm);
+  color: var(--fg-3);
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+}
+
+.recent-ops-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  overflow: hidden;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.op-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font: var(--text-mono-sm);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.op-row:last-child {
+  border-bottom: none;
+}
+
+.op-row:nth-child(even) {
+  background: var(--surface-sunk);
+}
+
+/* deny rows: danger background tint — the security-critical event */
+.op-row.op-decision-deny {
+  background: rgba(200, 74, 44, 0.06);
+}
+
+[data-theme="vellum"] .op-row.op-decision-deny {
+  background: rgba(168, 58, 31, 0.07);
+}
+
+.op-dot {
+  color: var(--fg-3);
+  flex: none;
+}
+
+.op-name {
+  color: var(--fg-1);
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.op-decision {
+  font: var(--text-mono-sm);
+  padding: 1px 5px;
+  border-radius: var(--radius-1);
+  flex: none;
+}
+
+/* allow: muted — expected path */
+.op-decision.op-decision-allow {
+  color: var(--fg-2);
+}
+
+/* deny: danger treatment matching audit-decision.blocked */
+.op-decision.op-decision-deny {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* defer: accent — informational / pending */
+.op-decision.op-decision-defer {
+  color: var(--accent);
+}
+
+.op-latency {
+  color: var(--fg-3);
+  flex: none;
+  font: var(--text-mono-sm);
+}
+
+.op-when {
+  color: var(--fg-3);
+  flex: none;
+  font: var(--text-mono-sm);
+  margin-left: auto;
+}
+
 /* ---- Plugin actions row: keycap buttons ---- */
 
 .plugin-actions {

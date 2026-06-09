@@ -272,10 +272,10 @@ enum ShellCommand {
     IntegrityReverifyAll,
     /// Request drill-down detail for a specific plugin's integrity record
     /// (`integrity_plugin_detail` op). Builds the detail payload and pushes
-    /// `applyOp('render_integrity_detail', payload)` to the chrome.
+    /// `window.__moteIntegrityDetail(payload)` to the settings page.
     IntegrityPluginDetail(String),
     /// Request the live integrity list for the settings page
-    /// (`integrity_list` op). Pushes `applyOp('render_integrity_list', payload)`.
+    /// (`integrity_list` op). Pushes `window.__moteIntegrityList(payload)`.
     IntegrityList,
     // P5: find / zoom / reopen ops ────────────────────────────────────────────
     /// Open find-in-page mode: push `applyOp('focus_find', null)` to the chrome
@@ -1989,10 +1989,10 @@ impl ShellApp {
                     eprintln!("mote-shell: integrity_reverify_all — re-verify all plugins");
                 }
                 ShellCommand::IntegrityPluginDetail(name) => {
-                    self.push_integrity_detail_to_chrome(&name);
+                    self.push_integrity_detail(&name);
                 }
                 ShellCommand::IntegrityList => {
-                    self.push_integrity_list_to_chrome();
+                    self.push_integrity_list();
                 }
                 // P5: find / zoom / reopen commands ─────────────────────────
                 ShellCommand::FindInPage => {
@@ -3145,16 +3145,18 @@ impl ShellApp {
         true
     }
 
-    /// Push the integrity detail payload for `name` to the chrome document
-    /// via `applyOp('render_integrity_detail', payload)` (H16).
+    /// Push the integrity detail payload for `name` to the **settings page**
+    /// via `window.__moteIntegrityDetail(payload)` (H16).
     ///
-    /// The payload is built from the named plugin's live lock entry and
-    /// integrity state. A missing plugin or serialization failure is logged
-    /// and the push is silently skipped.
-    fn push_integrity_detail_to_chrome(&self, name: &str) {
-        if !self.chrome_ready {
-            return;
-        }
+    /// The settings page is served at the privileged `mote://chrome` origin and
+    /// so carries the host-bridge, but the response must reach the content tab
+    /// the user is viewing (`active_page()`) — not the chrome document
+    /// (`bridge.page()`), where the settings DOM does not live. The payload is
+    /// built from the named plugin's live lock entry and integrity state; a
+    /// missing plugin, serialization failure, or absent active page is
+    /// logged/skipped. The JS-side `&&` guard makes a stray push to a non-
+    /// settings page a harmless no-op.
+    fn push_integrity_detail(&self, name: &str) {
         let Some(detail) = self.host.integrity_detail_payload(name) else {
             eprintln!("mote-shell: integrity_plugin_detail: plugin {name:?} not found");
             return;
@@ -3166,22 +3168,23 @@ impl ShellApp {
                 return;
             }
         };
-        self.bridge.page().eval_js(&format!(
-            "window.mote&&window.mote.applyOp&&\
-             window.mote.applyOp('render_integrity_detail',{payload});"
+        let Some(page) = self.active_page() else {
+            return;
+        };
+        page.eval_js(&format!(
+            "window.__moteIntegrityDetail&&window.__moteIntegrityDetail({payload});"
         ));
     }
 
-    /// Push the live integrity list to the chrome document via
-    /// `applyOp('render_integrity_list', payload)` (H14).
+    /// Push the live integrity list to the **settings page** via
+    /// `window.__moteIntegrityList(payload)` (H14).
     ///
     /// Reuses the panel-building data path via
-    /// [`PluginHost::integrity_list_payload`]. A serialization failure is
-    /// logged and the push is silently skipped.
-    fn push_integrity_list_to_chrome(&self) {
-        if !self.chrome_ready {
-            return;
-        }
+    /// [`PluginHost::integrity_list_payload`]. Targets `active_page()` (the
+    /// settings content tab the user is viewing) for the same reason as
+    /// [`Self::push_integrity_detail`]. A serialization failure or absent active
+    /// page is logged/skipped.
+    fn push_integrity_list(&self) {
         let list = self.host.integrity_list_payload();
         let payload = match serde_json::to_string(&list) {
             Ok(s) => s,
@@ -3190,9 +3193,11 @@ impl ShellApp {
                 return;
             }
         };
-        self.bridge.page().eval_js(&format!(
-            "window.mote&&window.mote.applyOp&&\
-             window.mote.applyOp('render_integrity_list',{payload});"
+        let Some(page) = self.active_page() else {
+            return;
+        };
+        page.eval_js(&format!(
+            "window.__moteIntegrityList&&window.__moteIntegrityList({payload});"
         ));
     }
 

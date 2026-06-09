@@ -21,11 +21,11 @@ pre-commit:
     # Spelling across code, comments, and docs.
     typos:
       run: mise exec -- typos
-    # Chrome JS regression tests (CL-KBNAV): the pure roving nav-math against the
-    # pinned omnibox wrap contract. Plain node script, exits non-zero on failure.
+    # Chrome JS regression tests: roving nav-math + panels.js pure-logic helpers.
+    # Both plain node scripts, exit non-zero on failure.
     chrome-js-tests:
       glob: "crates/mote-ui/chrome/*.js"
-      run: mise exec -- node crates/mote-ui/chrome/roving.test.js
+      run: mise exec -- node crates/mote-ui/chrome/roving.test.js && mise exec -- node crates/mote-ui/chrome/panels.test.js
 
 pre-push:
   commands:
