@@ -33,3 +33,4 @@ crates/mote-ui/node_modules/
 # Playwright test artifacts — generated per run, not committed.
 crates/mote-ui/test-results/
 crates/mote-ui/playwright-report/
+crates/mote-ui/playwright-component-report/

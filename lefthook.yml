@@ -21,11 +21,26 @@ pre-commit:
     # Spelling across code, comments, and docs.
     typos:
       run: mise exec -- typos
-    # Chrome JS regression tests: roving nav-math + panels.js pure-logic helpers.
-    # Both plain node scripts, exit non-zero on failure.
+    # Chrome JS regression tests: Lane 1 component suite (real headless Chromium)
+    # + node shims for pure-logic helpers (roving nav-math, panels.js helpers).
+    #
+    # The component suite serves crates/mote-ui/chrome/ over HTTP and renders
+    # the golden fixture (__fixtures__/integrity_list.json) in real Chromium.
+    # Fails loudly if node_modules is missing — never silently skips.
     chrome-js-tests:
-      glob: "crates/mote-ui/chrome/*.js"
-      run: mise exec -- node crates/mote-ui/chrome/roving.test.js && mise exec -- node crates/mote-ui/chrome/panels.test.js
+      glob: "crates/mote-ui/chrome/**/*.{js,mjs,html,json}"
+      run: >
+        mise exec -- sh -c '
+          if [ ! -d crates/mote-ui/node_modules ]; then
+            echo "ERROR: crates/mote-ui/node_modules is missing." >&2
+            echo "Run: cd crates/mote-ui && npm install" >&2
+            exit 1
+          fi
+          cd crates/mote-ui &&
+          node chrome/roving.test.js &&
+          node chrome/panels.test.js &&
+          npx playwright test --config playwright.component.mjs
+        '
 
 pre-push:
   commands:

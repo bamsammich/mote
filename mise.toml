@@ -24,7 +24,7 @@ typos = "latest"
 # Node runtime — runs the chrome JS regression tests (e.g. roving.test.js) in
 # the lefthook pre-commit gate. Pinned so the gate is reproducible on a clean
 # checkout / CI runner without relying on a globally-installed node.
-node = "latest"
+node = "22"
 
 [settings]
 # Record exact resolved versions in mise.lock for byte-for-byte reproducibility.

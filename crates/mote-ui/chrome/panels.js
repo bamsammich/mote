@@ -1194,14 +1194,21 @@
   // ──────────────────────────────────────────────────────────────────────────
 
   window.mote = window.mote || {};
-  // Expose pure builders too (the boundary tests pin on these names if a JS
-  // test harness ever lands; today the discipline grep-checks the source).
-  window.mote.buildPanelDom = buildPanelDom;
-  window.mote.buildDialogDom = buildDialogDom;
   window.mote.renderIntegrityPanel = renderIntegrityPanel;
   window.mote.hideIntegrityPanel = hideIntegrityPanel;
   window.mote.showApprovalDialog = showApprovalDialog;
   window.mote.hideApprovalDialog = hideApprovalDialog;
+
+  // ---- Test exports (guarded) -----------------------------------------------
+  // Exposed only when the harness sets window.__MOTE_TEST__ = true before
+  // loading this script. Never present on the live privileged page.
+  if (window.__MOTE_TEST__) {
+    window.__motePanelsTest = {
+      buildPanelDom: buildPanelDom,
+      buildDialogDom: buildDialogDom,
+      opDecisionClass: opDecisionClass,
+    };
+  }
 
   // CL-KBNAV: drive the integrity panel's roving controller. roving.attach()
   // does not install its own keydown listener (the caller owns the event).

@@ -23,11 +23,12 @@ const src = fs.readFileSync(path.join(__dirname, "panels.js"), "utf8");
 
 // Minimal browser-environment stubs:
 //   window  — needed by the IIFE to install window.mote
+//   window.__MOTE_TEST__ = true — activates the guarded test-only exports
 //   document.createElement / document.createTextNode / document.addEventListener
 //             — referenced at module level for the applyOp wiring; providing
 //               stubs prevents ReferenceError without executing any real DOM
 const sandbox = {
-  window: {},
+  window: { __MOTE_TEST__: true },
   document: {
     createElement: function () {
       return {
@@ -53,11 +54,18 @@ const mote = sandbox.window.mote;
 assert.ok(mote, "window.mote must be defined after loading panels.js");
 
 // ---- opDecisionClass -------------------------------------------------------
+// Pure-logic helper — accessed via the __MOTE_TEST__ guarded export.
 
-const { opDecisionClass } = mote;
+const panelsTest = sandbox.window.__motePanelsTest;
+assert.ok(
+  panelsTest && typeof panelsTest === "object",
+  "window.__motePanelsTest must be defined when __MOTE_TEST__ is true"
+);
+
+const { opDecisionClass } = panelsTest;
 assert.ok(
   typeof opDecisionClass === "function",
-  "window.mote.opDecisionClass must be a function"
+  "window.__motePanelsTest.opDecisionClass must be a function"
 );
 
 let passed = 0;

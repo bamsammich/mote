@@ -1,0 +1,148 @@
+<!doctype html>
+<!--
+  integrity.html — Lane 1 component harness (ADR-0020 §1).
+
+  Loads the REAL chrome CSS (tokens + components + settings) and the REAL
+  settings.js so the component test suite can inject fixture payloads and assert
+  on the actual DOM output + visual theme rendering.
+
+  Usage:
+    Served by the Playwright webServer (playwright.component.mjs).
+    ?theme=dusk  (default) | ?theme=vellum  — sets [data-theme] on <body>.
+
+  The harness sets window.__MOTE_TEST__ = true BEFORE loading settings.js to
+  activate the guarded test-only exports (window.__moteSettingsTest). It also
+  installs a minimal window.mote.invoke stub so the DOMContentLoaded boot in
+  settings.js can proceed without a real host bridge.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>integrity harness</title>
+
+    <!-- Real chrome CSS — same load order as integrity.html in production. -->
+    <link rel="stylesheet" href="../../tokens.css" />
+    <link rel="stylesheet" href="../../base.css" />
+    <link rel="stylesheet" href="../../components/kbd.css" />
+    <link rel="stylesheet" href="../../components/button.css" />
+    <link rel="stylesheet" href="../../components/field.css" />
+    <link rel="stylesheet" href="../../components/badge.css" />
+    <link rel="stylesheet" href="../../settings/settings.css" />
+
+    <!--
+      Activate test-only exports and stub window.mote.invoke BEFORE settings.js
+      executes.  settings.js checks window.mote.invoke at call sites (not at
+      module load time), so the stub just needs to be a no-op Promise factory.
+    -->
+    <script>
+      window.__MOTE_TEST__ = true;
+      window.mote = window.mote || {};
+      // Stub invoke: records the most-recent [op, params] for assertion.
+      window.__invokeLog = [];
+      window.mote.invoke = function (op, params) {
+        window.__invokeLog.push([op, params || {}]);
+        return Promise.resolve({ ok: true });
+      };
+      // Derive theme from ?theme= query param; fall back to dusk.
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        var theme = params.get("theme") || "dusk";
+        document.documentElement.setAttribute("data-theme", theme);
+        document.addEventListener("DOMContentLoaded", function () {
+          document.body.setAttribute("data-theme", theme);
+        });
+      })();
+    </script>
+
+    <!-- Real settings.js — runs its DOMContentLoaded boot once DOM is ready. -->
+    <script src="../../settings/settings.js" defer></script>
+  </head>
+  <!--
+    data-theme is set inline by the script above; the deferred DOMContentLoaded
+    handler in settings.js runs after the DOM is ready and will NOT override it.
+    We start with dusk as a safe default in case JS is slow.
+  -->
+  <body class="mote-root" data-theme="dusk">
+    <div class="settings-root">
+
+      <!-- [settings] header + section tab strip — lifted from integrity.html -->
+      <header class="settings-header">
+        <div class="settings-title">
+          <span class="settings-lockup lockup" aria-label="settings panel">
+            <span class="br">[</span><span class="name">settings</span><span class="br">]</span>
+          </span>
+        </div>
+        <nav class="settings-tabs" aria-label="settings sections" role="tablist">
+          <button class="settings-tab" data-section="general" role="tab" aria-label="general settings">general</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="plugins" role="tab" aria-label="plugins settings">plugins</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab is-active" data-section="integrity" role="tab" aria-label="integrity settings" aria-current="page">integrity</button>
+          <span class="settings-tab-sep" aria-hidden="true">·</span>
+          <button class="settings-tab" data-section="keybinds" role="tab" aria-label="keybinds reference">keybinds</button>
+        </nav>
+      </header>
+
+      <!-- integrity section content — exact markup from integrity.html -->
+      <main class="settings-body" role="main">
+        <section class="settings-section" aria-label="plugin integrity">
+
+          <div class="settings-filter-bar">
+            <input
+              id="integrity-search"
+              class="settings-search"
+              type="search"
+              placeholder="filter by plugin name"
+              aria-label="filter plugins by name"
+              spellcheck="false"
+            />
+            <select
+              id="integrity-status-filter"
+              class="settings-filter-select"
+              aria-label="filter by status"
+            >
+              <option value="">all statuses</option>
+              <option value="verified">verified</option>
+              <option value="mismatch">mismatch</option>
+              <option value="bundled">bundled</option>
+              <option value="dev-mode">dev mode</option>
+              <option value="unknown">unknown</option>
+            </select>
+            <button
+              id="reverify-all-btn"
+              class="btn btn-secondary"
+              type="button"
+              aria-label="re-verify all plugins"
+            >
+              reverify all
+            </button>
+          </div>
+
+          <table class="integrity-table" role="grid" aria-label="plugin integrity status">
+            <thead>
+              <tr>
+                <th data-col="plugin" scope="col">plugin</th>
+                <th data-col="status" scope="col">status</th>
+                <th data-col="verified" scope="col">last verified</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- seed rows — will be replaced by window.__moteIntegrityList() -->
+              <tr data-plugin="bookmarks" data-status="bundled" data-verified="">
+                <td>bookmarks</td>
+                <td><span class="badge info">bundled</span></td>
+                <td style="color: var(--fg-2)">at launch</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p style="color: var(--fg-2); font: var(--text-mono-sm)">
+            click a row for signature detail · the startup integrity check runs automatically on launch
+          </p>
+
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

@@ -679,4 +679,19 @@
     else if (section === "integrity") wireIntegritySection();
     else if (section === "keybinds") wireKeybindsSection();
   });
+
+  // ---- Test exports (guarded) -----------------------------------------------
+  // Exposed only when the harness sets window.__MOTE_TEST__ = true before
+  // loading this script. Never present on the live privileged page.
+  if (window.__MOTE_TEST__) {
+    window.__moteSettingsTest = {
+      buildIntegrityRow: buildIntegrityRow,
+      renderDetailPanel: renderDetailPanel,
+      handleIntegrityList: handleIntegrityList,
+      handleIntegrityDetail: handleIntegrityDetail,
+      integrityBadgeVariant: integrityBadgeVariant,
+      integrityStatusLabel: integrityStatusLabel,
+      statusDataAttr: statusDataAttr,
+    };
+  }
 })();
