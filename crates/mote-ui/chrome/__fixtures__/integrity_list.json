@@ -1,0 +1,22 @@
+{
+  "plugins": [
+    {
+      "name": "bookmarks",
+      "version": "0.1.0",
+      "integrity": "Bundled",
+      "source_label": "bundled"
+    },
+    {
+      "name": "history",
+      "version": "0.1.0",
+      "integrity": "Bundled",
+      "source_label": "bundled"
+    },
+    {
+      "name": "workspace-manager",
+      "version": "0.1.0",
+      "integrity": "Bundled",
+      "source_label": "bundled"
+    }
+  ]
+}

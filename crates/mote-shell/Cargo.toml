@@ -63,3 +63,5 @@ clearurls.workspace = true
 [dev-dependencies]
 # Tempdirs for headless PluginHost boot tests (config/cache dirs + path plugins).
 tempfile = "3"
+# Snapshot testing for view-model payloads (Lane 2, ADR-0020).
+insta = { workspace = true }

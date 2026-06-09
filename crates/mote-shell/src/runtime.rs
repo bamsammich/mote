@@ -3988,4 +3988,101 @@ return M
             "bundled plugin `history` must have Bundled integrity in the list"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Lane 2 — ADR-0020 §3: insta snapshot tests + golden-fixture contract
+    // -----------------------------------------------------------------------
+
+    /// Lane 2 snapshot: `integrity_list_payload()` serialised as JSON.
+    ///
+    /// Plugins are sorted by name for determinism so a load-order change does
+    /// not produce a spurious snapshot diff.  The committed `.snap` file is the
+    /// secondary drift net; explicit field assertions above are the primary
+    /// intent guard.
+    #[test]
+    fn integrity_list_payload_snapshot() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        let mut payload = host.integrity_list_payload();
+        payload.plugins.sort_by(|a, b| a.name.cmp(&b.name));
+        insta::assert_json_snapshot!(payload);
+    }
+
+    /// Lane 2 snapshot: `render_panel_html()` output for a fixed `IntegrityPanel`.
+    ///
+    /// A hand-built, time-independent panel is used so the snapshot is stable
+    /// across runs (no relative timestamps, no audit ring-buffer contents).
+    #[test]
+    fn render_panel_html_snapshot() {
+        let panel = IntegrityPanel {
+            plugins: vec![PluginRow {
+                name: "bookmarks".into(),
+                version: "0.1.0".into(),
+                fulfills: vec!["ui:bookmarks_provider".into()],
+                consumes: vec![],
+                permissions: vec![PermissionRow {
+                    requested: "storage:persistent".into(),
+                    effective: "storage:persistent".into(),
+                    narrowed: false,
+                    denied: false,
+                }],
+                secrets: vec![],
+                last_used: None,
+                recent_ops: vec![],
+                integrity: IntegrityStatus::Bundled,
+                kind: PluginKind::Bundled,
+                actions: vec![],
+            }],
+            network_audit: vec![],
+            storage: vec![],
+            denials: vec![],
+        };
+        let html = render_panel_html(&panel);
+        insta::assert_snapshot!(html);
+    }
+
+    /// Lane 2 golden-fixture contract (ADR-0020): `integrity_list.json` is the
+    /// single source of truth for the payload shape consumed by Lane 1 (chrome
+    /// component tests).
+    ///
+    /// Normal runs (no env var): reads the committed fixture and asserts
+    /// byte-equality with the live payload so a field rename or structural
+    /// change fails here with a clear regenerate instruction.
+    ///
+    /// Regenerate: `UPDATE_FIXTURES=1 cargo test -p mote-shell integrity_list_fixture_contract`
+    #[test]
+    fn integrity_list_fixture_contract() {
+        let (host, _config, _cache) = boot_host_with_bundled_plugins();
+        let mut payload = host.integrity_list_payload();
+        payload.plugins.sort_by(|a, b| a.name.cmp(&b.name));
+        let current =
+            serde_json::to_string_pretty(&payload).expect("integrity_list_payload must serialize");
+
+        // Fixture lives alongside the chrome components so Lane 1 can import it
+        // with a relative `import` / `readFileSync`.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/mote-ui/chrome/__fixtures__/integrity_list.json");
+
+        if std::env::var("UPDATE_FIXTURES").is_ok() {
+            if let Some(parent) = fixture_path.parent() {
+                std::fs::create_dir_all(parent).expect("failed to create __fixtures__ directory");
+            }
+            std::fs::write(&fixture_path, &current)
+                .expect("failed to write integrity_list.json fixture");
+            return;
+        }
+
+        let committed = std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| {
+            panic!(
+                "Could not read fixture at {}: {e}\n\
+                 Run: UPDATE_FIXTURES=1 cargo test -p mote-shell integrity_list_fixture_contract",
+                fixture_path.display()
+            )
+        });
+
+        assert_eq!(
+            committed, current,
+            "integrity_list.json fixture is stale — payload shape has changed.\n\
+             Regenerate with: UPDATE_FIXTURES=1 cargo test -p mote-shell integrity_list_fixture_contract"
+        );
+    }
 }

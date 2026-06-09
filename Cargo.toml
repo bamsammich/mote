@@ -71,6 +71,9 @@ url = "2.5"
 # layer to strip trackers and unwrap redirect wrappers. `UrlCleaner` is
 # constructed once at startup. See NOTICE for the licensing note.
 clearurls = "0.0.4"
+# Snapshot testing for view-model payloads (Lane 2, ADR-0020). The `json`
+# feature enables `assert_json_snapshot!` for structured payload diffing.
+insta = { version = "1", features = ["json"] }
 
 # --- Lint policy -------------------------------------------------------------
 # rustc lints. Group lints use priority = -1 so specific overrides below win.
