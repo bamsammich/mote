@@ -2,7 +2,7 @@
 
 This directory contains Architectural Decision Records (ADRs) for the Mote project, written in [MADR](https://adr.github.io/madr/) format.
 
-ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0017 are **Accepted** (approved by the maintainer 2026-06-02). ADR-0018 is **Accepted** (approved by the maintainer 2026-06-05). ADR-0019 is **Accepted** (approved by the maintainer 2026-06-06). ADR-0012's chord table was **amended 2026-06-06** (CL-KEYMAP: `Ctrl+1–9` → tabs, workspaces → `Ctrl+Alt+1–9`, per ADR-0019's Firefox/Chrome-defaults principle).
+ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 0004–0005 are **Accepted** (approved by the maintainer 2026-05-26). ADRs 0006–0008 are **Accepted** (approved by the maintainer 2026-05-27). ADR-0009 is **Accepted** (approved by the maintainer 2026-05-28). ADR-0010 is **Accepted** (approved by the maintainer 2026-05-30). ADR-0011 is **Accepted** (approved by the maintainer 2026-06-01). ADRs 0012–0017 are **Accepted** (approved by the maintainer 2026-06-02). ADR-0018 is **Accepted** (approved by the maintainer 2026-06-05). ADR-0019 is **Accepted** (approved by the maintainer 2026-06-06). ADR-0012's chord table was **amended 2026-06-06** (CL-KEYMAP: `Ctrl+1–9` → tabs, workspaces → `Ctrl+Alt+1–9`, per ADR-0019's Firefox/Chrome-defaults principle). ADR-0021 is **Proposed** (2026-06-08) — Accepted pending CDP-spike validation; ADR-0020 (UI regression-testing architecture) is forthcoming.
 
 ## Index
 
@@ -27,6 +27,7 @@ ADRs 0001–0003 are **Accepted** (approved by the maintainer 2026-05-25). ADRs 
 | [0017](0017-settings-panel-layout-and-write-target.md) | Settings Panel: Multi-Section Layout, Deep-Link Contract, `managed.lua` Write Target, URL-Install Deferral | Accepted |
 | [0018](0018-omnibox-url-vs-search-determination.md) | Omnibox URL-vs-Search Determination: Public-Suffix-Based, HTTPS-Default with Loopback Exception | Accepted |
 | [0019](0019-editing-paradigm-as-swappable-plugin.md) | Editing Paradigm (vim/emacs) as a Swappable First-Party Plugin: Declarative Keymap, Capability Contract, Bounded Command Host-API, Content-Keystroke Withholding | Accepted |
+| [0021](0021-test-mode-cef-devtools-protocol-surface.md) | Test-mode CEF DevTools-Protocol Surface: Off-by-Default, Loopback-Only, Env-Gated CDP for the E2E Test Lane | Proposed |
 
 ## Numbering convention
 
