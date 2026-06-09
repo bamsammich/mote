@@ -193,3 +193,134 @@ fn tab_switch_is_a_texture_swap() {
         "tab B center should be blue after swap, got b={bb}"
     );
 }
+
+/// Fill a `w*h` RGBA buffer with a single solid color.
+fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    for px in buf.chunks_exact_mut(4) {
+        px.copy_from_slice(&rgba);
+    }
+    buf
+}
+
+/// BUG #1 regression: after a window grow, `resize` + `resize_page_viewport`
+/// must stretch the retained page texture to the NEW viewport so there is no
+/// stale band (clear/black pixels) along the grown right/bottom edge until CEF
+/// re-paints.
+#[test]
+fn resize_page_viewport_stretches_retained_frame_no_stale_band() {
+    // Start small, then grow. The page is a distinct solid color so "page vs
+    // clear(black)" is unambiguous.
+    const SMALL_W: u32 = 400;
+    const SMALL_H: u32 = 300;
+    const NEW_W: u32 = 1000;
+    const NEW_H: u32 = 700;
+
+    // Initial viewport: page fills the whole small window (no chrome inset, so
+    // any black pixel after the grow is a stale band, not an inset).
+    const INIT_VP_W: u32 = SMALL_W;
+    const INIT_VP_H: u32 = SMALL_H;
+
+    // Vivid magenta page — clearly not the BLACK clear color.
+    const PAGE: [u8; 4] = [220, 30, 200, 255];
+
+    let Ok(mut compositor) = Compositor::new_offscreen(SMALL_W, SMALL_H) else {
+        eprintln!("SKIP: no wgpu adapter available in this environment");
+        return;
+    };
+
+    // Upload a page texture at the initial (small) viewport. No chrome layer:
+    // the page is the only thing drawn, so the only non-page pixels can be the
+    // clear color.
+    compositor
+        .update_page(
+            &solid(INIT_VP_W, INIT_VP_H, PAGE),
+            INIT_VP_W,
+            INIT_VP_H,
+            PixelFormat::Rgba8,
+            ViewportRect::new(0.0, 0.0, fpx(INIT_VP_W), fpx(INIT_VP_H)),
+        )
+        .expect("page upload");
+
+    // Grow the window. This is the shell's `handle_resize` path: resize the
+    // target, then stretch the retained page layer to the new viewport.
+    compositor.resize(NEW_W, NEW_H);
+    compositor.resize_page_viewport(ViewportRect::new(0.0, 0.0, fpx(NEW_W), fpx(NEW_H)));
+
+    let rgba = compositor.render_offscreen_rgba().expect("composite");
+    assert_eq!(rgba.len(), (NEW_W * NEW_H * 4) as usize);
+
+    // pixel() indexes by W (the original const); after a grow the row stride is
+    // NEW_W, so read directly here.
+    let at = |x: u32, y: u32| -> (u8, u8, u8, u8) {
+        let i = ((y * NEW_W + x) * 4) as usize;
+        (rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3])
+    };
+    let is_page = |(r, g, b, a): (u8, u8, u8, u8)| {
+        a == 255 && r.abs_diff(PAGE[0]) < 24 && g.abs_diff(PAGE[1]) < 24 && b.abs_diff(PAGE[2]) < 24
+    };
+
+    // The new right edge (x = NEW_W - 1) and bottom edge (y = NEW_H - 1) — the
+    // region that was BEYOND the old viewport — must now be the page color, not
+    // the black clear (the stale band the bug left behind).
+    let right_mid = at(NEW_W - 1, NEW_H / 2);
+    assert!(
+        is_page(right_mid),
+        "right edge {right_mid:?} is not the page color — stale band after grow"
+    );
+    let bottom_mid = at(NEW_W / 2, NEW_H - 1);
+    assert!(
+        is_page(bottom_mid),
+        "bottom edge {bottom_mid:?} is not the page color — stale band after grow"
+    );
+    let far_corner = at(NEW_W - 1, NEW_H - 1);
+    assert!(
+        is_page(far_corner),
+        "far corner {far_corner:?} is not the page color — stale band after grow"
+    );
+}
+
+/// BUG #2 regression: activating a not-yet-painted tab must clear the retained
+/// (closed-tab) page texture so its stale pixels are not shown — the viewport
+/// shows the clear color until the new page paints.
+#[test]
+fn clear_page_drops_stale_texture_shows_clear_color() {
+    const PAGE: [u8; 4] = [40, 220, 80, 255]; // vivid green prior-tab page.
+
+    let Ok(mut compositor) = Compositor::new_offscreen(W, H) else {
+        eprintln!("SKIP: no wgpu adapter available in this environment");
+        return;
+    };
+
+    let vp = ViewportRect::new(fpx(VP_X), fpx(VP_Y), fpx(VP_W), fpx(VP_H));
+    compositor
+        .update_page(&solid(VP_W, VP_H, PAGE), VP_W, VP_H, PixelFormat::Rgba8, vp)
+        .expect("prior page upload");
+
+    // Sanity: the prior page is visible at the viewport center.
+    assert!(compositor.has_page(), "page should be set before clear");
+    let before = compositor
+        .render_offscreen_rgba()
+        .expect("composite before");
+    let (br, bg, bb, _) = pixel(&before, VP_X + VP_W / 2, VP_Y + VP_H / 2);
+    assert!(
+        bg > 150 && br < 120 && bb < 150,
+        "prior page center {br},{bg},{bb} is not the green page"
+    );
+
+    // Activation of an unpainted tab: drop the closed tab's texture.
+    compositor.clear_page();
+    assert!(
+        !compositor.has_page(),
+        "page should be None after clear_page"
+    );
+
+    // With no chrome and no page, the whole target is the BLACK clear color —
+    // specifically the viewport center must NOT show the prior green page.
+    let after = compositor.render_offscreen_rgba().expect("composite after");
+    let (ar, ag, ab, _) = pixel(&after, VP_X + VP_W / 2, VP_Y + VP_H / 2);
+    assert!(
+        ar == 0 && ag == 0 && ab == 0,
+        "viewport center {ar},{ag},{ab} after clear_page is not the clear color — stale texture shown"
+    );
+}

@@ -359,6 +359,13 @@ impl Compositor {
         (self.width, self.height)
     }
 
+    /// Whether a focused-page layer is currently set (vs cleared via
+    /// [`Compositor::clear_page`]).
+    #[must_use]
+    pub const fn has_page(&self) -> bool {
+        self.page.is_some()
+    }
+
     /// Upload a new chrome frame (the full-window chrome texture).
     ///
     /// `bytes` is `width * height * 4` bytes in `format`. The chrome is drawn
@@ -733,6 +740,23 @@ impl Compositor {
             let full = ViewportRect::new(0.0, 0.0, px_to_f32(width), px_to_f32(height));
             self.queue
                 .write_buffer(&chrome.dest_buffer, 0, &full.as_uniform_bytes());
+        }
+    }
+
+    /// Update the retained page layer's destination viewport rect in place.
+    ///
+    /// On a window resize the page's CEF browser re-paints asynchronously, so
+    /// the retained page texture would otherwise keep drawing at the OLD
+    /// viewport rect until the next paint arrives, leaving a stale band in the
+    /// grown region. This rewrites the page layer's dest-rect uniform (mirroring
+    /// how [`Compositor::resize`] keeps the chrome dest rect in sync) so the
+    /// retained frame is stretched to the new viewport until CEF delivers a
+    /// correctly sized frame. No-op when no page is set.
+    pub fn resize_page_viewport(&mut self, viewport: ViewportRect) {
+        if let Some((layer, rect)) = self.page.as_mut() {
+            *rect = viewport;
+            self.queue
+                .write_buffer(&layer.dest_buffer, 0, &viewport.as_uniform_bytes());
         }
     }
 }

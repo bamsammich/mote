@@ -5,19 +5,32 @@
 // remaining tab. The compositor does not repaint after the tab-close op.
 //
 // This spec is QUARANTINED via test.fixme. The tab-close op sequence IS
-// exercisable headlessly (open 2 tabs, close one via close_tab op, check CDP
-// targets), but the visual repaint assertion is blocked:
+// exercisable headlessly, but a tab-count assertion does NOT guard BUG #2.
 //
-// PARTIAL IMPLEMENTATION BLOCKER — visual repaint verification:
-// Playwright's screenshot() on the chrome page captures only the DOM renderer
-// (the CEF chrome page). Verifying that the wgpu compositor surface repainted
-// to show the remaining tab's content requires either an X11 composite capture
-// (xwd, scrot) or a native screenshot op — neither is available over standard CDP.
+// REGRESSION GUARD (the bug IS covered): BUG #2 is a COMPOSITOR REPAINT bug —
+// after activating the surviving tab, the compositor keeps the closed tab's
+// retained texture (the count-based upload_frames skip never re-uploads). It is
+// guarded deterministically by the compositor unit test:
+//   crates/mote-ui/tests/compositor_offscreen.rs
+//     fn clear_page_drops_stale_texture_shows_clear_color
+// which uploads a prior-tab page, calls clear_page() (the on_active_changed
+// fix), and asserts the viewport center is the clear color, not the prior
+// page's pixels.
 //
-// WHAT IS EXERCISABLE: the tab lifecycle (open 2 → close 1 → verify CDP
-// targets) is fully testable. The shell's close_tab op requires a tab ID,
-// which is read from the chrome DOM via the data-tab-id attribute (populated
-// by set_tabs push). The visual repaint assertion is documented as TODO.
+// WHY THIS SPEC STAYS test.fixme (not a forced green):
+//   - The exercisable part here (open 2 → close 1 → verify CDP target count) is
+//     a TAB-LIFECYCLE assertion. It passes whether or not the compositor
+//     repaints — so flipping it green would be a FALSE guard for BUG #2.
+//   - import -window root CAN capture the wgpu surface under Xvfb (verified
+//     during this fix: it reads back the composited frame, ~970 colors, chrome
+//     dusk pixel intact). But a true visual guard needs two tabs with
+//     deterministic, distinct on-screen colors and a known viewport rect to
+//     diff before/after close; network pages (example.com / mozilla.org) are
+//     not color-controlled, making the pixel assertion fragile. The compositor
+//     unit test above is the deterministic guard instead.
+//
+// The shell's close_tab op requires a tab ID, read from the chrome DOM via the
+// data-tab-id attribute (populated by set_tabs push).
 //
 // Implementation note: content tabs (http/https) opened via new_tab ARE tracked
 // by Playwright's connectOverCDP (they appear in ctx.pages()); settings pages
@@ -85,19 +98,17 @@ test.fixme(
     const remaining = mote.contentPages();
     expect(remaining.length).toBe(1);
 
-    // Step 5 (BLOCKED — visual repaint assertion):
-    // After close, the compositor should repaint to show the remaining tab.
-    // Asserting this requires capturing the wgpu compositor output, which is
-    // not accessible via CDP Page.captureScreenshot.
-    //
-    // TODO: once xwd/scrot or a native screenshot op is available, compare:
-    //   before-close screenshot vs. after-close screenshot and assert they differ.
-    //
-    // BLOCKER: wgpu compositor repaint verification requires native screenshot
-    // or a compositor-side CDP event — not available over standard CDP.
+    // Step 5 (NOT a BUG #2 guard — see header):
+    // The compositor repaint after close is the actual BUG #2 behavior, and it
+    // is NOT asserted here: the CDP target count above is a tab-lifecycle check
+    // that passes regardless of whether the compositor repaints. The wgpu
+    // surface CAN be captured under Xvfb (`import -window root`), but a robust
+    // pixel assertion needs deterministic, distinctly-colored tab content and a
+    // known viewport rect — fragile with network pages. The deterministic
+    // BUG #2 guard is the compositor unit test named in the header.
     console.log(
       "[tab-close] CDP target lifecycle OK (1 content tab remaining). " +
-        "Visual repaint assertion BLOCKED — see spec comment."
+        "BUG #2 repaint is guarded by the compositor unit test — see header."
     );
   }
 );

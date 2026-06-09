@@ -8,18 +8,32 @@
 //
 // This spec is QUARANTINED via test.fixme. See BLOCKER note below.
 //
+// REGRESSION GUARD (the bug IS covered): the BUG #1 root cause — the page
+// layer's dest-rect uniform keeping the stale (pre-resize) viewport, leaving a
+// black band in the grown region — is guarded by the deterministic compositor
+// unit test:
+//   crates/mote-ui/tests/compositor_offscreen.rs
+//     fn resize_page_viewport_stretches_retained_frame_no_stale_band
+// That test grows the compositor, calls resize() + resize_page_viewport(), and
+// asserts the new right/bottom edges are the page color (not the black clear),
+// which fails without the fix. It needs no window, WM, or display.
+//
 // BLOCKER — headless window resize under Xvfb without a WM:
 //   Winit creates a window on the Xvfb display, but Xvfb runs without a window
-//   manager. Programmatic window resize requires `xdotool`, which is NOT
-//   installed on this machine:
-//     $ command -v xdotool → (not found)
-//   When xdotool becomes available, the resize mechanic is:
-//     xdotool search --name "mote" windowsize 1600 1000
-//   Until then, this test cannot exercise the actual resize path. The fixture's
-//   setWindowSize() throws explicitly with a descriptive error.
+//   manager. There is no non-scaffolding way to resize the app window here:
+//     - xdotool (windowsize) is NOT installed: `command -v xdotool` → not found.
+//     - xrandr resizes the virtual SCREEN, not the winit app window (and winit
+//       does not auto-track screen size under a bare, WM-less Xvfb).
+//     - winit Window::request_inner_size() would work, but the only way to call
+//       it is a test-only resize op wired into the shell — production
+//       scaffolding that the regression guard above makes unnecessary, so it is
+//       deliberately NOT added.
+//   The fixture's setWindowSize() throws explicitly with a descriptive error.
 //
-// Once xdotool is installed AND the resize bug is fixed, replace test.fixme
-// with test() and implement the full assertion.
+// When a non-scaffolding resize mechanic exists (e.g. xdotool installed:
+//   xdotool search --name "mote" windowsize 1600 1000
+// ) replace test.fixme with test() and add a post-resize viewport-region
+// capture (import -window root) asserting the grown region is non-blank.
 
 import { test, expect } from "./fixtures.mjs";
 

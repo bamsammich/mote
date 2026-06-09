@@ -3001,11 +3001,56 @@ impl ShellApp {
         if let Some(page) = self.active_page() {
             page.notify_resized(vw, vh, scale);
         }
-        // Reset the content dirty counter so the next upload_frames re-uploads
-        // the new active page's frame (texture swap).
+        // Swap the compositor's page texture to the newly active tab so the
+        // closed/previous tab's texture is never shown. The previous active
+        // page's `Layer` was retained; if the new active page has not painted
+        // yet, a count-based `upload_frames` skip (`0 != 0` is false) would
+        // leave that stale texture on screen.
+        let viewport = self.viewport_rect();
+        // Capture the new active page's last frame (if it has one) BEFORE
+        // borrowing the compositor mutably; `latest_frame` clones an owned
+        // buffer, so the page borrow ends here.
+        let active_frame = self
+            .active_page()
+            .filter(|p| p.paint_count() > 0)
+            .and_then(|p| p.latest_frame().map(|f| (p.paint_count(), f)));
+        if let Some(compositor) = self.compositor.as_mut() {
+            // Drop the prior tab's texture immediately: until the new page
+            // paints, the viewport shows the clear color rather than stale
+            // content.
+            compositor.clear_page();
+            if let Some((count, frame)) = active_frame {
+                // The new active page already has a frame: re-upload it
+                // synchronously so an already-painted tab shows no blank flash.
+                if let Err(e) = compositor.update_page(
+                    &frame.pixels,
+                    frame.width,
+                    frame.height,
+                    PixelFormat::Bgra8,
+                    viewport,
+                ) {
+                    eprintln!("mote-shell: active-tab page upload failed: {e}");
+                    // Upload failed — let the next pump retry by leaving the
+                    // dirty counter reset below.
+                } else {
+                    // Mark the uploaded count so the next `upload_frames` does
+                    // not redundantly re-upload the same frame.
+                    self.content_paints = count;
+                    self.post_active_changed_focus();
+                    return;
+                }
+            }
+        }
+        // No frame uploaded (unpainted tab, no compositor, or upload error):
+        // reset the dirty counter so the next `upload_frames` uploads the new
+        // active page's frame as soon as it paints (texture swap).
         self.content_paints = 0;
-        // The freshly focused page should believe it has focus if the page owns
-        // input; otherwise focus stays with the chrome.
+        self.post_active_changed_focus();
+    }
+
+    /// Give the freshly focused page input focus if the page owns input;
+    /// otherwise focus stays with the chrome.
+    fn post_active_changed_focus(&self) {
         if self.focus == FocusOwner::Page
             && let Some(page) = self.active_page()
         {
@@ -3975,9 +4020,18 @@ impl ShellApp {
         self.width = size.width;
         self.height = size.height;
         let scale = self.scale_factor;
+        let viewport = self.viewport_rect();
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.resize(size.width, size.height);
+            // Stretch the retained page layer to the new viewport so the page
+            // quad fills the grown region immediately (no black band) until CEF
+            // asynchronously re-paints at the new size.
+            compositor.resize_page_viewport(viewport);
         }
+        // Force the next `upload_frames` to re-upload the active page's last
+        // frame at the new viewport rect, rather than skipping it as
+        // already-seen.
+        self.content_paints = 0;
         let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
