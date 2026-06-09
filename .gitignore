@@ -25,3 +25,11 @@ target
 
 # Playwright MCP screenshot/snapshot artifacts
 .playwright-mcp/
+
+# Node toolchain — scoped to crates/mote-ui/ (Lane 1 + Lane 3 e2e tests).
+# package-lock.json IS committed (pinned deps); node_modules is not.
+crates/mote-ui/node_modules/
+
+# Playwright test artifacts — generated per run, not committed.
+crates/mote-ui/test-results/
+crates/mote-ui/playwright-report/
