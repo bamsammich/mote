@@ -515,6 +515,20 @@ impl Page {
         }
     }
 
+    /// Notify CEF that this off-screen page's visibility changed.
+    ///
+    /// `hidden = true` calls `CefBrowserHost::WasHidden(true)`, which tells the
+    /// OSR backend to **stop issuing `on_paint` callbacks** (CEF freezes the
+    /// renderer's compositor for a hidden view). `hidden = false` resumes
+    /// painting. The host layer (mote-shell) calls this when the window is
+    /// occluded / re-shown so an idle hidden window does not keep CEF's 60Hz OSR
+    /// paint loop running (issue #4). No-op if the browser is closing/closed.
+    pub fn was_hidden(&self, hidden: bool) {
+        if let Some(host) = self.browser.host() {
+            host.was_hidden(i32::from(hidden));
+        }
+    }
+
     /// Start a find-in-page session on this page.
     ///
     /// `text` is the search string. `forward = true` searches forward (default

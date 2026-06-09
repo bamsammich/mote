@@ -723,6 +723,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         compositor: None,
         chrome_paints: 0,
         content_paints: 0,
+        // Start dirty so the first ticks paint the initial frames unconditionally
+        // (until then the dirty gate would otherwise suppress the startup redraw).
+        dirty: true,
+        hidden: false,
         width: INITIAL_WIDTH,
         height: INITIAL_HEIGHT,
         scale_factor: 1.0,
@@ -1821,6 +1825,20 @@ struct ShellApp {
     /// Last chrome/content paint counts uploaded — re-upload only on a new one.
     chrome_paints: u64,
     content_paints: u64,
+    /// Issue #4 damage gate: `true` when the composited output changed since the
+    /// last render and the window must repaint. Set by every state change that
+    /// affects what is on screen (new frame, resize, tab switch, overlay toggle,
+    /// scale change, window shown); cleared after `request_redraw` is issued in
+    /// `about_to_wait`. A clean + visible window is idle and does not redraw —
+    /// see [`should_request_redraw`]. CONSERVATIVE by design: when in doubt, set
+    /// it (a missed dirty = a stale surface; an extra redraw is merely wasteful).
+    dirty: bool,
+    /// Issue #4 visibility gate: `true` while the window is occluded / on another
+    /// workspace. When hidden, CEF is told to stop OSR painting via
+    /// [`Page::was_hidden`] and the loop skips `request_redraw`/render entirely
+    /// (so an idle hidden window burns no CPU/GPU on rendering). Cleared and the
+    /// surface marked dirty when the window is re-shown.
+    hidden: bool,
     /// Physical window size (chrome covers all of it; the page fills the viewport).
     width: u32,
     height: u32,
@@ -2996,6 +3014,12 @@ impl ShellApp {
     /// React to a change of active tab: size the new page to the viewport, give
     /// it focus, and force a content re-upload (so the compositor swaps to it).
     fn on_active_changed(&mut self) {
+        // A tab switch always changes the composited output: the compositor's
+        // page texture is cleared and (re-)uploaded below. Mark dirty so the
+        // issue-#4 render gate repaints even on the synchronous-upload path
+        // (which sets `content_paints` and so would not re-trigger dirty via
+        // `upload_frames`).
+        self.dirty = true;
         let (vw, vh) = self.viewport_dims();
         let scale = self.scale_factor;
         if let Some(page) = self.active_page() {
@@ -3549,13 +3573,23 @@ impl ShellApp {
     /// document is opaque, so it covers the whole window. The normal chrome /
     /// content uploads are skipped while it is open, and forced to re-upload when
     /// it closes (the `*_paints` counters are reset in `set_integrity_open`).
+    /// Drain any new CEF frame(s) into the compositor's textures.
+    ///
+    /// Marks the surface [`dirty`](Self::dirty) whenever a *new* frame is
+    /// actually uploaded (chrome, content, or the active overlay) so the
+    /// issue-#4 render gate repaints. A tick that produces no new frame leaves
+    /// `dirty` untouched — that is the idle case the gate suppresses.
     fn upload_frames(&mut self) {
         if self.picker.open {
-            self.upload_picker_overlay();
+            if self.upload_picker_overlay() {
+                self.dirty = true;
+            }
             return;
         }
         if self.integrity_open {
-            self.upload_integrity_overlay();
+            if self.upload_integrity_overlay() {
+                self.dirty = true;
+            }
             return;
         }
         let viewport = self.viewport_rect();
@@ -3579,6 +3613,7 @@ impl ShellApp {
             self.content_paints = content_count;
         }
 
+        let uploaded = chrome_frame.is_some() || content_frame.is_some();
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -3603,10 +3638,17 @@ impl ShellApp {
         {
             eprintln!("mote-shell: page upload failed: {e}");
         }
+        // A new chrome or content frame changed the composited output → repaint.
+        if uploaded {
+            self.dirty = true;
+        }
     }
 
     /// Composite the integrity overlay full-window onto the chrome texture.
-    fn upload_integrity_overlay(&mut self) {
+    ///
+    /// Returns `true` if a new overlay frame was uploaded this tick (so the
+    /// caller marks the surface dirty for the issue-#4 render gate).
+    fn upload_integrity_overlay(&mut self) -> bool {
         let frame = self.integrity_page.as_ref().and_then(|p| {
             let count = p.paint_count();
             (count != self.integrity_paints).then(|| {
@@ -3615,7 +3657,7 @@ impl ShellApp {
             })
         });
         let Some(Some(frame)) = frame else {
-            return;
+            return false;
         };
         if let Some(compositor) = self.compositor.as_mut()
             && let Err(e) = compositor.update_chrome(
@@ -3627,6 +3669,7 @@ impl ShellApp {
         {
             eprintln!("mote-shell: integrity overlay upload failed: {e}");
         }
+        true
     }
 
     /// Open or close the live integrity overlay.
@@ -3685,6 +3728,8 @@ impl ShellApp {
             self.content_paints = 0;
             eprintln!("mote-shell: integrity panel closed");
         }
+        // Showing or hiding the overlay changes the composited output; repaint.
+        self.dirty = true;
     }
 
     // ── Workspace tab picker (Mod+Space) ──────────────────────────────────
@@ -3743,6 +3788,8 @@ impl ShellApp {
             self.content_paints = 0;
             eprintln!("mote-shell: tab picker closed");
         }
+        // Showing or hiding the overlay changes the composited output; repaint.
+        self.dirty = true;
     }
 
     /// Push the picker's current query + filtered rows into the overlay via
@@ -3868,7 +3915,10 @@ impl ShellApp {
     /// Composite the picker overlay full-window onto the chrome texture. On the
     /// page's first paint, push the initial picker state (an `eval_js` before the
     /// document's script runs would be lost — same warm-up as the chrome).
-    fn upload_picker_overlay(&mut self) {
+    ///
+    /// Returns `true` if a new overlay frame was uploaded this tick (so the
+    /// caller marks the surface dirty for the issue-#4 render gate).
+    fn upload_picker_overlay(&mut self) -> bool {
         if !self.picker.ready
             && self
                 .picker_page
@@ -3886,7 +3936,7 @@ impl ShellApp {
             })
         });
         let Some(Some(frame)) = frame else {
-            return;
+            return false;
         };
         if let Some(compositor) = self.compositor.as_mut()
             && let Err(e) = compositor.update_chrome(
@@ -3898,6 +3948,7 @@ impl ShellApp {
         {
             eprintln!("mote-shell: tab picker overlay upload failed: {e}");
         }
+        true
     }
 
     // ── Session housekeeping (discard + hidden-tab reap) ───────────────────
@@ -4005,6 +4056,8 @@ impl ShellApp {
         self.content_opts.height = vh;
         self.notify_all_pages_of_size_change(self.width, self.height, vw, vh, scale);
         self.content_paints = 0;
+        // A scale change re-lays-out and re-paints every surface; repaint.
+        self.dirty = true;
     }
 
     /// Resize: reconfigure the surface, tell **all** live pages their new sizes,
@@ -4032,6 +4085,10 @@ impl ShellApp {
         // frame at the new viewport rect, rather than skipping it as
         // already-seen.
         self.content_paints = 0;
+        // The surface was reconfigured / the page quad stretched above; repaint
+        // so the new geometry shows immediately (issue #4 gate must not suppress
+        // a resize even before CEF delivers a re-paint at the new size).
+        self.dirty = true;
         let (vw, vh) = self.viewport_dims();
         self.content_opts.width = vw;
         self.content_opts.height = vh;
@@ -4074,6 +4131,47 @@ impl ShellApp {
         }
     }
 
+    /// Tell **every** live CEF page whether the window is hidden (issue #4
+    /// visibility gate). `hidden = true` calls `Page::was_hidden(true)` on each,
+    /// which stops the OSR backend's 60Hz `on_paint` loop — the core fix for an
+    /// idle, occluded window burning CPU/GPU; `false` resumes it.
+    ///
+    /// The enumeration mirrors [`notify_all_pages_of_size_change`] exactly so no
+    /// surface is left painting: the chrome bridge page, the integrity + picker
+    /// overlays (if live), and every tab content page (active AND inactive).
+    fn set_all_pages_hidden(&self, hidden: bool) {
+        self.bridge.page().was_hidden(hidden);
+        if let Some(page) = self.integrity_page.as_ref() {
+            page.was_hidden(hidden);
+        }
+        if let Some(page) = self.picker_page.as_ref() {
+            page.was_hidden(hidden);
+        }
+        for tab in &self.tabs {
+            if let Some(page) = tab.page.as_ref() {
+                page.was_hidden(hidden);
+            }
+        }
+    }
+
+    /// React to the window becoming fully occluded (issue #4 visibility gate).
+    ///
+    /// Sets the `hidden` flag and tells CEF to stop OSR painting on every live
+    /// page (`Page::was_hidden(true)`), so an idle window on another workspace
+    /// stops feeding the 60Hz texture-upload + compositor-render loop. While
+    /// hidden, `about_to_wait` keeps pumping CEF (Poll is retained) but issues no
+    /// `request_redraw` and the compositor does no render pass — see
+    /// [`should_request_redraw`]. Idempotent: re-entry while already hidden is a
+    /// no-op.
+    fn on_window_hidden(&mut self) {
+        if self.hidden {
+            return;
+        }
+        self.hidden = true;
+        self.set_all_pages_hidden(true);
+        eprintln!("mote-shell: window occluded; CEF OSR painting suspended (issue #4)");
+    }
+
     /// Re-query the window's physical size and drive a resize cascade.
     ///
     /// Called when `Focused(true)` or `Occluded(false)` fires after a workspace
@@ -4086,6 +4184,13 @@ impl ShellApp {
     /// 2. Re-notifies every live CEF page (`was_resized` + `notify_screen_info_changed`),
     ///    which flushes new paint callbacks even when dimensions are unchanged.
     fn on_window_shown(&mut self) {
+        // Visibility gate (issue #4): the window is back on screen. Clear the
+        // hidden flag and resume CEF's OSR painting on every live page BEFORE
+        // the resize cascade, so the re-paint CEF emits below is delivered.
+        if self.hidden {
+            self.hidden = false;
+            self.set_all_pages_hidden(false);
+        }
         if let Some(window) = self.window.clone() {
             let size = window.inner_size();
             self.handle_resize(size);
@@ -4095,6 +4200,10 @@ impl ShellApp {
             self.chrome_paints = 0;
             self.content_paints = 0;
         }
+        // Re-shown surface must repaint regardless of whether CEF has delivered a
+        // new frame yet (handle_resize already sets dirty, but be explicit — the
+        // window-shown path is also reached without a geometry change).
+        self.dirty = true;
     }
 
     /// Returns `true` when a chrome-rendered overlay (approval dialog or
@@ -4894,6 +5003,17 @@ impl ApplicationHandler for ShellApp {
             WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
                 self.on_window_shown();
             }
+            // Issue #4 visibility gate: the window is fully occluded (e.g. moved
+            // to another workspace / behind another window). Tell CEF to stop
+            // OSR painting on every live page and skip render/redraw while
+            // hidden — the idle-hidden CPU/GPU burn this bug reports.
+            //
+            // Gate on `Occluded`, NOT focus-lost: a visible-but-unfocused window
+            // (user clicked another app while Mote stays on screen) must keep
+            // painting; freezing it would leave a stale surface on screen.
+            WindowEvent::Occluded(true) => {
+                self.on_window_hidden();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (cursor_px(position.x), cursor_px(position.y));
                 self.route_mouse_move();
@@ -5005,8 +5125,18 @@ impl ApplicationHandler for ShellApp {
             );
         }
 
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        // Issue #4 render gate: only ask the window to redraw when the composited
+        // output actually changed (dirty) and the window is visible. A clean,
+        // visible, idle window (no new frame) issues no redraw — the idle-CPU
+        // win; a hidden window never redraws (CEF OSR painting is suspended).
+        // Clear `dirty` once the redraw is issued so the next idle tick is quiet.
+        // Poll + the 4ms sleep are RETAINED so CEF's external message pump stays
+        // serviced every tick regardless of the gate (do not switch to Wait).
+        if should_request_redraw(self.dirty, self.hidden) {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            self.dirty = false;
         }
         std::thread::sleep(Duration::from_millis(4));
     }
@@ -5098,6 +5228,27 @@ const WHEEL_STEP_PX: f64 = 40.0;
 )]
 const fn wheel_delta(px: f64) -> i32 {
     px.round() as i32
+}
+
+/// Decide whether the event loop should issue a `request_redraw` this tick
+/// (issue #4 render gate).
+///
+/// The shell keeps `ControlFlow::Poll` so CEF's external message pump stays
+/// serviced every tick, but the *render/upload* work is gated:
+///
+/// - `hidden` (window occluded / on another workspace) ⇒ **never** redraw. CEF
+///   is told to stop OSR painting via `Page::was_hidden(true)`, so there is no
+///   new frame to composite and re-rendering the last one wastes GPU.
+/// - otherwise redraw **only when `dirty`** — something that affects the
+///   composited output changed since the last render (a new chrome/content
+///   frame, a resize, a tab switch, an overlay toggle, a scale change, or the
+///   window being re-shown). A clean, visible, idle window does not redraw.
+///
+/// The caller clears `dirty` once the redraw is issued (see
+/// [`ShellApp::about_to_wait`]). Extracted as a pure function so the gate is
+/// unit-testable without a live CEF-backed `ShellApp`.
+const fn should_request_redraw(dirty: bool, hidden: bool) -> bool {
+    dirty && !hidden
 }
 
 /// Divide a window-physical pixel coordinate by the display `scale` to get the
@@ -6063,6 +6214,65 @@ mod tests {
         assert_eq!(w, 1280 - VIEWPORT_LEFT);
         assert_eq!(h, 800 - VIEWPORT_TOP);
         assert_eq!(viewport_size(0, 0, VIEWPORT_LEFT, VIEWPORT_TOP), (1, 1));
+    }
+
+    // ── Issue #4: idle render gate ────────────────────────────────────────────
+    //
+    // The event loop's render decision is extracted into `should_request_redraw`
+    // so the two gates (damage/dirty + visibility/occlusion) are unit-testable
+    // without a live CEF-backed `ShellApp`. These pin the truth table the gate
+    // MUST satisfy so a regression (e.g. dropping the `!hidden` term, or
+    // redrawing while clean) surfaces here rather than as a stale surface or a
+    // CPU-burning idle loop in the real app.
+
+    /// A hidden window NEVER redraws, regardless of dirty state — CEF is told to
+    /// stop OSR painting, so there is nothing fresh to composite.
+    #[test]
+    fn render_gate_hidden_never_redraws() {
+        assert!(
+            !should_request_redraw(true, true),
+            "hidden + dirty must not redraw (occluded window stays dark to CEF)"
+        );
+        assert!(
+            !should_request_redraw(false, true),
+            "hidden + clean must not redraw"
+        );
+    }
+
+    /// A visible window redraws exactly when it is dirty.
+    #[test]
+    fn render_gate_visible_redraws_only_when_dirty() {
+        assert!(
+            should_request_redraw(true, false),
+            "visible + dirty must redraw (new frame / resize / overlay / tab switch)"
+        );
+        assert!(
+            !should_request_redraw(false, false),
+            "visible + clean (idle) must NOT redraw — this is the idle-CPU win"
+        );
+    }
+
+    /// Models the `about_to_wait` lifecycle: a redraw is issued only when the
+    /// gate opens, and the dirty flag clears afterwards so the next idle tick
+    /// does not redraw again. (The real loop clears `dirty` after issuing the
+    /// redraw; this pins that contract.)
+    #[test]
+    fn render_gate_dirty_clears_after_redraw() {
+        let mut dirty = true;
+        let hidden = false;
+
+        // Tick 1: dirty + visible ⇒ redraw, then clear.
+        let redraw = should_request_redraw(dirty, hidden);
+        assert!(redraw, "first tick after a state change must redraw");
+        if redraw {
+            dirty = false;
+        }
+
+        // Tick 2: clean + visible ⇒ no redraw (the idle case).
+        assert!(
+            !should_request_redraw(dirty, hidden),
+            "after the redraw the flag is clear, so the next idle tick must not redraw"
+        );
     }
 
     // ── R1 resize-cascade coverage ────────────────────────────────────────────
