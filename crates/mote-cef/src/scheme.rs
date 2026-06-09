@@ -57,7 +57,8 @@ use cef::{
     wrap_scheme_handler_factory,
 };
 
-/// The privileged internal scheme name. Registered standard/secure/local.
+/// The privileged internal scheme name. Registered standard + secure +
+/// display-isolated + CORS/fetch-enabled (see [`chrome_scheme_options`]).
 pub const CHROME_SCHEME: &str = "mote";
 
 /// The privileged chrome host (the `mote://chrome` authority).
@@ -265,17 +266,36 @@ fn url_path_for(url: &str, origin: &str) -> String {
     reason = "SchemeRegistrar borrows a CEF-owned registrar passed as &mut by the App callback; we must not move it out"
 )]
 pub(crate) fn register_custom_scheme(registrar: &SchemeRegistrar) {
-    // STANDARD: parse as a normal hierarchical URL (origin = scheme://host).
-    // SECURE:   treated like https (secure context; no mixed-content downgrade).
-    // LOCAL:    file-like security (untrusted pages cannot link to / access it).
-    // CORS/FETCH: let the chrome document fetch its own same-origin assets.
+    registrar.add_custom_scheme(
+        Some(&CefString::from(CHROME_SCHEME)),
+        chrome_scheme_options(),
+    );
+}
+
+/// The exact `SchemeOptions` bitmask the `mote` scheme is registered with, as the
+/// `i32` CEF expects. Pulled out so a test can pin it (ADR-0005 amendment
+/// 2026-06-09 — the audit found the registered flags had drifted from the comment).
+///
+/// - `STANDARD`: parse as a normal hierarchical URL (origin = `scheme://host`).
+/// - `SECURE`: treated like `https` (secure context; no mixed-content downgrade).
+/// - `DISPLAY_ISOLATED`: a `mote://` document is displayable only from same-scheme
+///   content — the engine itself refuses `http(s)`→`mote://` framing, restoring the
+///   first line of the framing defense below the router-per-browser layer.
+/// - `CORS_ENABLED`/`FETCH_ENABLED`: let the chrome document fetch its own
+///   same-origin assets (CSS/JS).
+///
+/// `LOCAL` is deliberately **not** set: it would impose `file://`-like
+/// restrictions that block the chrome document fetching its own same-origin
+/// assets. `DISPLAY_ISOLATED` provides the cross-origin framing protection the
+/// amendment requires without that cost.
+fn chrome_scheme_options() -> i32 {
     let options = SchemeOptions::STANDARD.get_raw()
         | SchemeOptions::SECURE.get_raw()
+        | SchemeOptions::DISPLAY_ISOLATED.get_raw()
         | SchemeOptions::CORS_ENABLED.get_raw()
         | SchemeOptions::FETCH_ENABLED.get_raw();
     // `get_raw` returns u32 of small bitflags; the cast is lossless.
-    let options = i32::try_from(options).unwrap_or(0);
-    registrar.add_custom_scheme(Some(&CefString::from(CHROME_SCHEME)), options);
+    i32::try_from(options).unwrap_or(0)
 }
 
 // =============================================================================
@@ -491,9 +511,47 @@ fn register_host_factory(host: &str, origin: &'static str, resources: Arc<Chrome
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ORIGIN, ChromeResources, OVERLAY_ORIGIN, chrome_url, is_chrome_origin,
-        is_mote_scheme, normalize_path, overlay_url, split_content_type, url_path_for,
+        CHROME_ORIGIN, ChromeResources, OVERLAY_ORIGIN, SchemeOptions, chrome_scheme_options,
+        chrome_url, is_chrome_origin, is_mote_scheme, normalize_path, overlay_url,
+        split_content_type, url_path_for,
     };
+
+    /// Pin the exact `SchemeOptions` bitmask the `mote` scheme is registered with
+    /// (ADR-0005 amendment 2026-06-09 — the audit found the registered flags had
+    /// silently drifted from the documented set, omitting the framing protection).
+    ///
+    /// The framing protection (`DISPLAY_ISOLATED`) is the load-bearing flag: it
+    /// makes the engine itself refuse `http(s)`→`mote://` framing. `LOCAL` must
+    /// stay unset or the chrome document cannot fetch its own same-origin assets.
+    #[test]
+    fn chrome_scheme_flags_are_pinned() {
+        let expected = i32::try_from(
+            SchemeOptions::STANDARD.get_raw()
+                | SchemeOptions::SECURE.get_raw()
+                | SchemeOptions::DISPLAY_ISOLATED.get_raw()
+                | SchemeOptions::CORS_ENABLED.get_raw()
+                | SchemeOptions::FETCH_ENABLED.get_raw(),
+        )
+        .expect("scheme option bitmask fits in i32");
+        let actual = chrome_scheme_options();
+        assert_eq!(
+            actual, expected,
+            "registered mote scheme flags must be exactly STANDARD|SECURE|DISPLAY_ISOLATED|CORS|FETCH"
+        );
+
+        let display_isolated = i32::try_from(SchemeOptions::DISPLAY_ISOLATED.get_raw()).unwrap();
+        assert_ne!(
+            actual & display_isolated,
+            0,
+            "DISPLAY_ISOLATED must be set (refuses http(s)->mote:// framing — ADR-0005 amendment)"
+        );
+        let local = i32::try_from(SchemeOptions::LOCAL.get_raw()).unwrap();
+        assert_eq!(
+            actual & local,
+            0,
+            "LOCAL must NOT be set — it blocks the chrome document fetching its own assets"
+        );
+    }
 
     #[test]
     fn split_content_type_separates_mime_and_charset() {

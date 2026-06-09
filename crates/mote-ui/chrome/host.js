@@ -16,33 +16,6 @@
 (function () {
   "use strict";
 
-  function installInvoke() {
-    if (typeof window.cefQuery !== "function") {
-      // No privileged transport — either not the chrome origin or the router
-      // is not attached. Fail closed: no window.mote.
-      return false;
-    }
-    window.mote = window.mote || {};
-    window.mote.invoke = function (op, params) {
-      return new Promise(function (resolve, reject) {
-        window.cefQuery({
-          request: JSON.stringify({ op: op, params: params || {} }),
-          onSuccess: function (response) {
-            try {
-              resolve(JSON.parse(response));
-            } catch (e) {
-              resolve(response);
-            }
-          },
-          onFailure: function (code, message) {
-            reject({ code: code, message: message });
-          },
-        });
-      });
-    };
-    return true;
-  }
-
   // ---- Completion popup helpers ------------------------------------------
 
   // Return the completion dropdown element and the current selected index (-1
@@ -2739,7 +2712,12 @@
   }
 
   function boot() {
-    installInvoke();
+    // mote-bridge.js (loaded before host.js) has already installed
+    // window.mote.invoke by wrapping window.cefQuery. If the bridge did not
+    // run (non-privileged origin or router not yet attached), fail closed.
+    if (!window.mote || typeof window.mote.invoke !== "function") {
+      return;
+    }
     wireOmnibox();
     wireBookmarkToggle();
     wireCloseWindowButton();

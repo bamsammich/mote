@@ -792,6 +792,26 @@ impl std::ops::Deref for ChromePage {
     }
 }
 
+impl ChromePage {
+    /// Surrender the inner [`Page`].
+    ///
+    /// The browser-side router (layer 2) is owned by the chrome client, which CEF
+    /// holds for the lifetime of the page's `Browser` (inside the returned
+    /// [`Page`]) — **not** by this wrapper. So the bridge stays wired after the
+    /// `ChromePage` marker is dropped: the returned `Page` keeps carrying the
+    /// router. Used by the shell to store a privileged settings page in its
+    /// (content-shaped) tab list while preserving the bridge, without rippling a
+    /// new tab-page type through the whole shell.
+    ///
+    /// This is safe-by-construction: the only way to obtain a `ChromePage` is via
+    /// [`crate::HostBridge`] from a [`ChromePageRequest`], so a content page can
+    /// never reach this path.
+    #[must_use]
+    pub fn into_inner(self) -> Page {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

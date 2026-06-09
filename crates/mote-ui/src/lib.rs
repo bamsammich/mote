@@ -61,6 +61,14 @@ pub const BASE_CSS: &str = include_str!("../chrome/base.css");
 /// The chrome document: the `[data-slot]` slot-grid scaffold (default layout).
 pub const CHROME_HTML: &str = include_str!("../chrome/chrome.html");
 
+/// Canonical bridge bootstrap (ADR-0005).
+///
+/// Wraps `window.cefQuery` into `window.mote.invoke`. Shared by `chrome.html`
+/// and all privileged `mote://chrome` pages (settings sections). Must be loaded
+/// BEFORE `host.js` on the chrome page and BEFORE `settings.js` on every
+/// settings page.
+pub const MOTE_BRIDGE_JS: &str = include_str!("../chrome/mote-bridge.js");
+
 /// Shared roving-focus helper (CL-KBNAV).
 ///
 /// Pure selection nav-math plus a dual-mode (`activedescendant` / `roving`) DOM
@@ -724,6 +732,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mote_bridge_js_never_uses_innerhtml() {
+        // mote-bridge.js carries the canonical bridge bootstrap (ADR-0005);
+        // the same structured-DOM discipline applies.
+        let code = js_strip_noncode(MOTE_BRIDGE_JS);
+        for needle in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            assert!(
+                !code.contains(needle),
+                "mote-bridge.js executable code must not contain `{needle}` (ADR-0005)",
+            );
+        }
+    }
+
     /// Raw-source check for the most-likely concat-evasion of the strip-and-
     /// grep tests above: `"inner" + "HTML"` survives comment + literal
     /// stripping because each fragment is a separate string literal. This
@@ -763,6 +784,23 @@ mod tests {
     }
 
     #[test]
+    fn mote_bridge_js_no_string_concat_evasion() {
+        for needle in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            for evasion in [
+                format!("+\"{needle}"),
+                format!("+'{needle}"),
+                format!("+ \"{needle}"),
+                format!("+ '{needle}"),
+            ] {
+                assert!(
+                    !MOTE_BRIDGE_JS.contains(&evasion),
+                    "mote-bridge.js must not concat `{needle}` via string fragments (`{evasion}`)"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn settings_js_never_uses_innerhtml() {
         // settings.js is the shared chrome bridge for the settings panel —
         // the ADR-0005 structured-DOM discipline applies equally.
@@ -787,6 +825,37 @@ mod tests {
                 assert!(
                     !SETTINGS_JS.contains(&evasion),
                     "settings.js must not concat `{needle}` via string fragments (`{evasion}`)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn roving_js_never_uses_innerhtml() {
+        // roving.js is the shared roving-focus helper loaded into the privileged
+        // chrome root (window.mote.roving) BEFORE host.js — it was the one
+        // chrome-root script outside the structured-DOM grep net (ADR-0005).
+        let code = js_strip_noncode(ROVING_JS);
+        for needle in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            assert!(
+                !code.contains(needle),
+                "roving.js executable code must not contain `{needle}` (ADR-0005)"
+            );
+        }
+    }
+
+    #[test]
+    fn roving_js_no_string_concat_evasion() {
+        for needle in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            for evasion in [
+                format!("+\"{needle}"),
+                format!("+'{needle}"),
+                format!("+ \"{needle}"),
+                format!("+ '{needle}"),
+            ] {
+                assert!(
+                    !ROVING_JS.contains(&evasion),
+                    "roving.js must not concat `{needle}` via string fragments (`{evasion}`)"
                 );
             }
         }
@@ -878,6 +947,49 @@ mod tests {
             host_pos < panels_pos,
             "chrome.html must load host.js before panels.js"
         );
+    }
+
+    #[test]
+    fn chrome_html_loads_mote_bridge_before_host_js() {
+        // mote-bridge.js installs window.mote.invoke; host.js's boot() guard
+        // depends on it. mote-bridge.js must appear before host.js.
+        let bridge_pos = CHROME_HTML
+            .find("src=\"mote-bridge.js\"")
+            .expect("chrome.html must load mote-bridge.js via a script tag");
+        let host_pos = CHROME_HTML
+            .find("src=\"host.js\"")
+            .expect("chrome.html must load host.js via a script tag");
+        assert!(
+            bridge_pos < host_pos,
+            "chrome.html must load mote-bridge.js before host.js"
+        );
+    }
+
+    #[test]
+    fn settings_html_pages_load_mote_bridge_before_settings_js() {
+        // Each settings section page must load ../mote-bridge.js BEFORE
+        // settings.js. The `../` prefix is required: settings pages are served
+        // under `settings/`, so a bare `mote-bridge.js` would 404.
+        let pages = [
+            ("general.html", SETTINGS_GENERAL_HTML),
+            ("plugins.html", SETTINGS_PLUGINS_HTML),
+            ("integrity.html", SETTINGS_INTEGRITY_HTML),
+            ("keybinds.html", SETTINGS_KEYBINDS_HTML),
+        ];
+        for (name, html) in pages {
+            let bridge_pos = html.find("src=\"../mote-bridge.js\"").unwrap_or_else(|| {
+                panic!(
+                    "settings/{name} must load ../mote-bridge.js (with ../ path) via a script tag"
+                )
+            });
+            let settings_pos = html.find("src=\"settings.js\"").unwrap_or_else(|| {
+                panic!("settings/{name} must load settings.js via a script tag")
+            });
+            assert!(
+                bridge_pos < settings_pos,
+                "settings/{name} must load ../mote-bridge.js before settings.js"
+            );
+        }
     }
 
     #[test]

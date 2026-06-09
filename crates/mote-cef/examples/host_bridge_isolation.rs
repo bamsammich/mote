@@ -14,13 +14,21 @@
 //!      The `ack` op firing with the echoed value proves a full bidirectional
 //!      JS→Rust→JS→Rust round-trip with structured data (never eval).
 //!
-//!   2. ISOLATION: a second `Content`-role page (an untrusted-web-content
-//!      stand-in, loaded from a `data:` URL — it can never carry the
-//!      `mote://chrome` origin) probes for `window.mote` / `window.cefQuery` and
-//!      tries to call a uniquely-named `content_probe` op. Because the renderer
-//!      ORIGIN gate (layer 1) never installs the binding for a non-`mote://chrome`
-//!      origin AND the browser-side router (layer 2) is attached only to the
-//!      chrome client, the `content_probe` op MUST NEVER fire.
+//!   2. SETTINGS (ADR-0005 amendment 2026-06-09): a SECOND privileged
+//!      `mote://chrome` page (a settings section) opened via
+//!      `HostBridge::open_chrome_page` — its client carries a router wired to the
+//!      SAME registry. It calls a uniquely-named `settings_probe` op; that op
+//!      firing proves every `mote://chrome` page (root + settings) is
+//!      bridge-bearing, not just the root.
+//!
+//!   3. ISOLATION: a `Content`-role page (an untrusted-web-content stand-in,
+//!      loaded from a `data:` URL — it can never carry the `mote://chrome`
+//!      origin) probes for `window.mote` / `window.cefQuery` and tries to call a
+//!      uniquely-named `content_probe` op. Because the renderer ORIGIN gate
+//!      (layer 1) never installs the binding for a non-`mote://chrome` origin AND
+//!      the browser-side router (layer 2) is attached only to `mote://chrome`
+//!      clients (via the `ChromePageRequest` type marker), the `content_probe` op
+//!      MUST NEVER fire.
 //!
 //! Evidence is collected entirely in Rust via the op registry (atomic flags the
 //! op handlers set) — no title side-channel needed. The op handlers are the
@@ -79,6 +87,25 @@ else if(hasMote){window.mote.invoke('content_probe',{});}\
 document.getElementById('out').textContent=(!hasMote&&!hasCef)?'isolated':'LEAK';\
 })();</script></body></html>";
 
+// A privileged SETTINGS page (ADR-0005 amendment 2026-06-09). Served from the
+// same `mote://chrome` origin as the root, opened via `HostBridge::open_chrome_page`
+// so its client carries a router wired to the SAME OpRegistry. It fires a
+// uniquely-named `settings_probe` op; that op firing proves a second bridge-bearing
+// `mote://chrome` page reaches the registry (the fix), while content stays isolated.
+const SETTINGS_HTML: &str = "<!doctype html><html><head>\
+<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' mote:; script-src 'unsafe-inline'; connect-src mote:\">\
+</head><body><div id=out>pending</div><script>\
+(function(){\
+if(typeof window.cefQuery!=='function'){document.getElementById('out').textContent='NO-CEFQUERY';return;}\
+window.mote={invoke:function(op,params){return new Promise(function(res,rej){\
+window.cefQuery({request:JSON.stringify({op:op,params:params||{}}),\
+onSuccess:function(r){try{res(JSON.parse(r));}catch(e){res(r);}},\
+onFailure:function(c,m){rej({code:c,message:m});}});});}};\
+window.mote.invoke('settings_probe',{n:7}).then(function(){\
+document.getElementById('out').textContent='done';})\
+.catch(function(e){document.getElementById('out').textContent='err';});\
+})();</script></body></html>";
+
 fn data_url(html: &str) -> String {
     // The untrusted content stand-in is loaded from a `data:` URL — its origin is
     // opaque and can NEVER be the privileged `mote://chrome` origin, so the
@@ -130,24 +157,41 @@ fn main() -> ExitCode {
     // STEP 2b: the HOST registers the chrome assets served from mote://chrome/...
     // (in production these are mote-ui's embedded assets; mote-cef never depends
     // on mote-ui). An unregistered path would 404.
-    engine.register_chrome_resources(ChromeResources::new().register(
-        "index.html",
-        CHROME_HTML,
-        "text/html; charset=utf-8",
-    ));
+    engine.register_chrome_resources(
+        ChromeResources::new()
+            .register("index.html", CHROME_HTML, "text/html; charset=utf-8")
+            // A second privileged `mote://chrome` page (a settings section).
+            .register(
+                "settings/integrity",
+                SETTINGS_HTML,
+                "text/html; charset=utf-8",
+            ),
+    );
 
     // Ground-truth flags the op handlers flip. These are the ONLY evidence
     // channel — there is no way for content to set them without the bridge.
     let ping_n = Arc::new(AtomicI64::new(-1));
     let ack_got = Arc::new(AtomicI64::new(-1));
     let content_reached = Arc::new(AtomicBool::new(false));
+    // ADR-0005 amendment: a second bridge-bearing `mote://chrome` page reaching
+    // the SAME registry. `settings_probe` firing proves the fix.
+    let settings_n = Arc::new(AtomicI64::new(-1));
 
     // STEP 3: the closed op registry — three structured ops, never eval.
     let registry = {
         let ping_got = Arc::clone(&ping_n);
         let ag = Arc::clone(&ack_got);
         let cr = Arc::clone(&content_reached);
+        let sn = Arc::clone(&settings_n);
         OpRegistry::new()
+            .register("settings_probe", move |params: &str| {
+                // Fired by the second bridge-bearing `mote://chrome` page. Reaching
+                // here proves `HostBridge::open_chrome_page` wired its router to the
+                // SAME registry.
+                let n = extract_i64(params, "n").unwrap_or(-1);
+                sn.store(n, Ordering::SeqCst);
+                OpResponse::ok("{\"ok\":true}")
+            })
             .register("ping", move |params: &str| {
                 // JS→Rust proven. Echo the structured `n` back as structured data.
                 let n = extract_i64(params, "n").unwrap_or(0);
@@ -193,6 +237,31 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // STEP 4b: a SECOND privileged `mote://chrome` page (a settings section),
+    // opened via `HostBridge::open_chrome_page` — the ADR-0005 amendment path.
+    // Its client carries a router wired to the SAME registry. Only a
+    // `ChromePageRequest` (the type marker) can mint it; a content page cannot.
+    let settings_req = ChromePageRequest::new(
+        &chrome_url("settings/integrity"),
+        &PageOptions {
+            width: 320,
+            height: 240,
+            frame_rate: 30,
+            role: PageRole::Chrome,
+        },
+    );
+    let settings = match bridge.open_chrome_page(settings_req) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("FAIL: HostBridge::open_chrome_page: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if settings.role() != PageRole::Chrome {
+        eprintln!("FAIL: settings page is not Chrome role");
+        return ExitCode::FAILURE;
+    }
+
     // STEP 5: an untrusted content page (default Content role, no bridge).
     let content = match Page::new(
         &data_url(CONTENT_HTML),
@@ -210,18 +279,21 @@ fn main() -> ExitCode {
         }
     };
 
-    // STEP 6: pump until the chrome round-trip completes (both ping + ack fired)
+    // STEP 6: pump until the chrome round-trip completes (ping + ack) AND the
+    // second bridge-bearing settings page reaches the registry (settings_probe),
     // or timeout. Content runs its probe on load in the same window.
     let start = Instant::now();
     loop {
         engine.pump();
         std::thread::sleep(Duration::from_millis(5));
-        let done = ping_n.load(Ordering::SeqCst) >= 0 && ack_got.load(Ordering::SeqCst) >= 0;
+        let done = ping_n.load(Ordering::SeqCst) >= 0
+            && ack_got.load(Ordering::SeqCst) >= 0
+            && settings_n.load(Ordering::SeqCst) >= 0;
         if done {
             break;
         }
         if start.elapsed().as_secs() > 20 {
-            eprintln!("TIMEOUT waiting for chrome round-trip");
+            eprintln!("TIMEOUT waiting for chrome round-trip / settings probe");
             break;
         }
     }
@@ -230,14 +302,17 @@ fn main() -> ExitCode {
 
     let ping_got = ping_n.load(Ordering::SeqCst);
     let ag = ack_got.load(Ordering::SeqCst);
+    let settings_got = settings_n.load(Ordering::SeqCst);
     let leaked = content_reached.load(Ordering::SeqCst);
 
     let roundtrip_ok = ping_got == 3 && ag == 3;
+    let settings_ok = settings_got == 7;
     let isolated_ok = !leaked;
 
     println!("\n================ HOST-BRIDGE ISOLATION PROOF ================");
-    println!("ping op got n   = {ping_got} (expected 3)");
-    println!("ack  op got got = {ag} (expected 3, proves Rust->JS->Rust)");
+    println!("ping op got n         = {ping_got} (expected 3)");
+    println!("ack  op got got       = {ag} (expected 3, proves Rust->JS->Rust)");
+    println!("settings_probe got n  = {settings_got} (expected 7, 2nd bridge-bearing page)");
     println!("content_probe op fired = {leaked} (expected false)");
     println!("-------------------------------------------------------------");
     println!(
@@ -245,12 +320,16 @@ fn main() -> ExitCode {
         if roundtrip_ok { "PASS" } else { "FAIL" }
     );
     println!(
+        "SETTINGS   (2nd mote://chrome page reaches registry): {}",
+        if settings_ok { "PASS" } else { "FAIL" }
+    );
+    println!(
         "ISOLATION  (content cannot reach the bridge):        {}",
         if isolated_ok { "PASS" } else { "FAIL" }
     );
     println!(
         "OVERALL: {}",
-        if roundtrip_ok && isolated_ok {
+        if roundtrip_ok && settings_ok && isolated_ok {
             "GO"
         } else {
             "NO-GO"
@@ -260,6 +339,7 @@ fn main() -> ExitCode {
 
     // Tidy up.
     bridge.page().close();
+    settings.close();
     content.close();
     for _ in 0..30 {
         engine.pump();
@@ -267,7 +347,7 @@ fn main() -> ExitCode {
     }
     engine.shutdown();
 
-    if roundtrip_ok && isolated_ok {
+    if roundtrip_ok && settings_ok && isolated_ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

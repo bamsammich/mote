@@ -524,6 +524,34 @@ impl HostBridge {
         Ok(Self { chrome, registry })
     }
 
+    /// Open an **additional** privileged chrome page wired to this bridge's
+    /// [`OpRegistry`] (ADR-0005 amendment 2026-06-09).
+    ///
+    /// The chrome root and the enumerated settings sections are all `mote://chrome`
+    /// pages and must all carry the full bridge (layer 1 renderer binding + layer 2
+    /// browser-side router). This opens such a page: it builds a fresh browser-side
+    /// router bound to the **same** `registry` as the root bridge and attaches it
+    /// to the new page's chrome client.
+    ///
+    /// **Safe-by-construction is preserved.** The router is attached only because
+    /// the caller produced a [`crate::ChromePageRequest`] — the `PageRole::Chrome`
+    /// type marker, unrepresentable for a content [`crate::Page`]. There is no
+    /// runtime URL check here; selecting which URLs are eligible for this path
+    /// (the enumerated settings whitelist) is the caller's responsibility, and a
+    /// content/overlay tab can never construct the `ChromePageRequest` this
+    /// requires. `chrome_client` (which attaches the router) stays unreachable
+    /// except through [`crate::ChromePageRequest::open`].
+    ///
+    /// The returned [`crate::ChromePage`] owns its own `Browser`; its router lives
+    /// as long as that browser. Dropping the page tears the router down with it.
+    ///
+    /// # Errors
+    /// [`CefError::BrowserCreate`] if the chrome browser could not be created.
+    pub fn open_chrome_page(&self, request: crate::ChromePageRequest) -> Result<crate::ChromePage> {
+        let router = browser_side_router(Arc::clone(&self.registry));
+        request.open(router)
+    }
+
     /// The chrome page this bridge drives.
     #[must_use]
     pub const fn page(&self) -> &crate::ChromePage {

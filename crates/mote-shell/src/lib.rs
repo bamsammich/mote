@@ -685,6 +685,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let active: usize = 0;
     let tabs = build_initial_tabs(
+        &bridge,
         &mut session,
         &ns,
         workspace,
@@ -755,6 +756,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// CLI URL (the first live, the rest placeholders) and flush. The active tab is
 /// index 0; its page is always materialized so the window is not blank.
 fn build_initial_tabs(
+    bridge: &HostBridge,
     session: &mut Session,
     ns: &mote_storage::Namespace,
     workspace: WorkspaceId,
@@ -782,7 +784,12 @@ fn build_initial_tabs(
         for (i, url) in urls.into_iter().enumerate() {
             let id = session.add_tab(url.clone(), workspace);
             let page = if i == 0 {
-                Some(create_content_page(&url, content_opts, default_profile)?)
+                Some(create_tab_page(
+                    bridge,
+                    &url,
+                    content_opts,
+                    default_profile,
+                )?)
             } else {
                 None
             };
@@ -797,7 +804,7 @@ fn build_initial_tabs(
     } else {
         // Restored: materialize the active tab eagerly so the window is not blank.
         let url = tabs[0].url.clone();
-        if let Ok(page) = create_content_page(&url, content_opts, default_profile) {
+        if let Ok(page) = create_tab_page(bridge, &url, content_opts, default_profile) {
             tabs[0].page = Some(page);
         }
     }
@@ -910,10 +917,13 @@ fn is_popup_url_allowed(url: &str) -> bool {
 /// Returns `None` for any other URL — including `mote://chrome/settings/bogus`.
 /// The whitelist prevents future typo-driven 404s (ADR-0017 §URL whitelist).
 ///
-/// Currently only exercised in tests; the production routing relies on the
-/// registered path set in `build_chrome_resources()`. Will be wired into the
-/// live URL handler in the navigation phase.
-#[cfg(test)]
+/// This is the **bridge-bearing-tab gate** (ADR-0005 amendment 2026-06-09). A
+/// settings URL that matches this enumerated whitelist is opened onto the
+/// privileged chrome-page path (router-bearing); every other URL — including a
+/// crafted `mote://chrome/<arbitrary>` — is opened router-less. The trust unit is
+/// the `ChromePageRequest` type marker; this predicate only decides *which*
+/// whitelisted URLs are eligible to mint one, never a raw `mote://chrome/*`
+/// prefix.
 pub(crate) fn settings_section_from_url(url: &str) -> Option<&'static str> {
     const BASE: &str = "mote://chrome/settings/";
     let section = url.strip_prefix(BASE)?;
@@ -1064,6 +1074,11 @@ fn build_chrome_resources() -> ChromeResources {
             "text/html; charset=utf-8",
         )
         .register(
+            "mote-bridge.js",
+            mote_ui::MOTE_BRIDGE_JS,
+            "text/javascript; charset=utf-8",
+        )
+        .register(
             "roving.js",
             mote_ui::ROVING_JS,
             "text/javascript; charset=utf-8",
@@ -1188,6 +1203,43 @@ fn create_content_page(
     } else {
         // Per-identity profile context — all untrusted web content.
         Page::with_profile(url, opts, profile)
+    }
+}
+
+/// Create the [`Page`] for a new tab at `url`, routing privileged settings
+/// sections onto the **bridge-bearing** chrome-page path (ADR-0005 amendment
+/// 2026-06-09) and everything else onto the router-less content/overlay path.
+///
+/// This is the single tab-creation routing point. A URL matching the enumerated
+/// settings whitelist ([`settings_section_from_url`]) is opened as a privileged
+/// [`mote_cef::ChromePage`] via [`HostBridge::open_chrome_page`] — its client
+/// carries the browser-side router wired to the same [`mote_cef::OpRegistry`] as
+/// the chrome root, so the in-settings transport (section-nav, the H14/H16
+/// integrity surfaces) works. The returned `Page` keeps carrying that router
+/// (the router lives in the page's `Browser`, not the `ChromePage` wrapper).
+///
+/// Every other URL — untrusted `http(s)` content, `mote://overlay` surfaces
+/// (picker / integrity panel), `mote://chrome/newtab.html`, and any
+/// non-whitelisted `mote://chrome/*` — goes through [`create_content_page`] and
+/// is **router-less**. Safe-by-construction: only a whitelisted settings URL can
+/// reach the `ChromePageRequest` type marker that mints the router.
+fn create_tab_page(
+    bridge: &HostBridge,
+    url: &str,
+    opts: &PageOptions,
+    profile: &ProfileHandle,
+) -> mote_cef::Result<Page> {
+    if settings_section_from_url(url).is_some() {
+        let chrome_req = ChromePageRequest::new(
+            url,
+            &PageOptions {
+                role: PageRole::Chrome,
+                ..opts.clone()
+            },
+        );
+        Ok(bridge.open_chrome_page(chrome_req)?.into_inner())
+    } else {
+        create_content_page(url, opts, profile)
     }
 }
 
@@ -2382,7 +2434,13 @@ impl ShellApp {
         let url = tab.url.clone();
         let id = tab.id;
         eprintln!("mote-shell: materialize placeholder tab {id} -> {url} (workspace switch)");
-        match create_content_page(&url, &self.content_opts, &self.default_profile) {
+        let created = create_tab_page(
+            &self.bridge,
+            &url,
+            &self.content_opts,
+            &self.default_profile,
+        );
+        match created {
             Ok(page) => {
                 if let Some(t) = self.tabs.get_mut(self.active) {
                     t.page = Some(page);
@@ -2801,7 +2859,12 @@ impl ShellApp {
     fn open_tab(&mut self, url: Option<String>) {
         let url = url.unwrap_or_else(|| DEFAULT_START_URL.to_string());
         let id = self.session.add_tab(url.clone(), self.workspace);
-        let page = match create_content_page(&url, &self.content_opts, &self.default_profile) {
+        let page = match create_tab_page(
+            &self.bridge,
+            &url,
+            &self.content_opts,
+            &self.default_profile,
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: failed to create page for new tab: {e}");
@@ -2840,7 +2903,15 @@ impl ShellApp {
         }
         let url = url.to_string();
         let id = self.session.add_tab(url.clone(), self.workspace);
-        let page = match create_content_page(&url, &self.content_opts, &self.default_profile) {
+        // `is_popup_url_allowed` already dropped every `mote://` URL above, so a
+        // popup can never reach the bridge-bearing settings path; routing through
+        // the single tab-creation point keeps the invariant in one place.
+        let page = match create_tab_page(
+            &self.bridge,
+            &url,
+            &self.content_opts,
+            &self.default_profile,
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: popup tab page create failed: {e}");
@@ -2907,7 +2978,13 @@ impl ShellApp {
         if !self.tabs[idx].is_live() {
             let url = self.tabs[idx].url.clone();
             eprintln!("mote-shell: materialize placeholder tab {id} -> {url}");
-            match create_content_page(&url, &self.content_opts, &self.default_profile) {
+            let created = create_tab_page(
+                &self.bridge,
+                &url,
+                &self.content_opts,
+                &self.default_profile,
+            );
+            match created {
                 Ok(page) => self.tabs[idx].page = Some(page),
                 Err(e) => eprintln!("mote-shell: failed to materialize tab {id}: {e}"),
             }
@@ -3720,7 +3797,12 @@ impl ShellApp {
         let url = stab.url.clone();
         let title = stab.title.clone();
         eprintln!("mote-shell: reveal hidden tab {id} -> {url}");
-        let page = match create_content_page(&url, &self.content_opts, &self.default_profile) {
+        let page = match create_tab_page(
+            &self.bridge,
+            &url,
+            &self.content_opts,
+            &self.default_profile,
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: failed to materialize revealed tab {id}: {e}");
@@ -4435,8 +4517,12 @@ impl ShellApp {
         };
         eprintln!("mote-shell: reopen closed tab -> {}", closed.url);
         let id = self.session.add_tab(closed.url.clone(), self.workspace);
-        let page = match create_content_page(&closed.url, &self.content_opts, &self.default_profile)
-        {
+        let page = match create_tab_page(
+            &self.bridge,
+            &closed.url,
+            &self.content_opts,
+            &self.default_profile,
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("mote-shell: failed to reopen closed tab: {e}");
@@ -7824,12 +7910,137 @@ mod tests {
         );
     }
 
+    // ── ADR-0005 amendment (2026-06-09): tab-page routing / two-layer isolation ──
+    //
+    // The extended two-layer isolation assertion at a CEF-free, safe-by-construction
+    // seam. `tab_page_routing` mirrors `create_tab_page` + `create_content_page`:
+    // it decides, for a tab URL, whether the page is BRIDGE-BEARING (privileged
+    // `ChromePageRequest` → `PageRole::Chrome`, carries the browser-side router) or
+    // ROUTER-LESS (`PageRole::Overlay` for internal `mote://` surfaces,
+    // `PageRole::Content` for untrusted web content). The live router attachment in
+    // `mote-cef` is keyed on exactly this `ChromePageRequest` type marker; this test
+    // proves the *selection* is whitelist-gated and that only enumerated settings
+    // sections reach the bridge-bearing path.
+
+    /// How a tab URL routes: bridge-bearing (privileged) vs router-less, with the
+    /// role the page is created under. Mirrors `create_tab_page`.
+    #[derive(Debug, PartialEq, Eq)]
+    enum TabRouting {
+        /// Bridge-bearing: `ChromePageRequest` → `PageRole::Chrome`, router attached.
+        BridgeBearingChrome,
+        /// Router-less internal surface: `PageRole::Overlay`, no router.
+        RouterlessOverlay,
+        /// Router-less untrusted web content: `PageRole::Content`, no router.
+        RouterlessContent,
+    }
+
+    fn tab_page_routing(url: &str) -> TabRouting {
+        // The bridge-bearing gate is the enumerated settings whitelist — NEVER a
+        // raw `mote://chrome/*` prefix (the type-marker security constraint).
+        if settings_section_from_url(url).is_some() {
+            TabRouting::BridgeBearingChrome
+        } else if url.len() >= 7 && url[..7].eq_ignore_ascii_case("mote://") {
+            // Other internal `mote://` surfaces (newtab, overlays) are router-less.
+            TabRouting::RouterlessOverlay
+        } else {
+            // Untrusted web content (http/https/data/...).
+            TabRouting::RouterlessContent
+        }
+    }
+
+    /// The four enumerated settings sections are BRIDGE-BEARING: each opens onto
+    /// the privileged `ChromePageRequest` path so its `cefQuery` reaches the op
+    /// registry (settings section-nav + the H14/H16 integrity transport work).
+    #[test]
+    fn adr0005_settings_sections_are_bridge_bearing() {
+        for section in ["general", "plugins", "integrity", "keybinds"] {
+            assert_eq!(
+                tab_page_routing(&format!("mote://chrome/settings/{section}")),
+                TabRouting::BridgeBearingChrome,
+                "settings/{section} must be bridge-bearing (carries the browser-side router)"
+            );
+            // The `.html` deep-link form routes identically.
+            assert_eq!(
+                tab_page_routing(&format!("mote://chrome/settings/{section}.html")),
+                TabRouting::BridgeBearingChrome,
+                "settings/{section}.html must be bridge-bearing"
+            );
+        }
+    }
+
+    /// Untrusted `http(s)` content and `mote://overlay` surfaces are ROUTER-LESS —
+    /// the content backstop. This is the regression guard proving a content/overlay
+    /// client can never reach the `OpRegistry`: the bridge-bearing path is reachable
+    /// ONLY through the whitelisted settings URLs, never these.
+    #[test]
+    fn adr0005_content_and_overlay_are_router_less() {
+        // http(s) content — the untrusted web.
+        assert_eq!(
+            tab_page_routing("https://news.ycombinator.com"),
+            TabRouting::RouterlessContent,
+            "https content must be router-less (no path to the OpRegistry)"
+        );
+        assert_eq!(
+            tab_page_routing("http://example.com"),
+            TabRouting::RouterlessContent,
+            "http content must be router-less"
+        );
+        assert_eq!(
+            tab_page_routing("data:text/html,<h1>hi</h1>"),
+            TabRouting::RouterlessContent,
+            "data: content must be router-less"
+        );
+        // `mote://overlay` surfaces (tab picker, integrity PANEL) — trusted but
+        // unprivileged; they are driven Rust-side and carry no bridge.
+        assert_eq!(
+            tab_page_routing("mote://overlay/picker.html"),
+            TabRouting::RouterlessOverlay,
+            "mote://overlay picker must be router-less"
+        );
+        assert_eq!(
+            tab_page_routing("mote://overlay/integrity.html"),
+            TabRouting::RouterlessOverlay,
+            "mote://overlay integrity panel must be router-less"
+        );
+        // newtab is a privileged-origin page but NOT a settings section → router-less.
+        assert_eq!(
+            tab_page_routing("mote://chrome/newtab.html"),
+            TabRouting::RouterlessOverlay,
+            "mote://chrome/newtab.html is not a settings section → router-less"
+        );
+    }
+
+    /// A crafted non-whitelisted `mote://chrome/*` URL must NOT mint a
+    /// bridge-bearing tab — the gate is the enumerated whitelist, not the
+    /// `mote://chrome` prefix. This closes the runtime-URL-string seam the
+    /// 2026-05-26 amendment closed and the 2026-06-09 amendment preserves.
+    #[test]
+    fn adr0005_crafted_chrome_url_is_not_bridge_bearing() {
+        for crafted in [
+            "mote://chrome/settings/bogus",
+            "mote://chrome/settings/",
+            "mote://chrome/settings",
+            "mote://chrome/evil",
+            "mote://chrome/index.html",
+            "mote://chrome/../settings/integrity",
+        ] {
+            assert_ne!(
+                tab_page_routing(crafted),
+                TabRouting::BridgeBearingChrome,
+                "crafted `{crafted}` must NOT be bridge-bearing (whitelist-gated, not prefix-gated)"
+            );
+        }
+    }
+
     /// `create_content_page` must assign `PageRole::Overlay` for `mote://` URLs so
     /// the S1 navigation guard does not block the top-level `mote://chrome/newtab.html`
     /// load. Without this, the page commits a cancelled navigation and paints black.
     ///
     /// This test exercises the opts construction logic (role override) that lives
-    /// alongside the URL-routing predicate in `create_content_page`.
+    /// alongside the URL-routing predicate in `create_content_page`. (Settings URLs
+    /// no longer reach `create_content_page` — they route to the bridge-bearing
+    /// chrome path in `create_tab_page` — so this covers only the non-settings
+    /// `mote://` surfaces `create_content_page` still handles.)
     #[test]
     fn p3_create_content_page_uses_overlay_role_for_mote_urls() {
         // Replicate the role-selection logic from create_content_page.
@@ -7841,16 +8052,16 @@ mod tests {
             }
         }
 
-        // mote:// URLs must get Overlay role (exempt from S1 nav guard).
+        // Non-settings mote:// URLs must get Overlay role (exempt from S1 nav guard).
         assert_eq!(
             role_for("mote://chrome/newtab.html", PageRole::Content),
             PageRole::Overlay,
             "newtab page must use Overlay role so the S1 guard allows mote:// navigation"
         );
         assert_eq!(
-            role_for("mote://chrome/settings/general", PageRole::Content),
+            role_for("mote://overlay/picker.html", PageRole::Content),
             PageRole::Overlay,
-            "settings page must use Overlay role"
+            "overlay picker must use Overlay role"
         );
         assert_eq!(
             role_for("MOTE://chrome/newtab.html", PageRole::Content),
